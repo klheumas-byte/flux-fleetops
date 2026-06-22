@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
 import { fetchDriverActiveAssignment, type DriverActiveAssignment } from '../../lib/driver-api';
+import { clearDriverQuickActionIntent, peekDriverQuickActionIntent } from '../../lib/driver-quick-actions';
 
 type FuelLogStatus = 'submitted' | 'approved' | 'rejected';
 
@@ -183,6 +184,17 @@ export default function FuelLogs() {
   useEffect(() => {
     void loadFuelData();
   }, []);
+
+  useEffect(() => {
+    if (!activeAssignment) {
+      return;
+    }
+    if (peekDriverQuickActionIntent() !== 'log_fuel') {
+      return;
+    }
+    clearDriverQuickActionIntent();
+    setShowAddModal(true);
+  }, [activeAssignment]);
 
   const approvedLogs = logs.filter((log) => log.status === 'approved');
   const averageLitres = approvedLogs.length

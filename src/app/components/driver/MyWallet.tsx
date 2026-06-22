@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Calendar,
   CreditCard,
@@ -12,6 +12,7 @@ import {
 import type { SessionUser } from '../../lib/auth-session';
 import { submitDriverPayment, type DriverWalletData } from '../../lib/driver-api';
 import { ApiRequestError } from '../../lib/api';
+import { clearDriverQuickActionIntent, peekDriverQuickActionIntent } from '../../lib/driver-quick-actions';
 
 interface MyWalletProps {
   currentUser: SessionUser | null;
@@ -52,6 +53,17 @@ export default function MyWallet({ currentUser, walletData, onRefresh }: MyWalle
   const weeklyCycle = walletData?.weekly_cycle || null;
   const weeklyHistory = walletData?.weekly_history || [];
   const canSubmitPayment = Boolean(walletData?.active_assignment_id);
+
+  useEffect(() => {
+    if (!canSubmitPayment) {
+      return;
+    }
+    if (peekDriverQuickActionIntent() !== 'submit_collection') {
+      return;
+    }
+    clearDriverQuickActionIntent();
+    setShowSubmitModal(true);
+  }, [canSubmitPayment]);
 
   const collectionHistory = useMemo(
     () =>

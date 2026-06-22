@@ -156,3 +156,349 @@ Press CTRL+C to quit
 127.0.0.1 - - [22/Jun/2026 15:22:30] "POST /api/incidents HTTP/1.1" 201 -
 [2026-06-22 15:22:31,129] INFO in app: [Flux API] GET /api/incidents role=anonymous start=2026-06-22T15:22:30.431304+00:00 end=2026-06-22T15:22:31.129141+00:00 duration_ms=697.84 status=200
 127.0.0.1 - - [22/Jun/2026 15:22:31] "GET /api/incidents HTTP/1.1" 200 -
+[2026-06-22 15:40:17,929] INFO in app: [Flux API] OPTIONS /api/auth/me role=anonymous start=2026-06-22T15:40:17.928944+00:00 end=2026-06-22T15:40:17.929110+00:00 duration_ms=0.16 status=200
+127.0.0.1 - - [22/Jun/2026 15:40:17] "OPTIONS /api/auth/me HTTP/1.1" 200 -
+[2026-06-22 15:40:18,182] INFO in app: [Flux API] GET /api/auth/me role=anonymous start=2026-06-22T15:40:18.180714+00:00 end=2026-06-22T15:40:18.181894+00:00 duration_ms=1.17 status=401
+127.0.0.1 - - [22/Jun/2026 15:40:18] "GET /api/auth/me HTTP/1.1" 401 -
+[2026-06-22 15:40:18,579] INFO in app: [Flux API] OPTIONS /api/auth/me role=anonymous start=2026-06-22T15:40:18.579406+00:00 end=2026-06-22T15:40:18.579575+00:00 duration_ms=0.16 status=200
+127.0.0.1 - - [22/Jun/2026 15:40:18] "OPTIONS /api/auth/me HTTP/1.1" 200 -
+[2026-06-22 15:40:18,585] INFO in app: [Flux API] OPTIONS /api/auth/me role=anonymous start=2026-06-22T15:40:18.585501+00:00 end=2026-06-22T15:40:18.585650+00:00 duration_ms=0.15 status=200
+127.0.0.1 - - [22/Jun/2026 15:40:18] "OPTIONS /api/auth/me HTTP/1.1" 200 -
+[2026-06-22 15:40:18,830] INFO in app: [Flux API] GET /api/auth/me role=anonymous start=2026-06-22T15:40:18.829803+00:00 end=2026-06-22T15:40:18.830395+00:00 duration_ms=0.59 status=401
+127.0.0.1 - - [22/Jun/2026 15:40:18] "GET /api/auth/me HTTP/1.1" 401 -
+[2026-06-22 15:40:18,837] INFO in app: [Flux API] GET /api/auth/me role=anonymous start=2026-06-22T15:40:18.836907+00:00 end=2026-06-22T15:40:18.837505+00:00 duration_ms=0.58 status=401
+127.0.0.1 - - [22/Jun/2026 15:40:18] "GET /api/auth/me HTTP/1.1" 401 -
+[2026-06-22 15:53:46,146] INFO in app: [Flux API] OPTIONS /api/auth/login role=anonymous start=2026-06-22T15:53:46.146482+00:00 end=2026-06-22T15:53:46.146677+00:00 duration_ms=0.19 status=200
+127.0.0.1 - - [22/Jun/2026 15:53:46] "OPTIONS /api/auth/login HTTP/1.1" 200 -
+[2026-06-22 15:53:47,986] INFO in app: [Flux API] POST /api/auth/login role=anonymous start=2026-06-22T15:53:46.408966+00:00 end=2026-06-22T15:53:47.986174+00:00 duration_ms=1577.21 status=200
+127.0.0.1 - - [22/Jun/2026 15:53:47] "POST /api/auth/login HTTP/1.1" 200 -
+[2026-06-22 15:53:48,035] INFO in app: [Flux API] OPTIONS /api/bookings/summary role=anonymous start=2026-06-22T15:53:48.035536+00:00 end=2026-06-22T15:53:48.035736+00:00 duration_ms=0.19 status=200
+127.0.0.1 - - [22/Jun/2026 15:53:48] "OPTIONS /api/bookings/summary HTTP/1.1" 200 -
+[2026-06-22 15:53:48,346] INFO in app: [Flux API] OPTIONS /api/driver/active-assignment role=anonymous start=2026-06-22T15:53:48.345937+00:00 end=2026-06-22T15:53:48.346091+00:00 duration_ms=0.15 status=200
+127.0.0.1 - - [22/Jun/2026 15:53:48] "OPTIONS /api/driver/active-assignment HTTP/1.1" 200 -
+[2026-06-22 15:53:48,346] INFO in app: [Flux API] OPTIONS /api/driver/dashboard-summary role=anonymous start=2026-06-22T15:53:48.346723+00:00 end=2026-06-22T15:53:48.346815+00:00 duration_ms=0.09 status=200
+127.0.0.1 - - [22/Jun/2026 15:53:48] "OPTIONS /api/driver/dashboard-summary HTTP/1.1" 200 -
+[2026-06-22 15:53:48,347] INFO in app: [Flux API] OPTIONS /api/driver/wallet role=anonymous start=2026-06-22T15:53:48.347159+00:00 end=2026-06-22T15:53:48.347237+00:00 duration_ms=0.08 status=200
+127.0.0.1 - - [22/Jun/2026 15:53:48] "OPTIONS /api/driver/wallet HTTP/1.1" 200 -
+[2026-06-22 15:53:48,666] INFO in booking_service: [Flux Bookings] due reminder sweep duration_ms=163.94
+[2026-06-22 15:53:49,660] INFO in app: [Flux API] GET /api/driver/wallet role=anonymous start=2026-06-22T15:53:48.661920+00:00 end=2026-06-22T15:53:49.660590+00:00 duration_ms=998.67 status=200
+127.0.0.1 - - [22/Jun/2026 15:53:49] "GET /api/driver/wallet HTTP/1.1" 200 -
+[2026-06-22 15:53:50,057] INFO in app: [Flux API] GET /api/driver/active-assignment role=anonymous start=2026-06-22T15:53:48.660635+00:00 end=2026-06-22T15:53:50.057318+00:00 duration_ms=1396.68 status=200
+127.0.0.1 - - [22/Jun/2026 15:53:50] "GET /api/driver/active-assignment HTTP/1.1" 200 -
+[2026-06-22 15:53:50,332] INFO in app: [Flux API] GET /api/driver/dashboard-summary role=anonymous start=2026-06-22T15:53:48.661345+00:00 end=2026-06-22T15:53:50.332181+00:00 duration_ms=1670.83 status=200
+127.0.0.1 - - [22/Jun/2026 15:53:50] "GET /api/driver/dashboard-summary HTTP/1.1" 200 -
+[2026-06-22 15:53:51,051] INFO in app: [Flux API] GET /api/bookings/summary role=anonymous start=2026-06-22T15:53:48.347651+00:00 end=2026-06-22T15:53:51.051049+00:00 duration_ms=2703.4 status=200
+[2026-06-22 15:53:51,051] WARNING in app: SLOW API WARNING GET /api/bookings/summary role=anonymous duration_ms=2703.4 status=200
+127.0.0.1 - - [22/Jun/2026 15:53:51] "GET /api/bookings/summary HTTP/1.1" 200 -
+[2026-06-22 15:55:43,084] INFO in app: [Flux API] OPTIONS /api/auth/login role=anonymous start=2026-06-22T15:55:43.084700+00:00 end=2026-06-22T15:55:43.084814+00:00 duration_ms=0.11 status=200
+127.0.0.1 - - [22/Jun/2026 15:55:43] "OPTIONS /api/auth/login HTTP/1.1" 200 -
+[2026-06-22 15:55:43,862] INFO in app: [Flux API] POST /api/auth/login role=anonymous start=2026-06-22T15:55:43.335649+00:00 end=2026-06-22T15:55:43.862161+00:00 duration_ms=526.51 status=200
+127.0.0.1 - - [22/Jun/2026 15:55:43] "POST /api/auth/login HTTP/1.1" 200 -
+[2026-06-22 15:55:43,923] INFO in app: [Flux API] OPTIONS /api/faults/approvals role=anonymous start=2026-06-22T15:55:43.923428+00:00 end=2026-06-22T15:55:43.923614+00:00 duration_ms=0.18 status=200
+127.0.0.1 - - [22/Jun/2026 15:55:43] "OPTIONS /api/faults/approvals HTTP/1.1" 200 -
+[2026-06-22 15:55:44,237] INFO in app: [Flux API] OPTIONS /api/faults/critical role=anonymous start=2026-06-22T15:55:44.237244+00:00 end=2026-06-22T15:55:44.237429+00:00 duration_ms=0.19 status=200
+127.0.0.1 - - [22/Jun/2026 15:55:44] "OPTIONS /api/faults/critical HTTP/1.1" 200 -
+[2026-06-22 15:55:44,238] INFO in app: [Flux API] OPTIONS /api/bookings/summary role=anonymous start=2026-06-22T15:55:44.238514+00:00 end=2026-06-22T15:55:44.238722+00:00 duration_ms=0.2 status=200
+127.0.0.1 - - [22/Jun/2026 15:55:44] "OPTIONS /api/bookings/summary HTTP/1.1" 200 -
+[2026-06-22 15:55:44,239] INFO in app: [Flux API] OPTIONS /api/customers/summary role=anonymous start=2026-06-22T15:55:44.239431+00:00 end=2026-06-22T15:55:44.239614+00:00 duration_ms=0.18 status=200
+127.0.0.1 - - [22/Jun/2026 15:55:44] "OPTIONS /api/customers/summary HTTP/1.1" 200 -
+[2026-06-22 15:55:44,240] INFO in app: [Flux API] OPTIONS /api/dashboard/summary role=anonymous start=2026-06-22T15:55:44.240288+00:00 end=2026-06-22T15:55:44.240446+00:00 duration_ms=0.15 status=200
+127.0.0.1 - - [22/Jun/2026 15:55:44] "OPTIONS /api/dashboard/summary HTTP/1.1" 200 -
+[2026-06-22 15:55:44,541] INFO in performance: [Flux DB] faults.approvals.query duration_ms=154.09
+[2026-06-22 15:55:44,706] INFO in performance: [Flux DB] faults.load_vehicles duration_ms=164.24
+[2026-06-22 15:55:44,857] INFO in performance: [Flux DB] faults.load_users duration_ms=150.82
+[2026-06-22 15:55:44,857] INFO in performance: [Flux DB] faults.critical.query duration_ms=149.82
+[2026-06-22 15:55:44,858] INFO in fault_service: [Flux Faults] critical count=0 total_ms=150.78
+[2026-06-22 15:55:44,859] INFO in app: [Flux API] GET /api/faults/critical role=anonymous start=2026-06-22T15:55:44.551582+00:00 end=2026-06-22T15:55:44.859055+00:00 duration_ms=307.47 status=200
+127.0.0.1 - - [22/Jun/2026 15:55:44] "GET /api/faults/critical HTTP/1.1" 200 -
+[2026-06-22 15:55:44,885] INFO in booking_service: [Flux Bookings] due reminder sweep duration_ms=176.45
+[2026-06-22 15:55:45,074] INFO in performance: [Flux DB] faults.load_categories duration_ms=215.82
+[2026-06-22 15:55:45,545] INFO in performance: [Flux DB] faults.load_components duration_ms=470.96
+[2026-06-22 15:55:45,546] INFO in fault_service: [Flux Faults] approvals count=4 enrichment_ms=1004.66 total_ms=1159.47
+[2026-06-22 15:55:45,547] INFO in app: [Flux API] GET /api/faults/approvals role=anonymous start=2026-06-22T15:55:44.241271+00:00 end=2026-06-22T15:55:45.546999+00:00 duration_ms=1305.73 status=200
+127.0.0.1 - - [22/Jun/2026 15:55:45] "GET /api/faults/approvals HTTP/1.1" 200 -
+[2026-06-22 15:55:46,101] INFO in app: [Flux API] GET /api/bookings/summary role=anonymous start=2026-06-22T15:55:44.553753+00:00 end=2026-06-22T15:55:46.101918+00:00 duration_ms=1548.15 status=200
+127.0.0.1 - - [22/Jun/2026 15:55:46] "GET /api/bookings/summary HTTP/1.1" 200 -
+[2026-06-22 15:55:46,271] INFO in dashboard_service: [Flux Dashboard] summary requested role=owner
+[2026-06-22 15:55:46,612] INFO in performance: [Flux DB] dashboard.vehicle_lookup duration_ms=182.42
+[2026-06-22 15:55:46,613] INFO in app: [Flux API] GET /api/customers/summary role=anonymous start=2026-06-22T15:55:44.552752+00:00 end=2026-06-22T15:55:46.613470+00:00 duration_ms=2060.72 status=200
+[2026-06-22 15:55:46,613] WARNING in app: SLOW API WARNING GET /api/customers/summary role=anonymous duration_ms=2060.72 status=200
+127.0.0.1 - - [22/Jun/2026 15:55:46] "GET /api/customers/summary HTTP/1.1" 200 -
+[2026-06-22 15:55:46,741] INFO in performance: [Flux DB] dashboard.driver_lookup duration_ms=128.3
+[2026-06-22 15:55:47,061] INFO in performance: [Flux DB] dashboard.vehicle_counts duration_ms=318.92
+[2026-06-22 15:55:47,225] INFO in performance: [Flux DB] dashboard.driver_counts duration_ms=162.78
+[2026-06-22 15:55:47,396] INFO in performance: [Flux DB] dashboard.active_assignments duration_ms=171.02
+[2026-06-22 15:55:47,702] INFO in performance: [Flux DB] dashboard.collections duration_ms=305.5
+[2026-06-22 15:55:48,028] INFO in performance: [Flux DB] dashboard.fuel_logs duration_ms=325.39
+[2026-06-22 15:55:48,209] INFO in performance: [Flux DB] dashboard.expenses duration_ms=180.45
+[2026-06-22 15:55:48,373] INFO in performance: [Flux DB] dashboard.maintenance_jobs duration_ms=163.6
+[2026-06-22 15:55:48,531] INFO in performance: [Flux DB] dashboard.preventive_due_count duration_ms=157.44
+[2026-06-22 15:55:48,699] INFO in performance: [Flux DB] dashboard.compliance_records duration_ms=167.45
+[2026-06-22 15:55:49,020] INFO in performance: [Flux DB] dashboard.active_trip_counts duration_ms=320.48
+[2026-06-22 15:55:49,021] INFO in dashboard_service: [Flux Dashboard] summary generated role=owner duration_ms=2749.65
+[2026-06-22 15:55:49,021] WARNING in dashboard_service: SLOW API WARNING endpoint=/api/dashboard/summary role=owner duration_ms=2749.96
+[2026-06-22 15:55:49,022] INFO in app: [Flux API] GET /api/dashboard/summary role=anonymous start=2026-06-22T15:55:44.555132+00:00 end=2026-06-22T15:55:49.022353+00:00 duration_ms=4467.22 status=200
+[2026-06-22 15:55:49,022] WARNING in app: SLOW API WARNING GET /api/dashboard/summary role=anonymous duration_ms=4467.22 status=200
+127.0.0.1 - - [22/Jun/2026 15:55:49] "GET /api/dashboard/summary HTTP/1.1" 200 -
+[2026-06-22 15:55:55,704] INFO in app: [Flux API] OPTIONS /api/incidents role=anonymous start=2026-06-22T15:55:55.704515+00:00 end=2026-06-22T15:55:55.704606+00:00 duration_ms=0.09 status=200
+127.0.0.1 - - [22/Jun/2026 15:55:55] "OPTIONS /api/incidents HTTP/1.1" 200 -
+[2026-06-22 15:55:55,705] INFO in app: [Flux API] OPTIONS /api/vehicles role=anonymous start=2026-06-22T15:55:55.705112+00:00 end=2026-06-22T15:55:55.705185+00:00 duration_ms=0.07 status=200
+127.0.0.1 - - [22/Jun/2026 15:55:55] "OPTIONS /api/vehicles HTTP/1.1" 200 -
+[2026-06-22 15:55:56,367] INFO in vehicles: [Flux Performance] GET /api/vehicles returned 5 records in 179.26ms
+[2026-06-22 15:55:56,367] INFO in app: [Flux API] GET /api/vehicles role=anonymous start=2026-06-22T15:55:56.016587+00:00 end=2026-06-22T15:55:56.367664+00:00 duration_ms=351.08 status=200
+127.0.0.1 - - [22/Jun/2026 15:55:56] "GET /api/vehicles HTTP/1.1" 200 -
+[2026-06-22 15:55:57,028] INFO in app: [Flux API] GET /api/incidents role=anonymous start=2026-06-22T15:55:55.954103+00:00 end=2026-06-22T15:55:57.028683+00:00 duration_ms=1074.58 status=200
+127.0.0.1 - - [22/Jun/2026 15:55:57] "GET /api/incidents HTTP/1.1" 200 -
+[2026-06-22 16:08:23,273] INFO in app: [Flux API] OPTIONS /api/auth/me role=anonymous start=2026-06-22T16:08:23.273028+00:00 end=2026-06-22T16:08:23.273282+00:00 duration_ms=0.25 status=200
+127.0.0.1 - - [22/Jun/2026 16:08:23] "OPTIONS /api/auth/me HTTP/1.1" 200 -
+[2026-06-22 16:08:23,274] INFO in app: [Flux API] OPTIONS /api/driver/active-assignment role=anonymous start=2026-06-22T16:08:23.274528+00:00 end=2026-06-22T16:08:23.274740+00:00 duration_ms=0.21 status=200
+127.0.0.1 - - [22/Jun/2026 16:08:23] "OPTIONS /api/driver/active-assignment HTTP/1.1" 200 -
+[2026-06-22 16:08:23,275] INFO in app: [Flux API] OPTIONS /api/driver/dashboard-summary role=anonymous start=2026-06-22T16:08:23.275389+00:00 end=2026-06-22T16:08:23.275526+00:00 duration_ms=0.13 status=200
+127.0.0.1 - - [22/Jun/2026 16:08:23] "OPTIONS /api/driver/dashboard-summary HTTP/1.1" 200 -
+[2026-06-22 16:08:23,277] INFO in app: [Flux API] OPTIONS /api/driver/wallet role=anonymous start=2026-06-22T16:08:23.276969+00:00 end=2026-06-22T16:08:23.277106+00:00 duration_ms=0.13 status=200
+127.0.0.1 - - [22/Jun/2026 16:08:23] "OPTIONS /api/driver/wallet HTTP/1.1" 200 -
+[2026-06-22 16:08:23,284] INFO in app: [Flux API] OPTIONS /api/auth/me role=anonymous start=2026-06-22T16:08:23.284130+00:00 end=2026-06-22T16:08:23.284329+00:00 duration_ms=0.19 status=200
+127.0.0.1 - - [22/Jun/2026 16:08:23] "OPTIONS /api/auth/me HTTP/1.1" 200 -
+[2026-06-22 16:08:30,293] INFO in app: [Flux API] GET /api/auth/me role=anonymous start=2026-06-22T16:08:23.521508+00:00 end=2026-06-22T16:08:30.292971+00:00 duration_ms=6771.46 status=200
+[2026-06-22 16:08:30,294] WARNING in app: SLOW API WARNING GET /api/auth/me role=anonymous duration_ms=6771.46 status=200
+127.0.0.1 - - [22/Jun/2026 16:08:30] "GET /api/auth/me HTTP/1.1" 200 -
+[2026-06-22 16:08:30,496] INFO in app: [Flux API] GET /api/auth/me role=anonymous start=2026-06-22T16:08:23.537830+00:00 end=2026-06-22T16:08:30.496573+00:00 duration_ms=6958.74 status=200
+[2026-06-22 16:08:30,497] WARNING in app: SLOW API WARNING GET /api/auth/me role=anonymous duration_ms=6958.74 status=200
+127.0.0.1 - - [22/Jun/2026 16:08:30] "GET /api/auth/me HTTP/1.1" 200 -
+[2026-06-22 16:08:30,536] INFO in app: [Flux API] OPTIONS /api/faults/approvals role=anonymous start=2026-06-22T16:08:30.536120+00:00 end=2026-06-22T16:08:30.536548+00:00 duration_ms=0.43 status=200
+127.0.0.1 - - [22/Jun/2026 16:08:30] "OPTIONS /api/faults/approvals HTTP/1.1" 200 -
+[2026-06-22 16:08:30,851] INFO in app: [Flux API] OPTIONS /api/faults/critical role=anonymous start=2026-06-22T16:08:30.850685+00:00 end=2026-06-22T16:08:30.850931+00:00 duration_ms=0.24 status=200
+127.0.0.1 - - [22/Jun/2026 16:08:30] "OPTIONS /api/faults/critical HTTP/1.1" 200 -
+[2026-06-22 16:08:30,852] INFO in app: [Flux API] OPTIONS /api/bookings/summary role=anonymous start=2026-06-22T16:08:30.851859+00:00 end=2026-06-22T16:08:30.852052+00:00 duration_ms=0.19 status=200
+127.0.0.1 - - [22/Jun/2026 16:08:30] "OPTIONS /api/bookings/summary HTTP/1.1" 200 -
+[2026-06-22 16:08:30,853] INFO in app: [Flux API] OPTIONS /api/customers/summary role=anonymous start=2026-06-22T16:08:30.852892+00:00 end=2026-06-22T16:08:30.853202+00:00 duration_ms=0.31 status=200
+127.0.0.1 - - [22/Jun/2026 16:08:30] "OPTIONS /api/customers/summary HTTP/1.1" 200 -
+[2026-06-22 16:08:30,854] INFO in app: [Flux API] OPTIONS /api/dashboard/summary role=anonymous start=2026-06-22T16:08:30.854147+00:00 end=2026-06-22T16:08:30.854377+00:00 duration_ms=0.23 status=200
+127.0.0.1 - - [22/Jun/2026 16:08:30] "OPTIONS /api/dashboard/summary HTTP/1.1" 200 -
+[2026-06-22 16:08:31,488] INFO in performance: [Flux DB] faults.approvals.query duration_ms=276.07
+[2026-06-22 16:08:32,099] INFO in dashboard_service: [Flux Dashboard] summary requested role=owner
+[2026-06-22 16:08:32,105] INFO in app: [Flux API] GET /api/driver/wallet role=anonymous start=2026-06-22T16:08:23.592329+00:00 end=2026-06-22T16:08:32.105736+00:00 duration_ms=8513.4 status=200
+[2026-06-22 16:08:32,106] WARNING in app: SLOW API WARNING GET /api/driver/wallet role=anonymous duration_ms=8513.4 status=200
+127.0.0.1 - - [22/Jun/2026 16:08:32] "GET /api/driver/wallet HTTP/1.1" 200 -
+[2026-06-22 16:08:32,251] INFO in performance: [Flux DB] faults.load_vehicles duration_ms=762.2
+[2026-06-22 16:08:32,252] INFO in app: [Flux API] GET /api/driver/active-assignment role=anonymous start=2026-06-22T16:08:23.589120+00:00 end=2026-06-22T16:08:32.252270+00:00 duration_ms=8663.15 status=200
+[2026-06-22 16:08:32,254] WARNING in app: SLOW API WARNING GET /api/driver/active-assignment role=anonymous duration_ms=8663.15 status=200
+127.0.0.1 - - [22/Jun/2026 16:08:32] "GET /api/driver/active-assignment HTTP/1.1" 200 -
+[2026-06-22 16:08:32,582] INFO in performance: [Flux DB] faults.load_users duration_ms=329.03
+[2026-06-22 16:08:32,938] INFO in performance: [Flux DB] faults.load_categories duration_ms=355.04
+[2026-06-22 16:08:32,971] INFO in performance: [Flux DB] dashboard.vehicle_lookup duration_ms=159.04
+[2026-06-22 16:08:33,122] INFO in performance: [Flux DB] faults.load_components duration_ms=184.01
+[2026-06-22 16:08:33,123] INFO in fault_service: [Flux Faults] approvals count=4 enrichment_ms=1634.66 total_ms=1911.41
+[2026-06-22 16:08:33,125] INFO in app: [Flux API] GET /api/faults/approvals role=anonymous start=2026-06-22T16:08:30.856057+00:00 end=2026-06-22T16:08:33.125139+00:00 duration_ms=2269.08 status=200
+[2026-06-22 16:08:33,126] WARNING in app: SLOW API WARNING GET /api/faults/approvals role=anonymous duration_ms=2269.08 status=200
+127.0.0.1 - - [22/Jun/2026 16:08:33] "GET /api/faults/approvals HTTP/1.1" 200 -
+[2026-06-22 16:08:33,126] INFO in performance: [Flux DB] dashboard.driver_lookup duration_ms=154.42
+[2026-06-22 16:08:33,381] INFO in app: [Flux API] GET /api/driver/dashboard-summary role=anonymous start=2026-06-22T16:08:23.590783+00:00 end=2026-06-22T16:08:33.381437+00:00 duration_ms=9790.66 status=200
+[2026-06-22 16:08:33,382] WARNING in app: SLOW API WARNING GET /api/driver/dashboard-summary role=anonymous duration_ms=9790.66 status=200
+127.0.0.1 - - [22/Jun/2026 16:08:33] "GET /api/driver/dashboard-summary HTTP/1.1" 200 -
+[2026-06-22 16:08:34,508] INFO in booking_service: [Flux Bookings] due reminder sweep duration_ms=1203.31
+[2026-06-22 16:08:34,510] INFO in performance: [Flux DB] dashboard.vehicle_counts duration_ms=1382.74
+[2026-06-22 16:08:34,510] INFO in performance: [Flux DB] faults.critical.query duration_ms=1205.92
+[2026-06-22 16:08:34,511] INFO in fault_service: [Flux Faults] critical count=0 total_ms=1206.81
+[2026-06-22 16:08:34,511] INFO in app: [Flux API] GET /api/faults/critical role=anonymous start=2026-06-22T16:08:31.175569+00:00 end=2026-06-22T16:08:34.511847+00:00 duration_ms=3336.28 status=200
+[2026-06-22 16:08:34,512] WARNING in app: SLOW API WARNING GET /api/faults/critical role=anonymous duration_ms=3336.28 status=200
+127.0.0.1 - - [22/Jun/2026 16:08:34] "GET /api/faults/critical HTTP/1.1" 200 -
+[2026-06-22 16:08:35,079] INFO in performance: [Flux DB] dashboard.driver_counts duration_ms=569.11
+[2026-06-22 16:08:35,522] INFO in performance: [Flux DB] dashboard.active_assignments duration_ms=442.39
+[2026-06-22 16:08:36,330] INFO in app: [Flux API] GET /api/bookings/summary role=anonymous start=2026-06-22T16:08:31.177366+00:00 end=2026-06-22T16:08:36.329998+00:00 duration_ms=5152.64 status=200
+[2026-06-22 16:08:36,330] WARNING in app: SLOW API WARNING GET /api/bookings/summary role=anonymous duration_ms=5152.64 status=200
+127.0.0.1 - - [22/Jun/2026 16:08:36] "GET /api/bookings/summary HTTP/1.1" 200 -
+[2026-06-22 16:08:36,331] INFO in performance: [Flux DB] dashboard.collections duration_ms=808.04
+[2026-06-22 16:08:36,525] INFO in app: [Flux API] GET /api/customers/summary role=anonymous start=2026-06-22T16:08:31.179016+00:00 end=2026-06-22T16:08:36.525139+00:00 duration_ms=5346.12 status=200
+[2026-06-22 16:08:36,525] WARNING in app: SLOW API WARNING GET /api/customers/summary role=anonymous duration_ms=5346.12 status=200
+127.0.0.1 - - [22/Jun/2026 16:08:36] "GET /api/customers/summary HTTP/1.1" 200 -
+[2026-06-22 16:08:36,666] INFO in performance: [Flux DB] dashboard.fuel_logs duration_ms=334.54
+[2026-06-22 16:08:37,285] INFO in performance: [Flux DB] dashboard.expenses duration_ms=619.22
+[2026-06-22 16:08:37,795] INFO in performance: [Flux DB] dashboard.maintenance_jobs duration_ms=509.0
+[2026-06-22 16:08:37,928] INFO in performance: [Flux DB] dashboard.preventive_due_count duration_ms=132.37
+[2026-06-22 16:08:38,096] INFO in performance: [Flux DB] dashboard.compliance_records duration_ms=167.89
+[2026-06-22 16:08:38,445] INFO in performance: [Flux DB] dashboard.active_trip_counts duration_ms=348.22
+[2026-06-22 16:08:38,445] INFO in dashboard_service: [Flux Dashboard] summary generated role=owner duration_ms=6346.36
+[2026-06-22 16:08:38,445] WARNING in dashboard_service: SLOW API WARNING endpoint=/api/dashboard/summary role=owner duration_ms=6346.59
+[2026-06-22 16:08:38,446] INFO in app: [Flux API] GET /api/dashboard/summary role=anonymous start=2026-06-22T16:08:31.181280+00:00 end=2026-06-22T16:08:38.446254+00:00 duration_ms=7264.98 status=200
+[2026-06-22 16:08:38,446] WARNING in app: SLOW API WARNING GET /api/dashboard/summary role=anonymous duration_ms=7264.98 status=200
+127.0.0.1 - - [22/Jun/2026 16:08:38] "GET /api/dashboard/summary HTTP/1.1" 200 -
+[2026-06-22 16:14:42,365] INFO in app: [Flux API] OPTIONS /api/bookings/summary role=anonymous start=2026-06-22T16:14:42.360650+00:00 end=2026-06-22T16:14:42.364879+00:00 duration_ms=4.23 status=200
+127.0.0.1 - - [22/Jun/2026 16:14:42] "OPTIONS /api/bookings/summary HTTP/1.1" 200 -
+[2026-06-22 16:14:43,017] INFO in booking_service: [Flux Bookings] due reminder sweep duration_ms=261.82
+[2026-06-22 16:14:43,727] INFO in app: [Flux API] GET /api/bookings/summary role=anonymous start=2026-06-22T16:14:42.586874+00:00 end=2026-06-22T16:14:43.727057+00:00 duration_ms=1140.18 status=200
+127.0.0.1 - - [22/Jun/2026 16:14:43] "GET /api/bookings/summary HTTP/1.1" 200 -
+[2026-06-22 16:17:36,567] INFO in app: [Flux API] OPTIONS /api/bookings/summary role=anonymous start=2026-06-22T16:17:36.567484+00:00 end=2026-06-22T16:17:36.567768+00:00 duration_ms=0.28 status=200
+127.0.0.1 - - [22/Jun/2026 16:17:36] "OPTIONS /api/bookings/summary HTTP/1.1" 200 -
+[2026-06-22 16:17:36,599] INFO in app: [Flux API] OPTIONS /api/rides/options role=anonymous start=2026-06-22T16:17:36.598975+00:00 end=2026-06-22T16:17:36.599244+00:00 duration_ms=0.26 status=200
+127.0.0.1 - - [22/Jun/2026 16:17:36] "OPTIONS /api/rides/options HTTP/1.1" 200 -
+[2026-06-22 16:17:36,633] INFO in app: [Flux API] OPTIONS /api/rides role=anonymous start=2026-06-22T16:17:36.633433+00:00 end=2026-06-22T16:17:36.633668+00:00 duration_ms=0.23 status=200
+127.0.0.1 - - [22/Jun/2026 16:17:36] "OPTIONS /api/rides HTTP/1.1" 200 -
+[2026-06-22 16:17:38,777] INFO in booking_service: [Flux Bookings] due reminder sweep duration_ms=207.68
+[2026-06-22 16:17:39,723] INFO in app: [Flux API] GET /api/bookings/summary role=anonymous start=2026-06-22T16:17:36.816452+00:00 end=2026-06-22T16:17:39.723178+00:00 duration_ms=2906.73 status=200
+[2026-06-22 16:17:39,724] WARNING in app: SLOW API WARNING GET /api/bookings/summary role=anonymous duration_ms=2906.73 status=200
+127.0.0.1 - - [22/Jun/2026 16:17:39] "GET /api/bookings/summary HTTP/1.1" 200 -
+[2026-06-22 16:17:39,724] INFO in app: [Flux API] GET /api/rides/options role=anonymous start=2026-06-22T16:17:36.881627+00:00 end=2026-06-22T16:17:39.724576+00:00 duration_ms=2842.95 status=200
+[2026-06-22 16:17:39,726] WARNING in app: SLOW API WARNING GET /api/rides/options role=anonymous duration_ms=2842.95 status=200
+127.0.0.1 - - [22/Jun/2026 16:17:39] "GET /api/rides/options HTTP/1.1" 200 -
+[2026-06-22 16:17:44,672] INFO in app: [Flux API] GET /api/rides role=anonymous start=2026-06-22T16:17:36.915085+00:00 end=2026-06-22T16:17:44.672517+00:00 duration_ms=7757.44 status=200
+[2026-06-22 16:17:44,673] WARNING in app: SLOW API WARNING GET /api/rides role=anonymous duration_ms=7757.44 status=200
+127.0.0.1 - - [22/Jun/2026 16:17:44] "GET /api/rides HTTP/1.1" 200 -
+[2026-06-22 16:17:49,508] INFO in app: [Flux API] OPTIONS /api/auth/me role=anonymous start=2026-06-22T16:17:49.508038+00:00 end=2026-06-22T16:17:49.508284+00:00 duration_ms=0.24 status=200
+127.0.0.1 - - [22/Jun/2026 16:17:49] "OPTIONS /api/auth/me HTTP/1.1" 200 -
+[2026-06-22 16:17:49,821] INFO in app: [Flux API] OPTIONS /api/driver/active-assignment role=anonymous start=2026-06-22T16:17:49.821609+00:00 end=2026-06-22T16:17:49.821858+00:00 duration_ms=0.24 status=200
+127.0.0.1 - - [22/Jun/2026 16:17:49] "OPTIONS /api/driver/active-assignment HTTP/1.1" 200 -
+[2026-06-22 16:17:49,847] INFO in app: [Flux API] OPTIONS /api/driver/dashboard-summary role=anonymous start=2026-06-22T16:17:49.846065+00:00 end=2026-06-22T16:17:49.847033+00:00 duration_ms=0.96 status=200
+127.0.0.1 - - [22/Jun/2026 16:17:49] "OPTIONS /api/driver/dashboard-summary HTTP/1.1" 200 -
+[2026-06-22 16:17:49,856] INFO in app: [Flux API] OPTIONS /api/driver/wallet role=anonymous start=2026-06-22T16:17:49.856203+00:00 end=2026-06-22T16:17:49.856456+00:00 duration_ms=0.26 status=200
+127.0.0.1 - - [22/Jun/2026 16:17:49] "OPTIONS /api/driver/wallet HTTP/1.1" 200 -
+[2026-06-22 16:17:50,550] INFO in app: [Flux API] GET /api/auth/me role=anonymous start=2026-06-22T16:17:49.858279+00:00 end=2026-06-22T16:17:50.550324+00:00 duration_ms=692.04 status=200
+127.0.0.1 - - [22/Jun/2026 16:17:50] "GET /api/auth/me HTTP/1.1" 200 -
+[2026-06-22 16:17:50,620] INFO in app: [Flux API] OPTIONS /api/auth/me role=anonymous start=2026-06-22T16:17:50.620180+00:00 end=2026-06-22T16:17:50.620442+00:00 duration_ms=0.26 status=200
+127.0.0.1 - - [22/Jun/2026 16:17:50] "OPTIONS /api/auth/me HTTP/1.1" 200 -
+[2026-06-22 16:17:51,400] INFO in app: [Flux API] GET /api/driver/active-assignment role=anonymous start=2026-06-22T16:17:50.135044+00:00 end=2026-06-22T16:17:51.400461+00:00 duration_ms=1265.41 status=200
+127.0.0.1 - - [22/Jun/2026 16:17:51] "GET /api/driver/active-assignment HTTP/1.1" 200 -
+[2026-06-22 16:17:51,772] INFO in app: [Flux API] GET /api/auth/me role=anonymous start=2026-06-22T16:17:50.872208+00:00 end=2026-06-22T16:17:51.772361+00:00 duration_ms=900.15 status=200
+127.0.0.1 - - [22/Jun/2026 16:17:51] "GET /api/auth/me HTTP/1.1" 200 -
+[2026-06-22 16:17:51,949] INFO in app: [Flux API] GET /api/driver/dashboard-summary role=anonymous start=2026-06-22T16:17:50.169768+00:00 end=2026-06-22T16:17:51.949737+00:00 duration_ms=1779.97 status=200
+127.0.0.1 - - [22/Jun/2026 16:17:51] "GET /api/driver/dashboard-summary HTTP/1.1" 200 -
+[2026-06-22 16:17:57,049] INFO in app: [Flux API] GET /api/driver/wallet role=anonymous start=2026-06-22T16:17:50.173634+00:00 end=2026-06-22T16:17:57.049724+00:00 duration_ms=6876.09 status=200
+[2026-06-22 16:17:57,050] WARNING in app: SLOW API WARNING GET /api/driver/wallet role=anonymous duration_ms=6876.09 status=200
+127.0.0.1 - - [22/Jun/2026 16:17:57] "GET /api/driver/wallet HTTP/1.1" 200 -
+[2026-06-22 16:20:57,188] INFO in app: [Flux API] OPTIONS /api/customers role=anonymous start=2026-06-22T16:20:57.188328+00:00 end=2026-06-22T16:20:57.188459+00:00 duration_ms=0.13 status=200
+127.0.0.1 - - [22/Jun/2026 16:20:57] "OPTIONS /api/customers HTTP/1.1" 200 -
+[2026-06-22 16:20:57,190] INFO in app: [Flux API] OPTIONS /api/customers/summary role=anonymous start=2026-06-22T16:20:57.190508+00:00 end=2026-06-22T16:20:57.190624+00:00 duration_ms=0.11 status=200
+127.0.0.1 - - [22/Jun/2026 16:20:57] "OPTIONS /api/customers/summary HTTP/1.1" 200 -
+[2026-06-22 16:20:57,191] INFO in app: [Flux API] OPTIONS /api/bookings role=anonymous start=2026-06-22T16:20:57.191221+00:00 end=2026-06-22T16:20:57.191308+00:00 duration_ms=0.09 status=200
+127.0.0.1 - - [22/Jun/2026 16:20:57] "OPTIONS /api/bookings HTTP/1.1" 200 -
+[2026-06-22 16:20:57,888] INFO in booking_service: [Flux Bookings] list requested role=driver user_id=6a2b3fc71a9f06b34e940cc7
+[2026-06-22 16:21:00,978] INFO in app: [Flux API] GET /api/customers/summary role=anonymous start=2026-06-22T16:20:57.501364+00:00 end=2026-06-22T16:21:00.978095+00:00 duration_ms=3476.73 status=200
+[2026-06-22 16:21:00,978] WARNING in app: SLOW API WARNING GET /api/customers/summary role=anonymous duration_ms=3476.73 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:00] "GET /api/customers/summary HTTP/1.1" 200 -
+[2026-06-22 16:21:00,979] INFO in booking_service: [Flux Bookings] due reminder sweep duration_ms=3089.49
+[2026-06-22 16:21:00,980] INFO in booking_service: [Flux Bookings] reminder_gate duration_ms=3090.38
+[2026-06-22 16:21:01,584] INFO in performance: [Flux DB] bookings.list.query duration_ms=604.23
+[2026-06-22 16:21:01,930] INFO in performance: [Flux DB] bookings.load_customers duration_ms=345.23
+[2026-06-22 16:21:02,423] INFO in performance: [Flux DB] bookings.load_drivers duration_ms=492.68
+[2026-06-22 16:21:02,615] INFO in performance: [Flux DB] bookings.load_created_by_users duration_ms=191.96
+[2026-06-22 16:21:02,617] INFO in booking_service: [Flux Bookings] list role=driver count=14 enrichment_ms=1032.56 total_ms=4728.80
+[2026-06-22 16:21:02,617] WARNING in booking_service: SLOW API WARNING endpoint=/api/bookings role=driver duration_ms=4729.09
+[2026-06-22 16:21:02,619] INFO in app: [Flux API] GET /api/bookings role=anonymous start=2026-06-22T16:20:57.502178+00:00 end=2026-06-22T16:21:02.619775+00:00 duration_ms=5117.59 status=200
+[2026-06-22 16:21:02,620] WARNING in app: SLOW API WARNING GET /api/bookings role=anonymous duration_ms=5117.59 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:02] "GET /api/bookings HTTP/1.1" 200 -
+[2026-06-22 16:21:05,145] INFO in app: [Flux API] GET /api/customers role=anonymous start=2026-06-22T16:20:57.455302+00:00 end=2026-06-22T16:21:05.145105+00:00 duration_ms=7689.8 status=200
+[2026-06-22 16:21:05,146] WARNING in app: SLOW API WARNING GET /api/customers role=anonymous duration_ms=7689.8 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:05] "GET /api/customers HTTP/1.1" 200 -
+[2026-06-22 16:21:05,155] INFO in app: [Flux API] OPTIONS /api/customers/options role=anonymous start=2026-06-22T16:21:05.154902+00:00 end=2026-06-22T16:21:05.155118+00:00 duration_ms=0.21 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:05] "OPTIONS /api/customers/options HTTP/1.1" 200 -
+[2026-06-22 16:21:05,472] INFO in app: [Flux API] OPTIONS /api/bookings/options role=anonymous start=2026-06-22T16:21:05.472724+00:00 end=2026-06-22T16:21:05.472826+00:00 duration_ms=0.1 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:05] "OPTIONS /api/bookings/options HTTP/1.1" 200 -
+[2026-06-22 16:21:05,473] INFO in app: [Flux API] OPTIONS /api/bookings/summary role=anonymous start=2026-06-22T16:21:05.473392+00:00 end=2026-06-22T16:21:05.473474+00:00 duration_ms=0.08 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:05] "OPTIONS /api/bookings/summary HTTP/1.1" 200 -
+[2026-06-22 16:21:05,473] INFO in app: [Flux API] OPTIONS /api/customers/summary role=anonymous start=2026-06-22T16:21:05.473757+00:00 end=2026-06-22T16:21:05.473850+00:00 duration_ms=0.09 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:05] "OPTIONS /api/customers/summary HTTP/1.1" 200 -
+[2026-06-22 16:21:05,761] INFO in performance: [Flux DB] customers.options.drivers duration_ms=160.5
+[2026-06-22 16:21:05,961] INFO in app: [Flux API] GET /api/customers/summary role=anonymous start=2026-06-22T16:21:05.790772+00:00 end=2026-06-22T16:21:05.961218+00:00 duration_ms=170.44 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:05] "GET /api/customers/summary HTTP/1.1" 200 -
+[2026-06-22 16:21:06,974] INFO in performance: [Flux DB] bookings.options.query duration_ms=1021.82
+[2026-06-22 16:21:07,555] INFO in booking_service: [Flux Bookings] options generated role=driver duration_ms=1603.42
+[2026-06-22 16:21:07,556] INFO in app: [Flux API] GET /api/bookings/options role=anonymous start=2026-06-22T16:21:05.788743+00:00 end=2026-06-22T16:21:07.556898+00:00 duration_ms=1768.15 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:07] "GET /api/bookings/options HTTP/1.1" 200 -
+[2026-06-22 16:21:07,640] INFO in app: [Flux API] OPTIONS /api/auth/me role=anonymous start=2026-06-22T16:21:07.640496+00:00 end=2026-06-22T16:21:07.640686+00:00 duration_ms=0.19 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:07] "OPTIONS /api/auth/me HTTP/1.1" 200 -
+[2026-06-22 16:21:07,768] INFO in app: [Flux API] GET /api/bookings/summary role=anonymous start=2026-06-22T16:21:05.789677+00:00 end=2026-06-22T16:21:07.768452+00:00 duration_ms=1978.77 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:07] "GET /api/bookings/summary HTTP/1.1" 200 -
+[2026-06-22 16:21:08,519] INFO in app: [Flux API] GET /api/auth/me role=anonymous start=2026-06-22T16:21:07.947644+00:00 end=2026-06-22T16:21:08.519550+00:00 duration_ms=571.87 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:08] "GET /api/auth/me HTTP/1.1" 200 -
+[2026-06-22 16:21:08,927] INFO in app: [Flux API] OPTIONS /api/rides/options role=anonymous start=2026-06-22T16:21:08.927257+00:00 end=2026-06-22T16:21:08.927400+00:00 duration_ms=0.14 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:08] "OPTIONS /api/rides/options HTTP/1.1" 200 -
+[2026-06-22 16:21:08,928] INFO in app: [Flux API] OPTIONS /api/driver/active-assignment role=anonymous start=2026-06-22T16:21:08.928093+00:00 end=2026-06-22T16:21:08.928206+00:00 duration_ms=0.11 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:08] "OPTIONS /api/driver/active-assignment HTTP/1.1" 200 -
+[2026-06-22 16:21:08,928] INFO in app: [Flux API] OPTIONS /api/rides role=anonymous start=2026-06-22T16:21:08.928793+00:00 end=2026-06-22T16:21:08.928898+00:00 duration_ms=0.1 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:08] "OPTIONS /api/rides HTTP/1.1" 200 -
+[2026-06-22 16:21:08,931] INFO in app: [Flux API] OPTIONS /api/driver/dashboard-summary role=anonymous start=2026-06-22T16:21:08.931757+00:00 end=2026-06-22T16:21:08.931885+00:00 duration_ms=0.13 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:08] "OPTIONS /api/driver/dashboard-summary HTTP/1.1" 200 -
+[2026-06-22 16:21:09,240] INFO in app: [Flux API] OPTIONS /api/driver/wallet role=anonymous start=2026-06-22T16:21:09.239950+00:00 end=2026-06-22T16:21:09.240064+00:00 duration_ms=0.11 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:09] "OPTIONS /api/driver/wallet HTTP/1.1" 200 -
+[2026-06-22 16:21:09,460] INFO in customer_service: [Flux Customers] options role=driver duration_ms=3859.78
+[2026-06-22 16:21:09,461] WARNING in customer_service: SLOW API WARNING endpoint=/api/customers/options role=driver duration_ms=3860.38
+[2026-06-22 16:21:09,461] INFO in app: [Flux API] GET /api/customers/options role=anonymous start=2026-06-22T16:21:05.474763+00:00 end=2026-06-22T16:21:09.461791+00:00 duration_ms=3987.02 status=200
+[2026-06-22 16:21:09,462] WARNING in app: SLOW API WARNING GET /api/customers/options role=anonymous duration_ms=3987.02 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:09] "GET /api/customers/options HTTP/1.1" 200 -
+[2026-06-22 16:21:10,283] INFO in app: [Flux API] GET /api/driver/active-assignment role=anonymous start=2026-06-22T16:21:09.258173+00:00 end=2026-06-22T16:21:10.283731+00:00 duration_ms=1025.56 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:10] "GET /api/driver/active-assignment HTTP/1.1" 200 -
+[2026-06-22 16:21:10,373] INFO in app: [Flux API] GET /api/bookings/summary role=anonymous start=2026-06-22T16:21:08.926139+00:00 end=2026-06-22T16:21:10.373168+00:00 duration_ms=1447.03 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:10] "GET /api/bookings/summary HTTP/1.1" 200 -
+[2026-06-22 16:21:10,882] INFO in app: [Flux API] GET /api/rides/options role=anonymous start=2026-06-22T16:21:09.245226+00:00 end=2026-06-22T16:21:10.882835+00:00 duration_ms=1637.61 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:10] "GET /api/rides/options HTTP/1.1" 200 -
+[2026-06-22 16:21:10,883] INFO in app: [Flux API] GET /api/driver/dashboard-summary role=anonymous start=2026-06-22T16:21:09.562033+00:00 end=2026-06-22T16:21:10.883341+00:00 duration_ms=1321.31 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:10] "GET /api/driver/dashboard-summary HTTP/1.1" 200 -
+[2026-06-22 16:21:11,971] INFO in app: [Flux API] GET /api/driver/wallet role=anonymous start=2026-06-22T16:21:09.780821+00:00 end=2026-06-22T16:21:11.971659+00:00 duration_ms=2190.84 status=200
+[2026-06-22 16:21:11,972] WARNING in app: SLOW API WARNING GET /api/driver/wallet role=anonymous duration_ms=2190.84 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:11] "GET /api/driver/wallet HTTP/1.1" 200 -
+[2026-06-22 16:21:14,990] INFO in app: [Flux API] GET /api/rides role=anonymous start=2026-06-22T16:21:09.259062+00:00 end=2026-06-22T16:21:14.990036+00:00 duration_ms=5730.97 status=200
+[2026-06-22 16:21:14,990] WARNING in app: SLOW API WARNING GET /api/rides role=anonymous duration_ms=5730.97 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:14] "GET /api/rides HTTP/1.1" 200 -
+[2026-06-22 16:21:17,259] INFO in app: [Flux API] OPTIONS /api/customers role=anonymous start=2026-06-22T16:21:17.258949+00:00 end=2026-06-22T16:21:17.259093+00:00 duration_ms=0.14 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:17] "OPTIONS /api/customers HTTP/1.1" 200 -
+[2026-06-22 16:21:17,259] INFO in app: [Flux API] OPTIONS /api/bookings role=anonymous start=2026-06-22T16:21:17.259591+00:00 end=2026-06-22T16:21:17.259668+00:00 duration_ms=0.08 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:17] "OPTIONS /api/bookings HTTP/1.1" 200 -
+[2026-06-22 16:21:17,260] INFO in app: [Flux API] OPTIONS /api/customers/summary role=anonymous start=2026-06-22T16:21:17.260188+00:00 end=2026-06-22T16:21:17.260267+00:00 duration_ms=0.08 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:17] "OPTIONS /api/customers/summary HTTP/1.1" 200 -
+[2026-06-22 16:21:17,708] INFO in booking_service: [Flux Bookings] list requested role=driver user_id=6a2b3fc71a9f06b34e940cc7
+[2026-06-22 16:21:17,709] INFO in booking_service: [Flux Bookings] reminder_gate duration_ms=0.01
+[2026-06-22 16:21:17,915] INFO in performance: [Flux DB] bookings.list.query duration_ms=206.45
+[2026-06-22 16:21:18,101] INFO in performance: [Flux DB] bookings.load_customers duration_ms=185.57
+[2026-06-22 16:21:18,332] INFO in performance: [Flux DB] bookings.load_drivers duration_ms=229.58
+[2026-06-22 16:21:18,576] INFO in performance: [Flux DB] bookings.load_created_by_users duration_ms=243.23
+[2026-06-22 16:21:18,577] INFO in booking_service: [Flux Bookings] list role=driver count=14 enrichment_ms=661.21 total_ms=869.02
+[2026-06-22 16:21:18,579] INFO in app: [Flux API] GET /api/bookings role=anonymous start=2026-06-22T16:21:17.575836+00:00 end=2026-06-22T16:21:18.579139+00:00 duration_ms=1003.3 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:18] "GET /api/bookings HTTP/1.1" 200 -
+[2026-06-22 16:21:18,813] INFO in app: [Flux API] GET /api/customers/summary role=anonymous start=2026-06-22T16:21:17.576869+00:00 end=2026-06-22T16:21:18.813347+00:00 duration_ms=1236.47 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:18] "GET /api/customers/summary HTTP/1.1" 200 -
+[2026-06-22 16:21:22,001] INFO in app: [Flux API] GET /api/customers role=anonymous start=2026-06-22T16:21:17.508152+00:00 end=2026-06-22T16:21:22.001411+00:00 duration_ms=4493.26 status=200
+[2026-06-22 16:21:22,001] WARNING in app: SLOW API WARNING GET /api/customers role=anonymous duration_ms=4493.26 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:22] "GET /api/customers HTTP/1.1" 200 -
+[2026-06-22 16:21:22,006] INFO in app: [Flux API] OPTIONS /api/customers/options role=anonymous start=2026-06-22T16:21:22.006692+00:00 end=2026-06-22T16:21:22.006790+00:00 duration_ms=0.1 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:22] "OPTIONS /api/customers/options HTTP/1.1" 200 -
+[2026-06-22 16:21:22,309] INFO in app: [Flux API] OPTIONS /api/bookings/options role=anonymous start=2026-06-22T16:21:22.309697+00:00 end=2026-06-22T16:21:22.309848+00:00 duration_ms=0.15 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:22] "OPTIONS /api/bookings/options HTTP/1.1" 200 -
+[2026-06-22 16:21:22,310] INFO in app: [Flux API] OPTIONS /api/bookings/summary role=anonymous start=2026-06-22T16:21:22.310522+00:00 end=2026-06-22T16:21:22.310613+00:00 duration_ms=0.09 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:22] "OPTIONS /api/bookings/summary HTTP/1.1" 200 -
+[2026-06-22 16:21:22,473] INFO in app: [Flux API] GET /api/customers/options role=anonymous start=2026-06-22T16:21:22.318566+00:00 end=2026-06-22T16:21:22.473475+00:00 duration_ms=154.91 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:22] "GET /api/customers/options HTTP/1.1" 200 -
+[2026-06-22 16:21:22,476] INFO in app: [Flux API] GET /api/customers/summary role=anonymous start=2026-06-22T16:21:22.311018+00:00 end=2026-06-22T16:21:22.476439+00:00 duration_ms=165.41 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:22] "GET /api/customers/summary HTTP/1.1" 200 -
+[2026-06-22 16:21:22,794] INFO in app: [Flux API] GET /api/bookings/options role=anonymous start=2026-06-22T16:21:22.626623+00:00 end=2026-06-22T16:21:22.794438+00:00 duration_ms=167.81 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:22] "GET /api/bookings/options HTTP/1.1" 200 -
+[2026-06-22 16:21:23,626] INFO in app: [Flux API] GET /api/bookings/summary role=anonymous start=2026-06-22T16:21:22.627565+00:00 end=2026-06-22T16:21:23.626316+00:00 duration_ms=998.74 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:23] "GET /api/bookings/summary HTTP/1.1" 200 -
+[2026-06-22 16:21:56,832] INFO in app: [Flux API] OPTIONS /api/auth/me role=anonymous start=2026-06-22T16:21:56.832694+00:00 end=2026-06-22T16:21:56.832806+00:00 duration_ms=0.11 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:56] "OPTIONS /api/auth/me HTTP/1.1" 200 -
+[2026-06-22 16:21:57,379] INFO in app: [Flux API] GET /api/auth/me role=anonymous start=2026-06-22T16:21:57.099563+00:00 end=2026-06-22T16:21:57.379216+00:00 duration_ms=279.65 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:57] "GET /api/auth/me HTTP/1.1" 200 -
+[2026-06-22 16:21:57,430] INFO in app: [Flux API] OPTIONS /api/bookings/summary role=anonymous start=2026-06-22T16:21:57.430586+00:00 end=2026-06-22T16:21:57.430771+00:00 duration_ms=0.18 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:57] "OPTIONS /api/bookings/summary HTTP/1.1" 200 -
+[2026-06-22 16:21:57,733] INFO in app: [Flux API] OPTIONS /api/rides/options role=anonymous start=2026-06-22T16:21:57.732950+00:00 end=2026-06-22T16:21:57.733069+00:00 duration_ms=0.12 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:57] "OPTIONS /api/rides/options HTTP/1.1" 200 -
+[2026-06-22 16:21:57,733] INFO in app: [Flux API] OPTIONS /api/rides role=anonymous start=2026-06-22T16:21:57.733570+00:00 end=2026-06-22T16:21:57.733688+00:00 duration_ms=0.11 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:57] "OPTIONS /api/rides HTTP/1.1" 200 -
+[2026-06-22 16:21:57,734] INFO in app: [Flux API] OPTIONS /api/driver/active-assignment role=anonymous start=2026-06-22T16:21:57.734095+00:00 end=2026-06-22T16:21:57.734173+00:00 duration_ms=0.08 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:57] "OPTIONS /api/driver/active-assignment HTTP/1.1" 200 -
+[2026-06-22 16:21:57,735] INFO in app: [Flux API] OPTIONS /api/driver/dashboard-summary role=anonymous start=2026-06-22T16:21:57.735468+00:00 end=2026-06-22T16:21:57.735596+00:00 duration_ms=0.12 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:57] "OPTIONS /api/driver/dashboard-summary HTTP/1.1" 200 -
+[2026-06-22 16:21:57,737] INFO in app: [Flux API] OPTIONS /api/driver/wallet role=anonymous start=2026-06-22T16:21:57.737162+00:00 end=2026-06-22T16:21:57.737270+00:00 duration_ms=0.11 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:57] "OPTIONS /api/driver/wallet HTTP/1.1" 200 -
+[2026-06-22 16:21:58,761] INFO in app: [Flux API] GET /api/driver/active-assignment role=anonymous start=2026-06-22T16:21:58.051382+00:00 end=2026-06-22T16:21:58.761904+00:00 duration_ms=710.52 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:58] "GET /api/driver/active-assignment HTTP/1.1" 200 -
+[2026-06-22 16:21:58,811] INFO in app: [Flux API] GET /api/bookings/summary role=anonymous start=2026-06-22T16:21:57.740033+00:00 end=2026-06-22T16:21:58.810972+00:00 duration_ms=1070.94 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:58] "GET /api/bookings/summary HTTP/1.1" 200 -
+[2026-06-22 16:21:59,318] INFO in app: [Flux API] GET /api/driver/wallet role=anonymous start=2026-06-22T16:21:58.053263+00:00 end=2026-06-22T16:21:59.318623+00:00 duration_ms=1265.33 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:59] "GET /api/driver/wallet HTTP/1.1" 200 -
+[2026-06-22 16:21:59,319] INFO in app: [Flux API] GET /api/driver/dashboard-summary role=anonymous start=2026-06-22T16:21:58.052246+00:00 end=2026-06-22T16:21:59.319088+00:00 duration_ms=1266.84 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:59] "GET /api/driver/dashboard-summary HTTP/1.1" 200 -
+[2026-06-22 16:21:59,966] INFO in app: [Flux API] GET /api/rides/options role=anonymous start=2026-06-22T16:21:58.049689+00:00 end=2026-06-22T16:21:59.966550+00:00 duration_ms=1916.86 status=200
+127.0.0.1 - - [22/Jun/2026 16:21:59] "GET /api/rides/options HTTP/1.1" 200 -
+[2026-06-22 16:22:00,702] INFO in app: [Flux API] GET /api/rides role=anonymous start=2026-06-22T16:21:58.050576+00:00 end=2026-06-22T16:22:00.702641+00:00 duration_ms=2652.06 status=200
+[2026-06-22 16:22:00,703] WARNING in app: SLOW API WARNING GET /api/rides role=anonymous duration_ms=2652.06 status=200
+127.0.0.1 - - [22/Jun/2026 16:22:00] "GET /api/rides HTTP/1.1" 200 -

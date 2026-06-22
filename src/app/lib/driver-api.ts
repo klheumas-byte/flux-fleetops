@@ -11,6 +11,16 @@ export interface DriverAssignedVehicle {
   transmission?: string | null;
   fuel_type?: string | null;
   insurance_expiry?: string | null;
+  insurance_profile?: {
+    insurance_company?: string | null;
+    policy_number?: string | null;
+    insurance_type?: string | null;
+    claims_officer_name?: string | null;
+    claims_officer_phone?: string | null;
+    claims_officer_email?: string | null;
+    emergency_contact?: string | null;
+    expiry_date?: string | null;
+  } | null;
   roadworthy_expiry?: string | null;
 }
 
@@ -78,6 +88,9 @@ export interface DriverDashboardSummary {
   total_collections_this_week: number;
   latest_collections: DriverLatestCollection[];
   today_collection_total: number;
+  weekly_cycle?: {
+    payment_deadline?: string | null;
+  } | null;
 }
 
 export interface DriverWalletLedgerEntry {

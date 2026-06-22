@@ -317,6 +317,7 @@ export default function App() {
               currentUser={currentUser}
               activeAssignment={driverActiveAssignment}
               dashboardSummary={driverDashboardSummary}
+              onNavigate={setCurrentPage}
             />
           ))}
           {currentPage === 'my-vehicle' && (

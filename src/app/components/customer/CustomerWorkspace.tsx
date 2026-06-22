@@ -34,6 +34,7 @@ import {
   updateBooking,
   updateCustomer,
 } from '../../lib/customer-booking-api';
+import { clearDriverQuickActionIntent, peekDriverQuickActionIntent } from '../../lib/driver-quick-actions';
 import { usePageToastFeedback } from '../../lib/use-page-toast-feedback';
 
 interface CustomerWorkspaceProps {
@@ -1041,6 +1042,30 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
       : 'Manage customer profiles, business leads, strategic contacts, future bookings, and ride history.';
   const bookingTypeIsReminder = isReminderBookingType(bookingForm.booking_type);
   const bookingTypeIsFollowUp = followUpBookingTypes.has(bookingForm.booking_type);
+
+  useEffect(() => {
+    if (portal !== 'driver' || isLoading) {
+      return;
+    }
+    const quickActionIntent = peekDriverQuickActionIntent();
+    if (!quickActionIntent) {
+      return;
+    }
+    if (quickActionIntent === 'create_booking') {
+      clearDriverQuickActionIntent();
+      openCreateBooking();
+      return;
+    }
+    if (quickActionIntent === 'create_reminder') {
+      clearDriverQuickActionIntent();
+      openCreateReminder();
+      return;
+    }
+    if (quickActionIntent === 'schedule_follow_up') {
+      clearDriverQuickActionIntent();
+      openCreateFollowUpBooking();
+    }
+  }, [isLoading, portal, bookingOptions, selectedCustomerId]);
 
   if (isLoading) {
     return (

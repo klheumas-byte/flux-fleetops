@@ -1,0 +1,75 @@
+from flask import Blueprint
+from flask_jwt_extended import get_jwt_identity
+
+from services.assignment_service import get_active_assignment_for_driver
+from flask import request
+
+from services.collection_service import get_driver_dashboard_summary, submit_driver_payment
+from services.fuel_service import list_fuel_logs
+from services.preventive_maintenance_service import list_compliance_records, list_preventive_maintenance
+from services.wallet_service import get_logged_in_driver_wallet
+from utils.decorators import role_required
+from utils.responses import success_response
+
+
+driver_portal_bp = Blueprint("driver_portal", __name__)
+
+
+@driver_portal_bp.get("/active-assignment")
+@role_required("driver")
+def get_active_assignment():
+    assignment = get_active_assignment_for_driver(get_jwt_identity())
+    return success_response(data={"assignment": assignment})
+
+
+@driver_portal_bp.get("/dashboard-summary")
+@role_required("driver")
+def get_dashboard_summary():
+    summary = get_driver_dashboard_summary(get_jwt_identity())
+    return success_response(data={"summary": summary})
+
+
+@driver_portal_bp.get("/wallet")
+@role_required("driver")
+def get_driver_wallet():
+    wallet = get_logged_in_driver_wallet(get_jwt_identity())
+    return success_response(data={"wallet": wallet})
+
+
+@driver_portal_bp.get("/preventive-maintenance")
+@role_required("driver")
+def get_driver_preventive_maintenance():
+    return success_response(
+        data={
+            "schedules": list_preventive_maintenance(
+                current_user_id=get_jwt_identity(),
+                current_role="driver",
+            ),
+            "compliance_records": list_compliance_records(
+                current_user_id=get_jwt_identity(),
+                current_role="driver",
+            ),
+        }
+    )
+
+
+@driver_portal_bp.get("/fuel-logs")
+@role_required("driver")
+def get_driver_fuel_logs():
+    return success_response(
+        data=list_fuel_logs(
+            current_user_id=get_jwt_identity(),
+            current_role="driver",
+        )
+    )
+
+
+@driver_portal_bp.post("/payments")
+@role_required("driver")
+def submit_payment():
+    payment = submit_driver_payment(request.get_json(silent=True) or {}, get_jwt_identity())
+    return success_response(
+        data={"payment": payment},
+        message="Payment submitted successfully and is pending admin confirmation.",
+        status_code=201,
+    )

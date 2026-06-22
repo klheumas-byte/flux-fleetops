@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Calendar, CarFront, Clock, Filter, Loader2, MapPin, Navigation, Search } from 'lucide-react';
 import { ApiRequestError } from '../../lib/api';
 import { fetchRideSummary, fetchRides, type TripRecord, type TripSummary } from '../../lib/ride-masterdata-api';
+import { useDebouncedValue } from '../../lib/use-debounced-value';
 
 function formatDate(value?: string | null) {
   if (!value) return 'Not available';
@@ -16,6 +17,7 @@ export default function RideHistory() {
   const [statusFilter, setStatusFilter] = useState('all');
   const [isLoading, setIsLoading] = useState(true);
   const [pageError, setPageError] = useState('');
+  const debouncedSearch = useDebouncedValue(search, 250);
 
   useEffect(() => {
     const loadHistory = async () => {
@@ -43,11 +45,11 @@ export default function RideHistory() {
       rides.filter((trip) => {
         const matchesSearch = [trip.trip_id, trip.customer?.full_name, trip.pickup_area, trip.destination_area]
           .filter(Boolean)
-          .some((value) => value?.toLowerCase().includes(search.toLowerCase()));
+          .some((value) => value?.toLowerCase().includes(debouncedSearch.toLowerCase()));
         const matchesStatus = statusFilter === 'all' || trip.status === statusFilter;
         return matchesSearch && matchesStatus;
       }),
-    [rides, search, statusFilter],
+    [rides, debouncedSearch, statusFilter],
   );
 
   if (isLoading) {
@@ -176,7 +178,7 @@ export default function RideHistory() {
           ))}
           {!filteredRides.length && (
             <div className="px-6 py-16 text-center text-gray-500">
-              No trips match your current filters.
+              No matching records found.
             </div>
           )}
         </div>

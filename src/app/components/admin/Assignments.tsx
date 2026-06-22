@@ -15,6 +15,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
+import { useDebouncedValue } from '../../lib/use-debounced-value';
 
 type AssignmentStatus = 'active' | 'ended' | 'suspended';
 
@@ -153,6 +154,7 @@ export default function Assignments() {
 
   const storedUser = localStorage.getItem('flux_user');
   const currentRole = storedUser ? JSON.parse(storedUser).role : null;
+  const debouncedSearchQuery = useDebouncedValue(searchQuery, 250);
 
   const getSettledData = <T,>(result: PromiseSettledResult<T>, fallback: T): T =>
     result.status === 'fulfilled' ? result.value : fallback;
@@ -205,12 +207,12 @@ export default function Assignments() {
         const vehicleName = assignment.vehicle?.registration_number || '';
         const driverName = assignment.driver?.full_name || '';
         const matchesSearch =
-          vehicleName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          driverName.toLowerCase().includes(searchQuery.toLowerCase());
+          vehicleName.toLowerCase().includes(debouncedSearchQuery.toLowerCase()) ||
+          driverName.toLowerCase().includes(debouncedSearchQuery.toLowerCase());
         const matchesStatus = statusFilter === 'all' || assignment.status === statusFilter;
         return matchesSearch && matchesStatus;
       }),
-    [assignments, searchQuery, statusFilter],
+    [assignments, debouncedSearchQuery, statusFilter],
   );
 
   const activeAssignments = assignments.filter((assignment) => assignment.status === 'active').length;
@@ -553,7 +555,7 @@ export default function Assignments() {
             {filteredAssignments.length === 0 && (
               <div className="py-12 text-center">
                 <Truck className="mx-auto mb-3 h-12 w-12 text-gray-300" />
-                <p className="text-gray-500">No assignments found</p>
+                <p className="text-gray-500">{assignments.length === 0 ? 'No assignments found.' : 'No matching records found.'}</p>
               </div>
             )}
           </>

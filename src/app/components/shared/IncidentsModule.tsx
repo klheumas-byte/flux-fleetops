@@ -7,12 +7,14 @@ import {
   Loader2,
   Mail,
   Phone,
+  Search,
   ShieldAlert,
   Wrench,
 } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
 import type { SessionUser } from '../../lib/auth-session';
 import type { DriverActiveAssignment } from '../../lib/driver-api';
+import { useDebouncedValue } from '../../lib/use-debounced-value';
 
 type IncidentRole = 'owner' | 'admin' | 'driver';
 
@@ -355,10 +357,34 @@ export default function IncidentsModule({
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showChecklist, setShowChecklist] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const debouncedSearchQuery = useDebouncedValue(searchQuery, 250);
+
+  const filteredIncidents = useMemo(() => {
+    const query = debouncedSearchQuery.trim().toLowerCase();
+    if (!query) {
+      return incidents;
+    }
+    return incidents.filter((incident) =>
+      [
+        incident.vehicle?.registration_number,
+        incident.driver?.full_name,
+        incident.driver?.phone,
+        incident.status,
+        incident.incident_type,
+        incident.location,
+        incident.description,
+        incident.claim_number,
+        incident.police_report_number,
+      ]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query)),
+    );
+  }, [debouncedSearchQuery, incidents]);
 
   const selectedIncident = useMemo(
-    () => incidents.find((incident) => incident.id === selectedIncidentId) || incidents[0] || null,
-    [incidents, selectedIncidentId],
+    () => filteredIncidents.find((incident) => incident.id === selectedIncidentId) || filteredIncidents[0] || null,
+    [filteredIncidents, selectedIncidentId],
   );
 
   useEffect(() => {
@@ -776,11 +802,21 @@ export default function IncidentsModule({
           )}
 
           <Panel title={role === 'driver' ? 'My Incidents' : 'Incident Queue'} subtitle={role === 'driver' ? 'You can only view incidents linked to your account.' : 'Open and historical incident reports across the fleet.'}>
+            <div className="mb-4 relative">
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="Search by vehicle, driver, status, incident type, phone, or location"
+                className="w-full rounded-lg border border-gray-300 py-2.5 pl-9 pr-4 text-sm focus:border-transparent focus:ring-2 focus:ring-[#2563EB]"
+              />
+            </div>
             {isLoading ? (
               <LoadingState label="Loading incidents..." />
-            ) : incidents.length ? (
+            ) : filteredIncidents.length ? (
               <div className="space-y-3">
-                {incidents.map((incident) => (
+                {filteredIncidents.map((incident) => (
                   <button
                     key={incident.id}
                     type="button"
@@ -804,7 +840,7 @@ export default function IncidentsModule({
                 ))}
               </div>
             ) : (
-              <EmptyState label={role === 'driver' ? 'No incidents reported yet.' : 'No incidents recorded yet.'} />
+              <EmptyState label={incidents.length === 0 ? (role === 'driver' ? 'No incidents reported yet.' : 'No incidents recorded yet.') : 'No matching records found.'} />
             )}
           </Panel>
         </div>

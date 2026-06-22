@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
 import { getStoredSessionUser } from '../../lib/auth-session';
+import { useDebouncedValue } from '../../lib/use-debounced-value';
 
 type CollectionStatus = 'pending' | 'submitted' | 'received' | 'approved' | 'rejected' | 'reversed';
 type PaymentMethod = 'cash' | 'momo' | 'bank' | 'other';
@@ -244,6 +245,7 @@ export default function Collections() {
   const [formState, setFormState] = useState<CollectionFormState>(initialFormState);
   const [currentPage, setCurrentPage] = useState(1);
   const [pagination, setPagination] = useState({ page: 1, page_size: 25, total_records: 0, total_pages: 1 });
+  const debouncedSearchQuery = useDebouncedValue(searchQuery, 300);
   const [summary, setSummary] = useState({
     total_records: 0,
     approved_total: 0,
@@ -267,7 +269,7 @@ export default function Collections() {
 
     try {
       const collectionsResponse = await apiRequest<CollectionsResponse>(
-        `/collections?page=${currentPage}&page_size=25&status=${encodeURIComponent(statusFilter)}&driver_id=${encodeURIComponent(driverFilter)}&payment_method=${encodeURIComponent(paymentMethodFilter)}&collection_date=${encodeURIComponent(dateFilter)}&search=${encodeURIComponent(searchQuery)}`,
+        `/collections?page=${currentPage}&page_size=25&status=${encodeURIComponent(statusFilter)}&driver_id=${encodeURIComponent(driverFilter)}&payment_method=${encodeURIComponent(paymentMethodFilter)}&collection_date=${encodeURIComponent(dateFilter)}&search=${encodeURIComponent(debouncedSearchQuery)}`,
         { cacheTtlMs: 5000, timeoutMs: 15000 },
       );
 
@@ -327,11 +329,11 @@ export default function Collections() {
       return;
     }
     void loadCollections();
-  }, [currentRole, currentPage, statusFilter, driverFilter, paymentMethodFilter, dateFilter, searchQuery]);
+  }, [currentRole, currentPage, statusFilter, driverFilter, paymentMethodFilter, dateFilter, debouncedSearchQuery]);
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [statusFilter, driverFilter, paymentMethodFilter, dateFilter, searchQuery]);
+  }, [statusFilter, driverFilter, paymentMethodFilter, dateFilter, debouncedSearchQuery]);
 
   const driverOptions = useMemo(() => {
     const seen = new Map<string, UserSummary>();
@@ -955,9 +957,11 @@ export default function Collections() {
                 ))}
               </tbody>
             </table>
-            {collections.length === 0 && (
+            {filteredCollections.length === 0 && (
               <div className="px-6 py-12 text-center text-gray-500">
-                No collections recorded yet. Use Manual Collection Entry only when a driver payment was not submitted through the Driver Portal.
+                {collections.length === 0
+                  ? 'No collections recorded yet. Use Manual Collection Entry only when a driver payment was not submitted through the Driver Portal.'
+                  : 'No matching records found.'}
               </div>
             )}
             <div className="flex flex-col gap-3 border-t border-gray-200 px-6 py-4 text-sm text-gray-600 sm:flex-row sm:items-center sm:justify-between">

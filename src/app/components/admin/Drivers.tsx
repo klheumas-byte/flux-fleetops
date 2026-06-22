@@ -21,6 +21,7 @@ import {
   X,
 } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
+import { useDebouncedValue } from '../../lib/use-debounced-value';
 
 type ApprovalStatus = 'pending' | 'approved' | 'rejected';
 type AccountStatus = 'active' | 'inactive' | 'suspended';
@@ -295,6 +296,7 @@ export default function Drivers() {
 
   const storedUser = localStorage.getItem('flux_user');
   const currentRole = storedUser ? JSON.parse(storedUser).role : null;
+  const debouncedSearchQuery = useDebouncedValue(searchQuery, 250);
 
   const loadDrivers = async () => {
     setIsLoading(true);
@@ -357,7 +359,7 @@ export default function Drivers() {
         const guarantorName = driver.driver_profile?.guarantor?.full_name || '';
         const licenseNumber = driver.driver_profile?.license_number || '';
         const assignedVehicle = driver.driver_profile?.assigned_vehicle_id || '';
-        const query = searchQuery.toLowerCase();
+        const query = debouncedSearchQuery.toLowerCase();
 
         const searchMatch =
           driver.full_name.toLowerCase().includes(query) ||
@@ -368,7 +370,7 @@ export default function Drivers() {
 
         return statusMatch && searchMatch;
       }),
-    [drivers, searchQuery, selectedStatus],
+    [drivers, debouncedSearchQuery, selectedStatus],
   );
 
   const openCreateModal = () => {
@@ -813,6 +815,13 @@ export default function Drivers() {
                       </tr>
                     );
                   })}
+                  {filteredDrivers.length === 0 && (
+                    <tr>
+                      <td colSpan={8} className="px-6 py-12 text-center text-sm text-gray-500">
+                        {drivers.length === 0 ? 'No drivers have been added yet.' : 'No matching records found.'}
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>

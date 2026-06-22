@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
 import { fetchSystemSettings, type SystemSettingsRecord } from '../../lib/system-settings-api';
+import { useDebouncedValue } from '../../lib/use-debounced-value';
 
 interface VehiclesProps {
   onOpenVehicleDetails: (vehicleId: string) => void;
@@ -363,6 +364,7 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
 
   const storedUser = localStorage.getItem('flux_user');
   const currentRole = storedUser ? JSON.parse(storedUser).role : null;
+  const debouncedSearchQuery = useDebouncedValue(searchQuery, 250);
 
   const loadVehicleSupplementalData = async () => {
     try {
@@ -478,7 +480,7 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
   const filteredVehicles = useMemo(
     () =>
       vehicles.filter((vehicle) => {
-        const searchValue = searchQuery.trim().toLowerCase();
+        const searchValue = debouncedSearchQuery.trim().toLowerCase();
         const statusValue = selectedStatus.trim().toLowerCase();
         const assignedDriverLabel = formatDriverLabel(vehicle.assigned_driver_id)?.toLowerCase() || '';
         const searchTargets = [
@@ -497,7 +499,7 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
           (vehicle.status || '').toLowerCase() === statusValue;
         return matchesSearch && matchesStatus;
       }),
-    [searchQuery, selectedStatus, vehicles],
+    [debouncedSearchQuery, selectedStatus, vehicles],
   );
 
   const totalPages = Math.max(1, Math.ceil(filteredVehicles.length / VEHICLES_PAGE_SIZE));
@@ -508,7 +510,7 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchQuery, selectedStatus]);
+  }, [debouncedSearchQuery, selectedStatus]);
 
   useEffect(() => {
     setCurrentPage((page) => Math.min(page, totalPages));
@@ -990,7 +992,7 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
                       <td colSpan={10} className="px-6 py-12 text-center text-sm text-gray-500">
                         {vehicles.length === 0
                           ? 'No vehicles have been added yet.'
-                          : 'No vehicles match the current filters.'}
+                          : 'No matching records found.'}
                       </td>
                     </tr>
                   )}

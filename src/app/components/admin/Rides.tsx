@@ -3,6 +3,7 @@ import { BarChart3, Calendar, CarFront, Filter, Loader2, Search, Users } from 'l
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { ApiRequestError } from '../../lib/api';
 import { fetchRideSummary, fetchRides, type TripRecord, type TripSummary } from '../../lib/ride-masterdata-api';
+import { useDebouncedValue } from '../../lib/use-debounced-value';
 
 export default function Rides() {
   const [rides, setRides] = useState<TripRecord[]>([]);
@@ -11,6 +12,7 @@ export default function Rides() {
   const [statusFilter, setStatusFilter] = useState('all');
   const [isLoading, setIsLoading] = useState(true);
   const [pageError, setPageError] = useState('');
+  const debouncedSearch = useDebouncedValue(search, 250);
 
   useEffect(() => {
     const loadRides = async () => {
@@ -39,11 +41,11 @@ export default function Rides() {
       rides.filter((trip) => {
         const matchesSearch = [trip.trip_id, trip.customer?.full_name, trip.driver?.full_name, trip.pickup_area, trip.destination_area]
           .filter(Boolean)
-          .some((value) => value?.toLowerCase().includes(search.toLowerCase()));
+          .some((value) => value?.toLowerCase().includes(debouncedSearch.toLowerCase()));
         const matchesStatus = statusFilter === 'all' || trip.status === statusFilter;
         return matchesSearch && matchesStatus;
       }),
-    [rides, search, statusFilter],
+    [rides, debouncedSearch, statusFilter],
   );
 
   if (isLoading) {
@@ -194,7 +196,7 @@ export default function Rides() {
           </table>
           {!filteredRides.length && (
             <div className="px-6 py-16 text-center text-gray-500">
-              No trips match your current filters.
+              No matching records found.
             </div>
           )}
         </div>

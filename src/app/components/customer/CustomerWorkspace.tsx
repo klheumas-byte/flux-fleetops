@@ -35,6 +35,7 @@ import {
   updateCustomer,
 } from '../../lib/customer-booking-api';
 import { clearDriverQuickActionIntent, peekDriverQuickActionIntent } from '../../lib/driver-quick-actions';
+import { useDebouncedValue } from '../../lib/use-debounced-value';
 import { usePageToastFeedback } from '../../lib/use-page-toast-feedback';
 
 interface CustomerWorkspaceProps {
@@ -447,6 +448,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
   const [customerSummary, setCustomerSummary] = useState<CustomerSummary | null>(null);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
+  const debouncedSearch = useDebouncedValue(search, 250);
   const [isLoading, setIsLoading] = useState(true);
   const [pageError, setPageError] = useState('');
   const [pageNotice, setPageNotice] = useState('');
@@ -694,7 +696,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
       customers.filter((customer) =>
         [customer.full_name, customer.phone_number, customer.email_address, customer.organization_name, customer.company_name]
           .filter(Boolean)
-          .some((value) => value?.toLowerCase().includes(search.toLowerCase()))
+          .some((value) => value?.toLowerCase().includes(debouncedSearch.toLowerCase()))
         && (!filterCreatorRole || customer.created_by_role === filterCreatorRole)
         && (!filterSource || customer.source === filterSource)
         && (!filterCustomerCategoryId || customer.customer_category_id === filterCustomerCategoryId)
@@ -702,7 +704,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
         && (!filterDateFrom || !customer.created_at || new Date(customer.created_at) >= new Date(filterDateFrom))
         && (!filterDateTo || !customer.created_at || new Date(customer.created_at) <= new Date(`${filterDateTo}T23:59:59`)),
       ),
-    [customers, filterCreatorRole, filterCustomerCategoryId, filterDateFrom, filterDateTo, filterDriverId, filterSource, search],
+    [customers, debouncedSearch, filterCreatorRole, filterCustomerCategoryId, filterDateFrom, filterDateTo, filterDriverId, filterSource],
   );
 
   const upcomingBookings = useMemo(
@@ -1337,7 +1339,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
               </button>
             ))}
             {!filteredCustomers.length && (
-              <div className="p-8 text-center text-sm text-gray-500">No customers match your search.</div>
+              <div className="p-8 text-center text-sm text-gray-500">No matching records found.</div>
             )}
           </div>
         </div>

@@ -2,6 +2,7 @@ import { ReactNode, useState } from 'react';
 import Sidebar from './Sidebar';
 import TopNav from './TopNav';
 import type { UserRole } from '../../App';
+import PortalBackButton from '../shared/PortalBackButton';
 
 interface AdminLayoutProps {
   children: ReactNode;
@@ -9,6 +10,9 @@ interface AdminLayoutProps {
   activeSection?: string;
   onNavigate: (section: string) => void;
   onLogout: () => void;
+  showBackButton?: boolean;
+  backLabel?: string;
+  onBack?: () => void;
 }
 
 export default function AdminLayout({
@@ -17,6 +21,9 @@ export default function AdminLayout({
   activeSection,
   onNavigate,
   onLogout,
+  showBackButton = false,
+  backLabel = 'Back',
+  onBack,
 }: AdminLayoutProps) {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const handleNavigate = (section: string) => {
@@ -41,6 +48,7 @@ export default function AdminLayout({
       }`}>
         <TopNav userRole={userRole} onMenuToggle={() => setSidebarOpen(!sidebarOpen)} />
         <main className="flex-1 overflow-x-hidden overflow-y-auto">
+          {showBackButton && onBack ? <PortalBackButton label={backLabel} onClick={onBack} /> : null}
           {children}
         </main>
       </div>

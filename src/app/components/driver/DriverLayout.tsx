@@ -3,6 +3,7 @@ import DriverSidebar from './DriverSidebar';
 import DriverTopNav from './DriverTopNav';
 import type { SessionUser } from '../../lib/auth-session';
 import type { DriverActiveAssignment } from '../../lib/driver-api';
+import PortalBackButton from '../shared/PortalBackButton';
 
 interface DriverLayoutProps {
   children: ReactNode;
@@ -11,6 +12,9 @@ interface DriverLayoutProps {
   onLogout: () => void;
   currentUser: SessionUser | null;
   activeAssignment: DriverActiveAssignment | null;
+  showBackButton?: boolean;
+  backLabel?: string;
+  onBack?: () => void;
 }
 
 export default function DriverLayout({
@@ -20,6 +24,9 @@ export default function DriverLayout({
   onLogout,
   currentUser,
   activeAssignment,
+  showBackButton = false,
+  backLabel = 'Back',
+  onBack,
 }: DriverLayoutProps) {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const handleNavigate = (section: string) => {
@@ -49,6 +56,7 @@ export default function DriverLayout({
           onMenuToggle={() => setSidebarOpen(!sidebarOpen)}
         />
         <main className="flex-1 overflow-x-hidden overflow-y-auto">
+          {showBackButton && onBack ? <PortalBackButton label={backLabel} onClick={onBack} /> : null}
           {children}
         </main>
       </div>

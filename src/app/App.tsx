@@ -77,6 +77,25 @@ export default function App() {
   const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
 
+  const navigateToPage = (page: string, options?: { vehicleId?: string | null; replaceHistory?: boolean }) => {
+    setCurrentPage(page);
+    const nextVehicleId = options?.vehicleId ?? (page === 'vehicle-details' ? selectedVehicleId : null);
+    if (page !== 'vehicle-details') {
+      setSelectedVehicleId(null);
+    } else {
+      setSelectedVehicleId(nextVehicleId || null);
+    }
+
+    if (typeof window !== 'undefined') {
+      const historyState = { page, selectedVehicleId: page === 'vehicle-details' ? nextVehicleId || null : null };
+      if (options?.replaceHistory) {
+        window.history.replaceState(historyState, '');
+      } else {
+        window.history.pushState(historyState, '');
+      }
+    }
+  };
+
   const clearAuthState = () => {
     clearStoredSession();
     setIsLoggedIn(false);
@@ -88,6 +107,9 @@ export default function App() {
     setCurrentPage('dashboard');
     setSelectedVehicleId(null);
     setIsAuthReady(true);
+    if (typeof window !== 'undefined') {
+      window.history.replaceState({ page: 'dashboard', selectedVehicleId: null }, '');
+    }
   };
 
   useEffect(() => {
@@ -126,8 +148,7 @@ export default function App() {
         setCurrentUser(verifiedUser);
         setUserRole(verifiedUser.role);
         setIsLoggedIn(true);
-        setCurrentPage('dashboard');
-        setSelectedVehicleId(null);
+        navigateToPage('dashboard', { replaceHistory: true, vehicleId: null });
       } catch (error) {
         if (error instanceof ApiRequestError && error.status === 401) {
           clearAuthState();
@@ -146,14 +167,12 @@ export default function App() {
     setCurrentUser(user);
     setUserRole(user.role);
     setIsLoggedIn(true);
-    setCurrentPage('dashboard');
-    setSelectedVehicleId(null);
+    navigateToPage('dashboard', { replaceHistory: true, vehicleId: null });
   };
 
   const handleOpenVehicleDetails = (vehicleId: string) => {
     console.info('[Flux Performance] Opening vehicle details', { vehicleId });
-    setSelectedVehicleId(vehicleId);
-    setCurrentPage('vehicle-details');
+    navigateToPage('vehicle-details', { vehicleId });
   };
 
   useEffect(() => {
@@ -167,12 +186,12 @@ export default function App() {
   }, [currentPage, selectedVehicleId]);
 
   const handleBackToVehicles = () => {
-    setCurrentPage('vehicles');
+    navigateToPage('vehicles');
   };
 
   const handleMissingVehicleRecord = () => {
     setSelectedVehicleId(null);
-    setCurrentPage('vehicles');
+    navigateToPage('vehicles');
     toast.warning('That vehicle is no longer available. We took you back to the vehicle list.', {
       position: 'bottom-right',
       id: 'vehicle-missing-redirect',
@@ -224,6 +243,67 @@ export default function App() {
     void loadDriverPortalData();
   }, [isLoggedIn, userRole]);
 
+  useEffect(() => {
+    const handlePopState = (event: PopStateEvent) => {
+      const state = event.state as { page?: string; selectedVehicleId?: string | null } | null;
+      if (!state?.page) {
+        setCurrentPage('dashboard');
+        setSelectedVehicleId(null);
+        return;
+      }
+      setCurrentPage(state.page);
+      setSelectedVehicleId(state.selectedVehicleId || null);
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, []);
+
+  const handlePortalBack = () => {
+    if (typeof window !== 'undefined' && window.history.length > 1) {
+      window.history.back();
+      return;
+    }
+    navigateToPage('dashboard', { replaceHistory: true, vehicleId: null });
+  };
+
+  const getBackLabel = () => {
+    switch (currentPage) {
+      case 'vehicle-details':
+        return 'Back to Vehicles';
+      case 'drivers':
+      case 'driver-approval':
+      case 'driver-wallet':
+      case 'driver-performance':
+        return 'Back to Drivers';
+      case 'customers':
+      case 'calendar':
+        return currentUser?.role === 'driver' ? 'Back to Driver Dashboard' : 'Back to Customers';
+      case 'incidents':
+        return 'Back to Incidents';
+      case 'maintenance':
+      case 'preventive-maintenance':
+      case 'report-fault':
+      case 'fault-history':
+      case 'fault-approvals':
+        return 'Back to Maintenance';
+      case 'rides':
+      case 'create-ride':
+      case 'ride-history':
+        return 'Back to Bookings';
+      default:
+        return userRole === 'owner'
+          ? 'Back to Owner Dashboard'
+          : userRole === 'admin'
+            ? 'Back to Admin Dashboard'
+            : 'Back to Driver Dashboard';
+    }
+  };
+
+  const showBackButton = currentPage !== 'dashboard';
+
   const handleLogout = async () => {
     const token = localStorage.getItem('flux_token');
 
@@ -260,11 +340,14 @@ export default function App() {
         <AdminLayout
           userRole={userRole}
           activeSection={currentPage}
-          onNavigate={setCurrentPage}
+          onNavigate={navigateToPage}
           onLogout={handleLogout}
+          showBackButton={showBackButton}
+          backLabel={getBackLabel()}
+          onBack={handlePortalBack}
         >
           <Suspense fallback={<div className="p-6 text-sm text-gray-500">Loading page...</div>}>
-          {currentPage === 'dashboard' && renderProtectedPage('dashboard', <Dashboard onNavigate={setCurrentPage} userRole={userRole} />)}
+          {currentPage === 'dashboard' && renderProtectedPage('dashboard', <Dashboard onNavigate={navigateToPage} userRole={userRole} />)}
           {currentPage === 'fleet-tracking' && renderProtectedPage('fleet-tracking', <FleetTracking />)}
           {currentPage === 'vehicles' && renderProtectedPage('vehicles', <Vehicles onOpenVehicleDetails={handleOpenVehicleDetails} />)}
           {currentPage === 'vehicle-details' &&
@@ -307,17 +390,20 @@ export default function App() {
         <Toaster position="bottom-right" richColors closeButton />
         <DriverLayout
           activeSection={currentPage}
-          onNavigate={setCurrentPage}
+          onNavigate={navigateToPage}
           onLogout={handleLogout}
           currentUser={currentUser}
           activeAssignment={driverActiveAssignment}
+          showBackButton={showBackButton}
+          backLabel={getBackLabel()}
+          onBack={handlePortalBack}
         >
           {currentPage === 'dashboard' && renderProtectedPage('dashboard', (
             <DriverDashboard
               currentUser={currentUser}
               activeAssignment={driverActiveAssignment}
               dashboardSummary={driverDashboardSummary}
-              onNavigate={setCurrentPage}
+              onNavigate={navigateToPage}
             />
           ))}
           {currentPage === 'my-vehicle' && (

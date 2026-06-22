@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Shield,
   Lock,
@@ -21,6 +21,7 @@ import {
   TrendingUp,
   UserX
 } from 'lucide-react';
+import { useDebouncedValue } from '../../lib/use-debounced-value';
 
 type SecurityTab = 'activity' | 'login-history' | 'audit-logs' | 'access-logs' | 'password-policy' | '2fa';
 
@@ -62,6 +63,7 @@ export default function Security() {
   const [activeTab, setActiveTab] = useState<SecurityTab>('activity');
   const [searchQuery, setSearchQuery] = useState('');
   const [dateRange, setDateRange] = useState('last-7-days');
+  const debouncedSearchQuery = useDebouncedValue(searchQuery, 250);
 
   const loginHistory: LoginAttempt[] = [
     {
@@ -217,6 +219,17 @@ export default function Security() {
   const failedLoginCount = loginHistory.filter(l => l.status === 'failed' || l.status === 'blocked').length;
   const activeSessionsCount = activeSessions.length;
   const recentActivitiesCount = auditLogs.length;
+  const filteredLoginHistory = useMemo(() => {
+    const query = debouncedSearchQuery.trim().toLowerCase();
+    if (!query) {
+      return loginHistory;
+    }
+    return loginHistory.filter((login) =>
+      [login.user, login.email, login.ipAddress, login.location, login.device, login.status, login.reason]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query)),
+    );
+  }, [debouncedSearchQuery, loginHistory]);
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -448,7 +461,7 @@ export default function Security() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-200">
-                    {loginHistory.map((login) => (
+                    {filteredLoginHistory.map((login) => (
                       <tr key={login.id} className="hover:bg-gray-50 transition-colors">
                         <td className="px-4 py-4">
                           <div>
@@ -476,6 +489,13 @@ export default function Security() {
                         </td>
                       </tr>
                     ))}
+                    {filteredLoginHistory.length === 0 && (
+                      <tr>
+                        <td colSpan={7} className="px-4 py-10 text-center text-sm text-gray-500">
+                          No matching records found.
+                        </td>
+                      </tr>
+                    )}
                   </tbody>
                 </table>
               </div>

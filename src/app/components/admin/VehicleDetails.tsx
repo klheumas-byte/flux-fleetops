@@ -43,6 +43,21 @@ interface Vehicle {
   chassis_number: string | null;
   engine_number: string | null;
   insurance_expiry: string | null;
+  insurance_profile?: {
+    insurance_company?: string | null;
+    policy_number?: string | null;
+    insurance_type?: string | null;
+    start_date?: string | null;
+    expiry_date?: string | null;
+    coverage_duration_months?: number | null;
+    claims_officer_name?: string | null;
+    claims_officer_phone?: string | null;
+    claims_officer_email?: string | null;
+    emergency_contact?: string | null;
+    excess_amount?: number | null;
+    covered_risks?: string[];
+    excluded_risks?: string[];
+  };
   roadworthy_expiry: string | null;
   default_weekly_target: number;
   default_daily_target: number;
@@ -647,6 +662,9 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
             <h2 className="text-lg font-semibold text-[#0F172A]">Expiry Snapshot</h2>
             <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
               <DetailRow label="Insurance Expiry" value={formatDate(vehicle.insurance_expiry)} />
+              <DetailRow label="Insurance Provider" value={vehicle.insurance_profile?.insurance_company} />
+              <DetailRow label="Policy Number" value={vehicle.insurance_profile?.policy_number} />
+              <DetailRow label="Insurance Type" value={vehicle.insurance_profile?.insurance_type} />
               <DetailRow label="Roadworthy Expiry" value={formatDate(vehicle.roadworthy_expiry)} />
               <DetailRow label="Weekly Target" value={formatCurrency(vehicle.default_weekly_target)} />
               <DetailRow label="Daily Target" value={formatCurrency(vehicle.default_daily_target)} />
@@ -655,6 +673,25 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
               <DetailRow label="Downtime Days" value={vehiclePerformance?.downtime_days ?? 0} />
               <DetailRow label="Health Category" value={health?.category} />
             </div>
+            {(vehicle.insurance_profile?.claims_officer_name || vehicle.insurance_profile?.claims_officer_phone || vehicle.insurance_profile?.claims_officer_email) && (
+              <div className="mt-4 rounded-xl border border-blue-100 bg-blue-50/60 p-4">
+                <div className="text-sm font-semibold text-[#0F172A]">Claims Officer</div>
+                <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <DetailRow label="Name" value={vehicle.insurance_profile?.claims_officer_name} />
+                  <DetailRow label="Phone" value={vehicle.insurance_profile?.claims_officer_phone} />
+                  <DetailRow label="Email" value={vehicle.insurance_profile?.claims_officer_email} />
+                  <DetailRow label="Emergency Contact" value={vehicle.insurance_profile?.emergency_contact} />
+                  <DetailRow label="Coverage Duration" value={vehicle.insurance_profile?.coverage_duration_months != null ? `${vehicle.insurance_profile.coverage_duration_months} month(s)` : '-'} />
+                  <DetailRow label="Excess / Deductible" value={formatCurrency(vehicle.insurance_profile?.excess_amount)} />
+                </div>
+                <div className="mt-3 text-sm text-gray-600">
+                  Covered risks: {(vehicle.insurance_profile?.covered_risks || []).join(', ') || 'Not set'}
+                </div>
+                <div className="mt-1 text-sm text-gray-600">
+                  Excluded risks: {(vehicle.insurance_profile?.excluded_risks || []).join(', ') || 'Not set'}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

@@ -26,6 +26,7 @@ export type AppModule =
   | 'accountability'
   | 'customers'
   | 'fuel'
+  | 'incidents'
   | 'fault-approvals'
   | 'maintenance'
   | 'preventive-maintenance'
@@ -105,6 +106,7 @@ export const MODULE_ACCESS_MATRIX: Record<AppModule, RoleMatrix> = {
   accountability: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
   customers: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: DRIVER_ACCESS },
   fuel: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
+  incidents: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: DRIVER_ACCESS },
   'fault-approvals': { owner: FULL_ACCESS, admin: { ...OPERATIONAL_ADMIN, can_approve: true }, driver: NO_ACCESS },
   maintenance: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
   'preventive-maintenance': { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },

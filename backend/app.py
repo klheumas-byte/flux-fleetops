@@ -17,6 +17,7 @@ from services.expense_service import ensure_expense_indexes
 from services.fault_service import ensure_fault_indexes, seed_default_fault_catalog
 from services.finance_account_service import ensure_finance_account_indexes
 from services.fuel_service import ensure_fuel_indexes, seed_default_fuel_stations
+from services.incident_service import ensure_incident_indexes
 from services.maintenance_service import ensure_maintenance_indexes
 from services.master_data_service import ensure_master_data_indexes
 from services.notification_service import ensure_notification_indexes
@@ -67,6 +68,7 @@ def create_app(config_name: str | None = None) -> Flask:
                 ensure_fault_indexes()
                 ensure_finance_account_indexes()
                 ensure_fuel_indexes()
+                ensure_incident_indexes()
                 ensure_maintenance_indexes()
                 ensure_master_data_indexes()
                 ensure_notification_indexes()

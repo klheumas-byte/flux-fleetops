@@ -13,8 +13,15 @@ _mongo_client = None
 def init_extensions(app):
     cors.init_app(
         app,
-        resources={r"/api/*": {"origins": app.config["CORS_ORIGINS"]}},
+        resources={
+            r"/api/*": {
+                "origins": app.config["CORS_ORIGINS"],
+                "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                "allow_headers": ["Content-Type", "Authorization"],
+            }
+        },
         supports_credentials=False,
+        automatic_options=True,
     )
     jwt.init_app(app)
     register_jwt_callbacks()

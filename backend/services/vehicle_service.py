@@ -20,11 +20,13 @@ from utils.mongo_indexes import ensure_indexes_for_collection
 ALLOWED_VEHICLE_TYPES = {"saloon", "suv", "pickup", "van", "truck", "motorcycle"}
 ALLOWED_TRANSMISSIONS = {"manual", "automatic"}
 ALLOWED_FUEL_TYPES = {"petrol", "diesel", "hybrid", "electric"}
+ALLOWED_INSURANCE_TYPES = {"Third Party", "Comprehensive"}
 ALLOWED_VEHICLE_STATUSES = {
     "available",
     "assigned",
     "maintenance",
     "accident",
+    "out_of_service",
     "suspended",
     "retired",
 }
@@ -163,6 +165,16 @@ def validate_numeric(value, field_name: str, *, positive: bool = False):
     return round(float(value), 2) if isinstance(value, (int, float)) else value
 
 
+def validate_integer(value, field_name: str, *, positive: bool = False):
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ApiError(f"{field_name} must be an integer.", status_code=400)
+    if positive and value <= 0:
+        raise ApiError(f"{field_name} must be a positive integer.", status_code=400)
+    return value
+
+
 def validate_reference_id(value, field_name: str) -> ObjectId | None:
     if value in (None, ""):
         return None
@@ -249,6 +261,7 @@ def _serialize_vehicle_list_item(vehicle_document: dict) -> dict:
         "chassis_number": None,
         "engine_number": None,
         "insurance_expiry": vehicle_document.get("insurance_expiry"),
+        "insurance_profile": vehicle_document.get("insurance_profile") or {},
         "roadworthy_expiry": vehicle_document.get("roadworthy_expiry"),
         "default_weekly_target": vehicle_document.get("default_weekly_target"),
         "default_daily_target": vehicle_document.get("default_daily_target"),
@@ -275,6 +288,7 @@ def _vehicle_detail_projection() -> dict:
         "chassis_number": 1,
         "engine_number": 1,
         "insurance_expiry": 1,
+        "insurance_profile": 1,
         "roadworthy_expiry": 1,
         "default_weekly_target": 1,
         "default_daily_target": 1,
@@ -349,6 +363,95 @@ def _normalize_text(value):
         return None
     normalized = str(value).strip().lower()
     return normalized or None
+
+
+def _normalize_risk_list(values):
+    if values in (None, ""):
+        return []
+    if not isinstance(values, list):
+        raise ApiError("Insurance risks must be provided as a list.", status_code=400)
+    normalized = []
+    for item in values:
+        label = normalize_string(item)
+        if label:
+            normalized.append(label)
+    return normalized
+
+
+def _build_insurance_profile(payload: dict, existing_profile: dict | None = None) -> dict | None:
+    existing = existing_profile or {}
+    insurance_fields = {
+        "insurance_company",
+        "policy_number",
+        "insurance_type",
+        "start_date",
+        "expiry_date",
+        "coverage_duration_months",
+        "claims_officer_name",
+        "claims_officer_phone",
+        "claims_officer_email",
+        "emergency_contact",
+        "excess_amount",
+        "covered_risks",
+        "excluded_risks",
+    }
+    if not any(field in payload for field in insurance_fields):
+        return None
+
+    profile = {
+        "insurance_company": normalize_string(payload.get("insurance_company"))
+        if "insurance_company" in payload
+        else existing.get("insurance_company"),
+        "policy_number": normalize_string(payload.get("policy_number"))
+        if "policy_number" in payload
+        else existing.get("policy_number"),
+        "insurance_type": normalize_string(payload.get("insurance_type"))
+        if "insurance_type" in payload
+        else existing.get("insurance_type"),
+        "start_date": normalize_string(payload.get("start_date"))
+        if "start_date" in payload
+        else existing.get("start_date"),
+        "expiry_date": normalize_string(payload.get("expiry_date"))
+        if "expiry_date" in payload
+        else existing.get("expiry_date"),
+        "coverage_duration_months": validate_integer(
+            payload.get("coverage_duration_months"),
+            "coverage_duration_months",
+            positive=True,
+        )
+        if "coverage_duration_months" in payload
+        else existing.get("coverage_duration_months"),
+        "claims_officer_name": normalize_string(payload.get("claims_officer_name"))
+        if "claims_officer_name" in payload
+        else existing.get("claims_officer_name"),
+        "claims_officer_phone": normalize_string(payload.get("claims_officer_phone"))
+        if "claims_officer_phone" in payload
+        else existing.get("claims_officer_phone"),
+        "claims_officer_email": normalize_string(payload.get("claims_officer_email"))
+        if "claims_officer_email" in payload
+        else existing.get("claims_officer_email"),
+        "emergency_contact": normalize_string(payload.get("emergency_contact"))
+        if "emergency_contact" in payload
+        else existing.get("emergency_contact"),
+        "excess_amount": validate_numeric(payload.get("excess_amount"), "excess_amount")
+        if "excess_amount" in payload
+        else existing.get("excess_amount"),
+        "covered_risks": _normalize_risk_list(payload.get("covered_risks"))
+        if "covered_risks" in payload
+        else existing.get("covered_risks") or [],
+        "excluded_risks": _normalize_risk_list(payload.get("excluded_risks"))
+        if "excluded_risks" in payload
+        else existing.get("excluded_risks") or [],
+    }
+
+    insurance_type = profile.get("insurance_type")
+    if insurance_type is not None and insurance_type not in ALLOWED_INSURANCE_TYPES:
+        raise ApiError("insurance_type must be Third Party or Comprehensive.", status_code=400)
+    if insurance_type == "Third Party":
+        profile["excess_amount"] = None
+    if not any(profile.get(key) not in (None, [], "") for key in profile):
+        return {}
+    return profile
 
 
 def _parse_iso_date(value):
@@ -747,8 +850,10 @@ def normalize_vehicle_payload(
     *,
     partial: bool = False,
     vehicle_id: ObjectId | None = None,
+    existing_insurance_profile: dict | None = None,
 ) -> dict:
     normalized_data = {}
+    insurance_profile = _build_insurance_profile(payload, existing_profile=existing_insurance_profile)
 
     string_fields = {
         "registration_number": normalize_registration_number,
@@ -854,6 +959,10 @@ def normalize_vehicle_payload(
     if vehicle_status is not None and vehicle_status not in ALLOWED_VEHICLE_STATUSES:
         raise ApiError("Invalid vehicle status.", status_code=400)
 
+    if insurance_profile is not None:
+        normalized_data["insurance_profile"] = insurance_profile
+        normalized_data["insurance_expiry"] = insurance_profile.get("expiry_date") or normalized_data.get("insurance_expiry")
+
     if not partial and "status" not in normalized_data:
         normalized_data["status"] = "available"
 
@@ -919,6 +1028,7 @@ def list_vehicles(*, current_role: str) -> list[dict]:
                 "transmission": 1,
                 "fuel_type": 1,
                 "insurance_expiry": 1,
+                "insurance_profile": 1,
                 "roadworthy_expiry": 1,
                 "default_weekly_target": 1,
                 "default_daily_target": 1,
@@ -1041,6 +1151,7 @@ def update_vehicle(vehicle_id: str, payload: dict, *, current_user_id: str, curr
         payload,
         partial=True,
         vehicle_id=vehicle["_id"],
+        existing_insurance_profile=vehicle.get("insurance_profile") or {},
     )
     if not normalized_data:
         raise ApiError("No vehicle fields provided for update.", status_code=400)

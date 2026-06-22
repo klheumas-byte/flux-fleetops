@@ -56,6 +56,7 @@ import ReportFault from './components/driver/ReportFault';
 import DriverNotifications from './components/driver/DriverNotifications';
 import DriverProfile from './components/driver/DriverProfile';
 import AccessDenied from './components/shared/AccessDenied';
+import IncidentsModule from './components/shared/IncidentsModule';
 import { canAccessModule, type AppModule } from './lib/role-access';
 
 const Reports = lazy(() => import('./components/admin/Reports'));
@@ -285,6 +286,7 @@ export default function App() {
           {currentPage === 'accountability' && renderProtectedPage('accountability', <AdminAccountability />)}
           {currentPage === 'customers' && renderProtectedPage('customers', <Customers userRole={userRole} />)}
           {currentPage === 'fuel' && renderProtectedPage('fuel', <FuelManagement />)}
+          {currentPage === 'incidents' && renderProtectedPage('incidents', <IncidentsModule role={userRole} />)}
           {currentPage === 'fault-approvals' && renderProtectedPage('fault-approvals', <FaultApprovals />)}
           {currentPage === 'maintenance' && renderProtectedPage('maintenance', <Maintenance />)}
           {currentPage === 'preventive-maintenance' && renderProtectedPage('preventive-maintenance', <PreventiveMaintenance />)}
@@ -336,6 +338,9 @@ export default function App() {
           {currentPage === 'calendar' && renderProtectedPage('calendar', <DriverCalendar />)}
           {currentPage === 'fuel-logs' && renderProtectedPage('fuel-logs', <FuelLogs />)}
           {currentPage === 'my-performance' && renderProtectedPage('my-performance', <MyPerformance />)}
+          {currentPage === 'incidents' && renderProtectedPage('incidents', (
+            <IncidentsModule role="driver" currentUser={currentUser} activeAssignment={driverActiveAssignment} />
+          ))}
           {currentPage === 'report-fault' && (
             renderProtectedPage('report-fault', <ReportFault
               currentUser={currentUser}

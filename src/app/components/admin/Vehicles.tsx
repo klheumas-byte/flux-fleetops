@@ -27,6 +27,7 @@ type VehicleStatus =
   | 'assigned'
   | 'maintenance'
   | 'accident'
+  | 'out_of_service'
   | 'suspended'
   | 'retired';
 
@@ -43,6 +44,21 @@ interface Vehicle {
   chassis_number: string | null;
   engine_number: string | null;
   insurance_expiry: string | null;
+  insurance_profile?: {
+    insurance_company?: string | null;
+    policy_number?: string | null;
+    insurance_type?: 'Third Party' | 'Comprehensive' | string | null;
+    start_date?: string | null;
+    expiry_date?: string | null;
+    coverage_duration_months?: number | null;
+    claims_officer_name?: string | null;
+    claims_officer_phone?: string | null;
+    claims_officer_email?: string | null;
+    emergency_contact?: string | null;
+    excess_amount?: number | null;
+    covered_risks?: string[];
+    excluded_risks?: string[];
+  };
   roadworthy_expiry: string | null;
   default_weekly_target: number;
   default_daily_target: number;
@@ -102,6 +118,19 @@ interface VehicleFormState {
   chassis_number: string;
   engine_number: string;
   insurance_expiry: string;
+  insurance_company: string;
+  policy_number: string;
+  insurance_type: 'Third Party' | 'Comprehensive';
+  insurance_start_date: string;
+  insurance_expiry_date: string;
+  coverage_duration_months: string;
+  claims_officer_name: string;
+  claims_officer_phone: string;
+  claims_officer_email: string;
+  emergency_contact: string;
+  excess_amount: string;
+  covered_risks: string;
+  excluded_risks: string;
   roadworthy_expiry: string;
   default_weekly_target: string;
   default_daily_target: string;
@@ -131,6 +160,19 @@ const initialVehicleForm: VehicleFormState = {
   chassis_number: '',
   engine_number: '',
   insurance_expiry: '',
+  insurance_company: '',
+  policy_number: '',
+  insurance_type: 'Third Party',
+  insurance_start_date: '',
+  insurance_expiry_date: '',
+  coverage_duration_months: '',
+  claims_officer_name: '',
+  claims_officer_phone: '',
+  claims_officer_email: '',
+  emergency_contact: '',
+  excess_amount: '',
+  covered_risks: '',
+  excluded_risks: '',
   roadworthy_expiry: '',
   default_weekly_target: '',
   default_daily_target: '',
@@ -182,6 +224,7 @@ const statusConfig: Record<
   assigned: { label: 'Assigned', color: 'bg-blue-100 text-blue-800', icon: Truck },
   maintenance: { label: 'Maintenance', color: 'bg-yellow-100 text-yellow-800', icon: Wrench },
   accident: { label: 'Accident', color: 'bg-red-100 text-red-800', icon: AlertTriangle },
+  out_of_service: { label: 'Out of Service', color: 'bg-red-100 text-red-800', icon: AlertTriangle },
   suspended: { label: 'Suspended', color: 'bg-gray-100 text-gray-800', icon: Ban },
   retired: { label: 'Retired', color: 'bg-slate-100 text-slate-700', icon: Ban },
 };
@@ -240,6 +283,15 @@ function buildVehiclePayload(form: VehicleFormState) {
   const parseOptionalString = (value: string) =>
     value.trim() === '' ? undefined : value.trim();
 
+  const parseOptionalInteger = (value: string) =>
+    value.trim() === '' ? undefined : Number.parseInt(value, 10);
+
+  const parseList = (value: string) =>
+    value
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+
   return {
     registration_number: form.registration_number.trim(),
     vehicle_type: form.vehicle_type,
@@ -251,7 +303,20 @@ function buildVehiclePayload(form: VehicleFormState) {
     fuel_type: form.fuel_type,
     chassis_number: parseOptionalString(form.chassis_number),
     engine_number: parseOptionalString(form.engine_number),
-    insurance_expiry: parseOptionalString(form.insurance_expiry),
+    insurance_expiry: parseOptionalString(form.insurance_expiry_date || form.insurance_expiry),
+    insurance_company: parseOptionalString(form.insurance_company),
+    policy_number: parseOptionalString(form.policy_number),
+    insurance_type: parseOptionalString(form.insurance_type),
+    start_date: parseOptionalString(form.insurance_start_date),
+    expiry_date: parseOptionalString(form.insurance_expiry_date || form.insurance_expiry),
+    coverage_duration_months: parseOptionalInteger(form.coverage_duration_months),
+    claims_officer_name: parseOptionalString(form.claims_officer_name),
+    claims_officer_phone: parseOptionalString(form.claims_officer_phone),
+    claims_officer_email: parseOptionalString(form.claims_officer_email),
+    emergency_contact: parseOptionalString(form.emergency_contact),
+    excess_amount: parseOptionalNumber(form.excess_amount),
+    covered_risks: parseList(form.covered_risks),
+    excluded_risks: parseList(form.excluded_risks),
     roadworthy_expiry: parseOptionalString(form.roadworthy_expiry),
     default_weekly_target: Number(form.default_weekly_target),
     default_daily_target: Number(form.default_daily_target),
@@ -280,6 +345,7 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
   const [isLoading, setIsLoading] = useState(true);
   const [pageError, setPageError] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingVehicle, setEditingVehicle] = useState<Vehicle | null>(null);
   const [formState, setFormState] = useState<VehicleFormState>(initialVehicleForm);
   const [formError, setFormError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -390,7 +456,7 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
       {
         label: 'Suspended/Accident',
         value: vehicles.filter((vehicle) =>
-          ['suspended', 'accident'].includes(vehicle.status),
+          ['suspended', 'accident', 'out_of_service'].includes(vehicle.status),
         ).length,
         color: 'bg-red-500',
         icon: AlertTriangle,
@@ -469,8 +535,63 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
 
   const closeModal = () => {
     setIsModalOpen(false);
+    setEditingVehicle(null);
     setFormError('');
     setFormState(initialVehicleForm);
+  };
+
+  const openCreateModal = () => {
+    setEditingVehicle(null);
+    setFormError('');
+    setFormState(initialVehicleForm);
+    setIsModalOpen(true);
+  };
+
+  const openEditModal = (vehicle: Vehicle) => {
+    setEditingVehicle(vehicle);
+    setFormError('');
+    setFormState({
+      registration_number: vehicle.registration_number || '',
+      vehicle_type: vehicle.vehicle_type || 'saloon',
+      make: vehicle.make || '',
+      model: vehicle.model || '',
+      year: vehicle.year ? String(vehicle.year) : '',
+      color: vehicle.color || '',
+      transmission: vehicle.transmission || 'automatic',
+      fuel_type: vehicle.fuel_type || 'petrol',
+      chassis_number: vehicle.chassis_number || '',
+      engine_number: vehicle.engine_number || '',
+      insurance_expiry: vehicle.insurance_expiry || '',
+      insurance_company: vehicle.insurance_profile?.insurance_company || '',
+      policy_number: vehicle.insurance_profile?.policy_number || '',
+      insurance_type: (vehicle.insurance_profile?.insurance_type as 'Third Party' | 'Comprehensive') || 'Third Party',
+      insurance_start_date: vehicle.insurance_profile?.start_date || '',
+      insurance_expiry_date: vehicle.insurance_profile?.expiry_date || vehicle.insurance_expiry || '',
+      coverage_duration_months: vehicle.insurance_profile?.coverage_duration_months != null ? String(vehicle.insurance_profile.coverage_duration_months) : '',
+      claims_officer_name: vehicle.insurance_profile?.claims_officer_name || '',
+      claims_officer_phone: vehicle.insurance_profile?.claims_officer_phone || '',
+      claims_officer_email: vehicle.insurance_profile?.claims_officer_email || '',
+      emergency_contact: vehicle.insurance_profile?.emergency_contact || '',
+      excess_amount: vehicle.insurance_profile?.excess_amount != null ? String(vehicle.insurance_profile.excess_amount) : '',
+      covered_risks: (vehicle.insurance_profile?.covered_risks || []).join(', '),
+      excluded_risks: (vehicle.insurance_profile?.excluded_risks || []).join(', '),
+      roadworthy_expiry: vehicle.roadworthy_expiry || '',
+      default_weekly_target: String(vehicle.default_weekly_target ?? ''),
+      default_daily_target: String(vehicle.default_daily_target ?? ''),
+      purchase_cost: vehicle.purchase_cost != null ? String(vehicle.purchase_cost) : '',
+      shipping_cost: vehicle.shipping_cost != null ? String(vehicle.shipping_cost) : '',
+      clearing_cost: vehicle.clearing_cost != null ? String(vehicle.clearing_cost) : '',
+      insurance_cost: vehicle.insurance_cost != null ? String(vehicle.insurance_cost) : '',
+      roadworthy_cost: vehicle.roadworthy_cost != null ? String(vehicle.roadworthy_cost) : '',
+      ama_permit_cost: vehicle.ama_permit_cost != null ? String(vehicle.ama_permit_cost) : '',
+      vehicle_license_cost: vehicle.vehicle_license_cost != null ? String(vehicle.vehicle_license_cost) : '',
+      tracker_cost: vehicle.tracker_cost != null ? String(vehicle.tracker_cost) : '',
+      branding_cost: vehicle.branding_cost != null ? String(vehicle.branding_cost) : '',
+      initial_repairs_cost: vehicle.initial_repairs_cost != null ? String(vehicle.initial_repairs_cost) : '',
+      registration_cost: vehicle.registration_cost != null ? String(vehicle.registration_cost) : '',
+      other_setup_cost: vehicle.other_setup_cost != null ? String(vehicle.other_setup_cost) : '',
+    });
+    setIsModalOpen(true);
   };
 
   const closeCostItemModal = () => {
@@ -484,14 +605,14 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
     });
   };
 
-  const handleCreateVehicle = async (event: React.FormEvent) => {
+  const handleSaveVehicle = async (event: React.FormEvent) => {
     event.preventDefault();
     setFormError('');
     setIsSubmitting(true);
 
     try {
-      await apiRequest<CreateVehicleResponse>('/vehicles', {
-        method: 'POST',
+      await apiRequest<CreateVehicleResponse>(editingVehicle ? `/vehicles/${editingVehicle.id}` : '/vehicles', {
+        method: editingVehicle ? 'PATCH' : 'POST',
         body: JSON.stringify(buildVehiclePayload(formState)),
       });
 
@@ -502,7 +623,7 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
       if (error instanceof ApiRequestError) {
         setFormError(error.message);
       } else {
-        setFormError('Unable to create vehicle right now.');
+        setFormError(editingVehicle ? 'Unable to update vehicle right now.' : 'Unable to create vehicle right now.');
       }
     } finally {
       setIsSubmitting(false);
@@ -552,7 +673,7 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
           <p className="text-gray-500 mt-1">Manage your fleet vehicles and assignments</p>
         </div>
         <button
-          onClick={() => setIsModalOpen(true)}
+          onClick={openCreateModal}
           className="px-4 py-2.5 bg-[#2563EB] text-white rounded-lg hover:bg-[#1d4ed8] flex items-center gap-2 font-medium"
         >
           <Plus className="w-5 h-5" />
@@ -831,6 +952,16 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
                             <button
                               onClick={(event) => {
                                 event.stopPropagation();
+                                openEditModal(vehicle);
+                              }}
+                              className="inline-flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700 transition-colors hover:bg-amber-100"
+                              title="Edit Vehicle"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              onClick={(event) => {
+                                event.stopPropagation();
                                 console.info('[Flux Performance] Vehicle details button clicked', {
                                   vehicle,
                                 });
@@ -903,8 +1034,10 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
           <div className="w-full max-w-5xl h-[90vh] rounded-2xl bg-white shadow-2xl border border-gray-200 overflow-hidden flex flex-col">
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
               <div>
-                <h2 className="text-xl font-semibold text-gray-900">Add Vehicle</h2>
-                <p className="text-sm text-gray-500 mt-1">Create a new vehicle record for the fleet.</p>
+                <h2 className="text-xl font-semibold text-gray-900">{editingVehicle ? 'Edit Vehicle' : 'Add Vehicle'}</h2>
+                <p className="text-sm text-gray-500 mt-1">
+                  {editingVehicle ? 'Update the vehicle record, insurance cover, and claim contact details.' : 'Create a new vehicle record for the fleet.'}
+                </p>
               </div>
               <button
                 onClick={closeModal}
@@ -915,7 +1048,7 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
               </button>
             </div>
 
-            <form onSubmit={handleCreateVehicle} className="flex flex-1 min-h-0 flex-col">
+            <form onSubmit={handleSaveVehicle} className="flex flex-1 min-h-0 flex-col">
               <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5">
                 {formError && (
                   <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -1028,8 +1161,11 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
                     <label className="block text-sm font-medium text-gray-700 mb-2">Insurance Expiry</label>
                     <input
                       type="date"
-                      value={formState.insurance_expiry}
-                      onChange={(e) => handleFieldChange('insurance_expiry', e.target.value)}
+                      value={formState.insurance_expiry_date || formState.insurance_expiry}
+                      onChange={(e) => {
+                        handleFieldChange('insurance_expiry', e.target.value);
+                        handleFieldChange('insurance_expiry_date', e.target.value);
+                      }}
                       className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent"
                     />
                   </div>
@@ -1063,6 +1199,72 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
                       className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent"
                       required
                     />
+                  </div>
+                  <div className="md:col-span-2 xl:col-span-3 rounded-xl border border-blue-100 bg-blue-50/60 p-4">
+                    <div className="text-sm font-semibold text-[#0F172A]">Insurance Profile</div>
+                    <div className="mt-3 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Insurance Company</label>
+                        <input value={formState.insurance_company} onChange={(e) => handleFieldChange('insurance_company', e.target.value)} className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent" />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Policy Number</label>
+                        <input value={formState.policy_number} onChange={(e) => handleFieldChange('policy_number', e.target.value)} className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent" />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Insurance Type</label>
+                        <select value={formState.insurance_type} onChange={(e) => handleFieldChange('insurance_type', e.target.value)} className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent bg-white">
+                          <option value="Third Party">Third Party</option>
+                          <option value="Comprehensive">Comprehensive</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Insurance Start Date</label>
+                        <input type="date" value={formState.insurance_start_date} onChange={(e) => handleFieldChange('insurance_start_date', e.target.value)} className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent" />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Coverage Expiry Date</label>
+                        <input type="date" value={formState.insurance_expiry_date} onChange={(e) => {
+                          handleFieldChange('insurance_expiry_date', e.target.value);
+                          handleFieldChange('insurance_expiry', e.target.value);
+                        }} className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent" />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Coverage Duration (Months)</label>
+                        <input type="number" value={formState.coverage_duration_months} onChange={(e) => handleFieldChange('coverage_duration_months', e.target.value)} className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent" />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Claims Officer Name</label>
+                        <input value={formState.claims_officer_name} onChange={(e) => handleFieldChange('claims_officer_name', e.target.value)} className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent" />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Claims Officer Phone</label>
+                        <input value={formState.claims_officer_phone} onChange={(e) => handleFieldChange('claims_officer_phone', e.target.value)} className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent" />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Claims Officer Email</label>
+                        <input type="email" value={formState.claims_officer_email} onChange={(e) => handleFieldChange('claims_officer_email', e.target.value)} className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent" />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Emergency Contact</label>
+                        <input value={formState.emergency_contact} onChange={(e) => handleFieldChange('emergency_contact', e.target.value)} className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent" />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Excess / Deductible</label>
+                        <input type="number" step="0.01" value={formState.excess_amount} onChange={(e) => handleFieldChange('excess_amount', e.target.value)} disabled={formState.insurance_type !== 'Comprehensive'} className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent disabled:bg-gray-100 disabled:text-gray-500" />
+                      </div>
+                      <div className="md:col-span-2 xl:col-span-3">
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Covered Risks</label>
+                        <input value={formState.covered_risks} onChange={(e) => handleFieldChange('covered_risks', e.target.value)} placeholder="accident, fire, theft, third_party_damage" className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent" />
+                      </div>
+                      <div className="md:col-span-2 xl:col-span-3">
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Excluded Risks</label>
+                        <input value={formState.excluded_risks} onChange={(e) => handleFieldChange('excluded_risks', e.target.value)} placeholder="other, breakdown" className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent" />
+                      </div>
+                    </div>
+                    <div className="mt-3 text-xs text-gray-600">
+                      Third Party policies are tracked for validity and liability-only claims. Comprehensive policies can include own-damage, excess, covered risks, and exclusions.
+                    </div>
                   </div>
                   {canViewInvestmentFields && (
                     <>
@@ -1164,7 +1366,7 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
                   className="px-4 py-2.5 bg-[#2563EB] text-white rounded-lg hover:bg-[#1d4ed8] disabled:opacity-70 disabled:cursor-not-allowed flex items-center gap-2 font-medium"
                 >
                   {isSubmitting && <Loader2 className="w-4 h-4 animate-spin" />}
-                  {isSubmitting ? 'Saving Vehicle...' : 'Add Vehicle'}
+                  {isSubmitting ? 'Saving Vehicle...' : editingVehicle ? 'Save Changes' : 'Add Vehicle'}
                 </button>
                 </div>
               </div>

@@ -18,6 +18,7 @@ from .faults import faults_bp
 from .finance_accounts import finance_accounts_bp
 from .fuel_logs import fuel_logs_bp
 from .fuel_stations import fuel_stations_bp
+from .incidents import incidents_bp
 from .maintenance import maintenance_bp
 from .master_data import master_data_bp
 from .notifications import notifications_bp
@@ -49,6 +50,7 @@ def register_blueprints(app: Flask) -> None:
     app.register_blueprint(finance_accounts_bp, url_prefix="/api/finance")
     app.register_blueprint(fuel_logs_bp, url_prefix="/api/fuel-logs")
     app.register_blueprint(fuel_stations_bp, url_prefix="/api/fuel-stations")
+    app.register_blueprint(incidents_bp, url_prefix="/api/incidents")
     app.register_blueprint(maintenance_bp, url_prefix="/api/maintenance")
     app.register_blueprint(master_data_bp, url_prefix="/api/master-data")
     app.register_blueprint(notifications_bp, url_prefix="/api/notifications")

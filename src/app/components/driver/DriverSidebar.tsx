@@ -80,6 +80,7 @@ const DRIVER_SECTIONS: DriverSidebarSection[] = [
     title: 'Performance & Support',
     items: [
       { id: 'my-performance', label: 'My Performance', icon: Activity },
+      { id: 'incidents', label: 'Report Incident', icon: AlertTriangle },
       { id: 'report-fault', label: 'Report Fault', icon: AlertTriangle },
       { id: 'fault-history', label: 'Fault History', icon: Clock },
       { id: 'notifications', label: 'Notifications', icon: Bell, badge: '3' },

@@ -8,6 +8,7 @@ def _serialize_reference_id(value):
 
 
 def serialize_vehicle(vehicle_document: dict, *, include_sensitive: bool = True) -> dict:
+    insurance_profile = vehicle_document.get("insurance_profile") or {}
     data = {
         "id": str(vehicle_document.get("_id")),
         "registration_number": vehicle_document.get("registration_number"),
@@ -21,6 +22,21 @@ def serialize_vehicle(vehicle_document: dict, *, include_sensitive: bool = True)
         "chassis_number": vehicle_document.get("chassis_number"),
         "engine_number": vehicle_document.get("engine_number"),
         "insurance_expiry": vehicle_document.get("insurance_expiry"),
+        "insurance_profile": {
+            "insurance_company": insurance_profile.get("insurance_company"),
+            "policy_number": insurance_profile.get("policy_number"),
+            "insurance_type": insurance_profile.get("insurance_type"),
+            "start_date": insurance_profile.get("start_date"),
+            "expiry_date": insurance_profile.get("expiry_date"),
+            "coverage_duration_months": insurance_profile.get("coverage_duration_months"),
+            "claims_officer_name": insurance_profile.get("claims_officer_name"),
+            "claims_officer_phone": insurance_profile.get("claims_officer_phone"),
+            "claims_officer_email": insurance_profile.get("claims_officer_email"),
+            "emergency_contact": insurance_profile.get("emergency_contact"),
+            "excess_amount": insurance_profile.get("excess_amount"),
+            "covered_risks": insurance_profile.get("covered_risks") or [],
+            "excluded_risks": insurance_profile.get("excluded_risks") or [],
+        },
         "roadworthy_expiry": vehicle_document.get("roadworthy_expiry"),
         "default_weekly_target": vehicle_document.get("default_weekly_target"),
         "default_daily_target": vehicle_document.get("default_daily_target"),

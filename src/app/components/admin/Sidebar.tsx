@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import {
   Activity,
+  AlertTriangle,
   Bell,
   Building2,
   ChevronDown,
@@ -91,6 +92,7 @@ const SECTIONS: SidebarSection[] = [
     title: 'Maintenance & Compliance',
     items: [
       { id: 'fault-approvals', label: 'Fault Approvals', icon: ShieldAlert },
+      { id: 'incidents', label: 'Accidents & Incidents', icon: AlertTriangle },
       { id: 'maintenance', label: 'Maintenance Jobs', icon: Wrench },
       { id: 'preventive-maintenance', label: 'Preventive Maintenance', icon: TimerReset },
       { id: 'fuel', label: 'Fuel Management', icon: Fuel },

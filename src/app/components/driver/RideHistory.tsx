@@ -24,9 +24,17 @@ export default function RideHistory() {
       setIsLoading(true);
       setPageError('');
       try {
-        const [nextRides, nextSummary] = await Promise.all([fetchRides(), fetchRideSummary()]);
-        setRides(nextRides);
-        setSummary(nextSummary);
+        const [ridesResult, summaryResult] = await Promise.allSettled([fetchRides(), fetchRideSummary()]);
+        setRides(ridesResult.status === 'fulfilled' ? ridesResult.value : []);
+        setSummary(summaryResult.status === 'fulfilled' ? summaryResult.value : null);
+
+        if (ridesResult.status === 'rejected') {
+          throw ridesResult.reason;
+        }
+
+        if (summaryResult.status === 'rejected') {
+          console.warn('[Flux Ride History] Summary request failed while rides loaded.', summaryResult.reason);
+        }
       } catch (error) {
         if (error instanceof ApiRequestError) {
           setPageError(error.message);

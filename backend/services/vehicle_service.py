@@ -126,10 +126,12 @@ def ensure_vehicle_indexes():
             {"keys": [("engine_number", ASCENDING)], "options": {"unique": True, "sparse": True}},
             {"keys": [("status", ASCENDING)]},
             {"keys": [("assigned_driver_id", ASCENDING)], "options": {"sparse": True}},
-            {"keys": [("created_at", ASCENDING)]},
-            {"keys": [("updated_at", ASCENDING)]},
-            {"keys": [("assigned_driver_id", ASCENDING), ("updated_at", ASCENDING)]},
-            {"keys": [("status", ASCENDING), ("updated_at", ASCENDING)]},
+            {"keys": [("created_at", DESCENDING)]},
+            {"keys": [("updated_at", DESCENDING)]},
+            {"keys": [("assigned_driver_id", ASCENDING), ("created_at", DESCENDING)]},
+            {"keys": [("assigned_driver_id", ASCENDING), ("updated_at", DESCENDING)]},
+            {"keys": [("status", ASCENDING), ("created_at", DESCENDING)]},
+            {"keys": [("status", ASCENDING), ("updated_at", DESCENDING)]},
         ],
         collection_name="vehicles",
     )
@@ -137,7 +139,8 @@ def ensure_vehicle_indexes():
         vehicle_cost_items_collection(),
         [
             {"keys": [("vehicle_id", ASCENDING)]},
-            {"keys": [("created_at", ASCENDING)]},
+            {"keys": [("created_at", DESCENDING)]},
+            {"keys": [("vehicle_id", ASCENDING), ("created_at", DESCENDING)]},
         ],
         collection_name="vehicle_cost_items",
     )

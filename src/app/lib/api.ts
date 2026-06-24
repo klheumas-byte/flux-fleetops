@@ -20,6 +20,10 @@ type ApiRequestOptions = Omit<RequestInit, 'headers'> & {
   timeoutMs?: number;
   cacheTtlMs?: number;
   dedupeKey?: string;
+  componentName?: string;
+  requestLabel?: string;
+  cancelGroup?: string;
+  replacePending?: boolean;
 };
 
 export type ApiResult<T> = {
@@ -31,12 +35,14 @@ export type ApiResult<T> = {
   ok: false;
   data: T;
   error: string;
-  status: number | 'timeout' | 'network';
+  status: number | 'timeout' | 'network' | 'aborted';
 };
 
-const DEFAULT_TIMEOUT_MS = 10000;
+const DEFAULT_TIMEOUT_MS = 15000;
 const responseCache = new Map<string, { expiresAt: number; data: unknown }>();
 const inflightRequests = new Map<string, Promise<unknown>>();
+const requestControllers = new Map<string, AbortController>();
+const activeCancelGroups = new Map<string, Set<string>>();
 
 export class ApiRequestError extends Error {
   status: number;
@@ -50,6 +56,47 @@ export class ApiRequestError extends Error {
     this.errors = errors;
     this.data = data;
   }
+}
+
+export function isRequestAborted(error: unknown) {
+  return error instanceof ApiRequestError && error.status === -1;
+}
+
+function addControllerToGroup(groupKey: string | undefined, requestKey: string) {
+  if (!groupKey) {
+    return;
+  }
+  const nextGroup = activeCancelGroups.get(groupKey) || new Set<string>();
+  nextGroup.add(requestKey);
+  activeCancelGroups.set(groupKey, nextGroup);
+}
+
+function removeControllerFromGroup(groupKey: string | undefined, requestKey: string) {
+  if (!groupKey) {
+    return;
+  }
+  const currentGroup = activeCancelGroups.get(groupKey);
+  if (!currentGroup) {
+    return;
+  }
+  currentGroup.delete(requestKey);
+  if (currentGroup.size === 0) {
+    activeCancelGroups.delete(groupKey);
+  }
+}
+
+function abortRequestGroup(groupKey: string) {
+  const currentGroup = activeCancelGroups.get(groupKey);
+  if (!currentGroup?.size) {
+    return;
+  }
+  currentGroup.forEach((requestKey) => {
+    const controller = requestControllers.get(requestKey);
+    if (controller) {
+      controller.abort('replaced');
+    }
+  });
+  activeCancelGroups.delete(groupKey);
 }
 
 function normalizeErrorMessage(status: number, data: any, fallback?: string) {
@@ -103,6 +150,8 @@ export async function apiRequest<T>(
     path,
     method: options.method || 'GET',
     hasToken: Boolean(token),
+    componentName: options.componentName || null,
+    requestLabel: options.requestLabel || null,
   });
 
   const method = options.method || 'GET';
@@ -123,12 +172,21 @@ export async function apiRequest<T>(
     return inflightRequests.get(requestKey) as Promise<T>;
   }
 
+  if (options.cancelGroup && options.replacePending) {
+    abortRequestGroup(options.cancelGroup);
+  }
+
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const timeoutHandle =
     controller && timeoutMs > 0
       ? window.setTimeout(() => controller.abort(), timeoutMs)
       : null;
+
+  if (controller) {
+    requestControllers.set(requestKey, controller);
+    addControllerToGroup(options.cancelGroup, requestKey);
+  }
 
   const requestPromise = (async () => {
     let response: Response;
@@ -139,22 +197,35 @@ export async function apiRequest<T>(
         signal: controller?.signal,
       });
     } catch (error) {
-      const isTimeout =
-        error instanceof DOMException && error.name === 'AbortError';
-      console.error(isTimeout ? '[Flux API] Timeout' : '[Flux API] Network error', {
+      const durationMs =
+        (typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt;
+      const wasAborted = controller?.signal.aborted;
+      const abortReason = controller?.signal.reason;
+      const isReplaced = wasAborted && abortReason === 'replaced';
+      const isTimeout = wasAborted && !isReplaced;
+      console.error(
+        isReplaced ? '[Flux API] Request aborted' : isTimeout ? '[Flux API] Timeout' : '[Flux API] Network error',
+        {
         path,
         method,
         hasToken: Boolean(token),
         error,
         timeoutMs,
+        componentName: options.componentName || null,
+        requestLabel: options.requestLabel || null,
+        durationMs: Number(durationMs.toFixed(2)),
+        requestUrl,
+        abortReason: abortReason || null,
       });
       throw new ApiRequestError(
-        isTimeout
+        isReplaced
+          ? 'Request aborted.'
+          : isTimeout
           ? 'This is taking longer than expected. Please try again.'
           : error instanceof Error && error.message && error.message !== 'Failed to fetch'
             ? error.message
             : 'We could not connect right now. Please check your connection and try again.',
-        0,
+        isReplaced ? -1 : 0,
       );
     } finally {
       if (timeoutHandle !== null) {
@@ -186,6 +257,8 @@ export async function apiRequest<T>(
         hasToken: Boolean(token),
         message,
         data,
+        componentName: options.componentName || null,
+        requestLabel: options.requestLabel || null,
       });
 
       if (response.status === 401) {
@@ -218,6 +291,8 @@ export async function apiRequest<T>(
       status: response.status,
       durationMs: Number(durationMs.toFixed(2)),
       responseTimeHeader: response.headers.get('X-Response-Time-ms'),
+      componentName: options.componentName || null,
+      requestLabel: options.requestLabel || null,
     };
     if (durationMs > 1000) {
       console.warn('[Flux API] Slow request', logPayload);
@@ -240,6 +315,8 @@ export async function apiRequest<T>(
     return await requestPromise;
   } finally {
     inflightRequests.delete(requestKey);
+    requestControllers.delete(requestKey);
+    removeControllerFromGroup(options.cancelGroup, requestKey);
   }
 }
 
@@ -258,7 +335,9 @@ export async function apiRequestSafe<T>(
   } catch (error) {
     const status =
       error instanceof ApiRequestError
-        ? error.status === 0
+        ? error.status === -1
+          ? 'aborted'
+          : error.status === 0
           ? /timed out/i.test(error.message)
             ? 'timeout'
             : 'network'

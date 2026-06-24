@@ -180,17 +180,32 @@ interface DriverPaymentSubmissionResponse {
 }
 
 export async function fetchDriverActiveAssignment(): Promise<DriverActiveAssignment | null> {
-  const response = await apiRequest<DriverActiveAssignmentResponse>('/driver/active-assignment');
+  const response = await apiRequest<DriverActiveAssignmentResponse>('/driver/active-assignment', {
+    cacheTtlMs: 10000,
+    dedupeKey: 'driver-active-assignment',
+    componentName: 'DriverPortal',
+    requestLabel: 'active-assignment',
+  });
   return response.data.assignment;
 }
 
 export async function fetchDriverDashboardSummary(): Promise<DriverDashboardSummary> {
-  const response = await apiRequest<DriverDashboardSummaryResponse>('/driver/dashboard-summary');
+  const response = await apiRequest<DriverDashboardSummaryResponse>('/driver/dashboard-summary', {
+    cacheTtlMs: 10000,
+    dedupeKey: 'driver-dashboard-summary',
+    componentName: 'DriverPortal',
+    requestLabel: 'dashboard-summary',
+  });
   return response.data.summary;
 }
 
 export async function fetchDriverWallet(): Promise<DriverWalletData> {
-  const response = await apiRequest<DriverWalletResponse>('/driver/wallet');
+  const response = await apiRequest<DriverWalletResponse>('/driver/wallet', {
+    cacheTtlMs: 10000,
+    dedupeKey: 'driver-wallet',
+    componentName: 'DriverPortal',
+    requestLabel: 'wallet',
+  });
   return response.data.wallet;
 }
 

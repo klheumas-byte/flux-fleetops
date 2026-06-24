@@ -80,6 +80,7 @@ def ensure_fuel_indexes():
             {"keys": [("created_at", DESCENDING)]},
             {"keys": [("updated_at", DESCENDING)]},
             {"keys": [("vehicle_id", ASCENDING), ("created_at", DESCENDING)]},
+            {"keys": [("vehicle_id", ASCENDING), ("fuel_date", DESCENDING), ("created_at", DESCENDING)]},
             {"keys": [("driver_id", ASCENDING), ("created_at", DESCENDING)]},
             {"keys": [("status", ASCENDING), ("created_at", DESCENDING)]},
             {"keys": [("vehicle_id", ASCENDING), ("status", ASCENDING)]},

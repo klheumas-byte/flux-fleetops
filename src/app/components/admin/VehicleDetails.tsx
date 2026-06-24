@@ -12,7 +12,7 @@ import {
   Truck,
   Wrench,
 } from 'lucide-react';
-import { apiRequest, ApiRequestError } from '../../lib/api';
+import { apiRequest, apiRequestSafe, ApiRequestError, isRequestAborted } from '../../lib/api';
 import { usePageToastFeedback } from '../../lib/use-page-toast-feedback';
 
 type DetailTab =
@@ -201,7 +201,7 @@ interface PreventiveSchedulesResponse {
   success: boolean;
   data: {
     schedules: PreventiveSchedule[];
-  };
+  } | PreventiveSchedule[];
 }
 
 interface ComplianceRecord {
@@ -309,6 +309,8 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
   const [isLoading, setIsLoading] = useState(true);
   const [isTabLoading, setIsTabLoading] = useState(false);
   const [hasLoadedEconomics, setHasLoadedEconomics] = useState(false);
+  const [hasLoadedMaintenance, setHasLoadedMaintenance] = useState(false);
+  const [hasLoadedCompliance, setHasLoadedCompliance] = useState(false);
   const [pageError, setPageError] = useState('');
   const [tabError, setTabError] = useState('');
   const overviewRequestSequence = useRef(0);
@@ -318,6 +320,8 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
   useEffect(() => {
     setActiveTab('overview');
     setHasLoadedEconomics(false);
+    setHasLoadedMaintenance(false);
+    setHasLoadedCompliance(false);
     setMaintenance([]);
     setCompliance([]);
     setPageError('');
@@ -360,6 +364,10 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
           cacheTtlMs: 15000,
           timeoutMs: 10000,
           dedupeKey: `vehicle-detail:${vehicleId}`,
+          componentName: 'VehicleDetails',
+          requestLabel: 'vehicle-overview',
+          cancelGroup: `vehicle-details:${vehicleId}`,
+          replacePending: true,
         });
 
         if (!isMounted) {
@@ -393,8 +401,10 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
           onMissingRecord?.();
           return;
         }
-        setPageError(resolveVehicleDetailsError(error));
-        setVehicle(null);
+        if (!isRequestAborted(error)) {
+          setPageError(resolveVehicleDetailsError(error));
+          setVehicle(null);
+        }
       } finally {
         window.clearTimeout(timeoutHandle);
         if (isMounted) {
@@ -429,10 +439,10 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
       if (needsEconomics && hasLoadedEconomics) {
         return;
       }
-      if (needsMaintenance && maintenance.length > 0) {
+      if (needsMaintenance && hasLoadedMaintenance) {
         return;
       }
-      if (needsCompliance && compliance.length > 0) {
+      if (needsCompliance && hasLoadedCompliance) {
         return;
       }
 
@@ -441,69 +451,120 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
       try {
         if (needsEconomics) {
           console.info('[Flux Performance] Vehicle economics requested', { vehicleId, activeTab });
-          const response = await apiRequest<VehicleEconomicsResponse>(`/vehicles/${vehicleId}/economics`, {
+          const response = await apiRequestSafe<VehicleEconomicsResponse | null>(`/vehicles/${vehicleId}/economics`, {
             cacheTtlMs: 15000,
             timeoutMs: 10000,
             dedupeKey: `vehicle-economics:${vehicleId}`,
+            componentName: 'VehicleDetails',
+            requestLabel: 'vehicle-economics',
+            cancelGroup: 'vehicle-economics',
+            replacePending: true,
+            fallbackData: null,
           });
           if (!isMounted) {
+            return;
+          }
+          if (!response.ok) {
+            if (response.status !== 'aborted') {
+              setTabError('Economics data is not available right now. The rest of the vehicle page is still available.');
+            }
             return;
           }
           setVehicle((currentVehicle) =>
             currentVehicle
               ? {
                   ...currentVehicle,
-                  purchase_cost: response.data.purchase_cost ?? currentVehicle.purchase_cost,
-                  shipping_cost: response.data.shipping_cost ?? currentVehicle.shipping_cost,
-                  clearing_cost: response.data.clearing_cost ?? currentVehicle.clearing_cost,
-                  insurance_cost: response.data.insurance_cost ?? currentVehicle.insurance_cost,
-                  roadworthy_cost: response.data.roadworthy_cost ?? currentVehicle.roadworthy_cost,
-                  ama_permit_cost: response.data.ama_permit_cost ?? currentVehicle.ama_permit_cost,
+                  purchase_cost: response.data?.data.purchase_cost ?? currentVehicle.purchase_cost,
+                  shipping_cost: response.data?.data.shipping_cost ?? currentVehicle.shipping_cost,
+                  clearing_cost: response.data?.data.clearing_cost ?? currentVehicle.clearing_cost,
+                  insurance_cost: response.data?.data.insurance_cost ?? currentVehicle.insurance_cost,
+                  roadworthy_cost: response.data?.data.roadworthy_cost ?? currentVehicle.roadworthy_cost,
+                  ama_permit_cost: response.data?.data.ama_permit_cost ?? currentVehicle.ama_permit_cost,
                   vehicle_license_cost:
-                    response.data.vehicle_license_cost ?? currentVehicle.vehicle_license_cost,
-                  tracker_cost: response.data.tracker_cost ?? currentVehicle.tracker_cost,
-                  branding_cost: response.data.branding_cost ?? currentVehicle.branding_cost,
+                    response.data?.data.vehicle_license_cost ?? currentVehicle.vehicle_license_cost,
+                  tracker_cost: response.data?.data.tracker_cost ?? currentVehicle.tracker_cost,
+                  branding_cost: response.data?.data.branding_cost ?? currentVehicle.branding_cost,
                   initial_repairs_cost:
-                    response.data.initial_repairs_cost ?? currentVehicle.initial_repairs_cost,
-                  registration_cost: response.data.registration_cost ?? currentVehicle.registration_cost,
-                  other_setup_cost: response.data.other_setup_cost ?? currentVehicle.other_setup_cost,
-                  vehicle_cost_items: response.data.vehicle_cost_items || [],
-                  economics: response.data.economics || {},
+                    response.data?.data.initial_repairs_cost ?? currentVehicle.initial_repairs_cost,
+                  registration_cost: response.data?.data.registration_cost ?? currentVehicle.registration_cost,
+                  other_setup_cost: response.data?.data.other_setup_cost ?? currentVehicle.other_setup_cost,
+                  vehicle_cost_items: response.data?.data.vehicle_cost_items || [],
+                  economics: response.data?.data.economics || {},
                 }
               : currentVehicle,
           );
           setHasLoadedEconomics(true);
         } else if (needsMaintenance) {
-          const response = await apiRequest<PreventiveSchedulesResponse>(
-            `/preventive-maintenance?vehicle_id=${vehicleId}`,
-            { cacheTtlMs: 15000, timeoutMs: 10000, dedupeKey: `vehicle-maintenance:${vehicleId}` },
+          const response = await apiRequestSafe<PreventiveSchedulesResponse | null>(
+            `/preventive-maintenance/vehicle/${vehicleId}`,
+            {
+              cacheTtlMs: 15000,
+              timeoutMs: 10000,
+              dedupeKey: `vehicle-maintenance:${vehicleId}`,
+              componentName: 'VehicleDetails',
+              requestLabel: 'vehicle-maintenance-tab',
+              cancelGroup: 'vehicle-maintenance',
+              replacePending: true,
+              fallbackData: null,
+            },
           );
           if (!isMounted) {
             return;
           }
-          setMaintenance(response.data?.schedules || []);
+          if (!response.ok) {
+            if (response.status !== 'aborted') {
+              setTabError('Maintenance data is not available right now. Try again in a moment.');
+            }
+            setMaintenance([]);
+            return;
+          }
+          const schedules = Array.isArray(response.data?.data)
+            ? response.data?.data
+            : response.data?.data?.schedules || [];
+          setTabError('');
+          setMaintenance(schedules);
+          setHasLoadedMaintenance(true);
         } else {
-          const response = await apiRequest<ComplianceRecordsResponse>(
+          const response = await apiRequestSafe<ComplianceRecordsResponse | null>(
             `/preventive-maintenance/compliance/records?vehicle_id=${vehicleId}`,
-            { cacheTtlMs: 15000, timeoutMs: 10000, dedupeKey: `vehicle-compliance:${vehicleId}` },
+            {
+              cacheTtlMs: 15000,
+              timeoutMs: 10000,
+              dedupeKey: `vehicle-compliance:${vehicleId}`,
+              componentName: 'VehicleDetails',
+              requestLabel: 'vehicle-compliance-tab',
+              cancelGroup: 'vehicle-compliance',
+              replacePending: true,
+              fallbackData: null,
+            },
           );
           if (!isMounted) {
             return;
           }
-          setCompliance(response.data?.records || []);
+          if (!response.ok) {
+            if (response.status !== 'aborted') {
+              setTabError('Compliance data is not available right now. Try again in a moment.');
+            }
+            setCompliance([]);
+            return;
+          }
+          setCompliance(response.data?.data?.records || []);
+          setHasLoadedCompliance(true);
         }
       } catch (error) {
         console.error('[Flux Performance] Vehicle tab load failed', { vehicleId, activeTab, error });
         if (!isMounted) {
           return;
         }
-        setTabError(
-          activeTab === 'investment' || activeTab === 'recovery' || activeTab === 'economics'
-            ? 'Unable to load vehicle details. Please try again.'
-            : error instanceof ApiRequestError
-              ? error.message
-              : 'Unable to load vehicle tab data right now.',
-        );
+        if (!isRequestAborted(error)) {
+          setTabError(
+            activeTab === 'investment' || activeTab === 'recovery' || activeTab === 'economics'
+              ? 'Unable to load vehicle details. Please try again.'
+              : error instanceof ApiRequestError
+                ? error.message
+                : 'Unable to load vehicle tab data right now.',
+          );
+        }
       } finally {
         if (isMounted) {
           setIsTabLoading(false);
@@ -516,7 +577,7 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
     return () => {
       isMounted = false;
     };
-  }, [activeTab, vehicleId, hasVehicle, hasLoadedEconomics, maintenance.length, compliance.length]);
+  }, [activeTab, vehicleId, hasVehicle, hasLoadedEconomics, hasLoadedMaintenance, hasLoadedCompliance]);
 
   const investmentItems = useMemo(
     () => [

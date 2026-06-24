@@ -143,12 +143,22 @@ export interface MasterDataResponse {
 }
 
 export async function fetchRideOptions() {
-  const response = await apiRequest<{ data: TripOptions }>('/rides/options');
+  const response = await apiRequest<{ data: TripOptions }>('/rides/options', {
+    cacheTtlMs: 15000,
+    dedupeKey: 'ride-options',
+    componentName: 'RideWorkspace',
+    requestLabel: 'ride-options',
+  });
   return response.data;
 }
 
 export async function fetchRides() {
-  const response = await apiRequest<{ data: { rides: TripRecord[] } }>('/rides');
+  const response = await apiRequest<{ data: { rides: TripRecord[] } }>('/rides', {
+    cacheTtlMs: 10000,
+    dedupeKey: 'rides-list',
+    componentName: 'RideWorkspace',
+    requestLabel: 'rides-list',
+  });
   return response.data.rides;
 }
 
@@ -177,7 +187,12 @@ export async function updateRide(rideId: string, payload: Record<string, unknown
 }
 
 export async function fetchRideSummary() {
-  const response = await apiRequest<{ data: { summary: TripSummary } }>('/rides/summary');
+  const response = await apiRequest<{ data: { summary: TripSummary } }>('/rides/summary', {
+    cacheTtlMs: 10000,
+    dedupeKey: 'rides-summary',
+    componentName: 'RideWorkspace',
+    requestLabel: 'rides-summary',
+  });
   return response.data.summary;
 }
 

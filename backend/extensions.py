@@ -14,7 +14,7 @@ def init_extensions(app):
     cors.init_app(
         app,
         resources={
-            r"/api/*": {
+            r"/api/.*": {
                 "origins": app.config["CORS_ORIGINS"],
                 "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
                 "allow_headers": ["Content-Type", "Authorization"],
@@ -22,6 +22,7 @@ def init_extensions(app):
         },
         supports_credentials=False,
         automatic_options=True,
+        vary_header=True,
     )
     jwt.init_app(app)
     register_jwt_callbacks()

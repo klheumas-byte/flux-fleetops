@@ -179,13 +179,34 @@ export default function FuelManagement() {
     setIsLoading(true);
     setPageError('');
     try {
-      const [logsResponse, stationsResponse] = await Promise.all([
-        apiRequest<FuelLogsResponse>('/fuel-logs'),
-        apiRequest<FuelStationsResponse>('/fuel-stations'),
+      const [logsResult, stationsResult] = await Promise.allSettled([
+        apiRequest<FuelLogsResponse>('/fuel-logs', {
+          cacheTtlMs: 10000,
+          dedupeKey: 'fuel-logs-admin',
+          componentName: 'AdminFuel',
+          requestLabel: 'fuel-logs',
+        }),
+        apiRequest<FuelStationsResponse>('/fuel-stations', {
+          cacheTtlMs: 15000,
+          dedupeKey: 'fuel-stations',
+          componentName: 'AdminFuel',
+          requestLabel: 'fuel-stations',
+        }),
       ]);
-      setLogs(Array.isArray(logsResponse.data?.logs) ? logsResponse.data.logs : []);
-      setAnalytics(logsResponse.data?.analytics || analytics);
-      setStations(Array.isArray(stationsResponse.data?.stations) ? stationsResponse.data.stations : []);
+
+      if (logsResult.status === 'rejected') {
+        throw logsResult.reason;
+      }
+
+      setLogs(Array.isArray(logsResult.value.data?.logs) ? logsResult.value.data.logs : []);
+      setAnalytics(logsResult.value.data?.analytics || analytics);
+
+      if (stationsResult.status === 'fulfilled') {
+        setStations(Array.isArray(stationsResult.value.data?.stations) ? stationsResult.value.data.stations : []);
+      } else {
+        console.warn('[Flux Fuel] Station directory failed while logs loaded.', stationsResult.reason);
+        setStations([]);
+      }
     } catch (error) {
       if (error instanceof ApiRequestError) {
         setPageError(error.message);

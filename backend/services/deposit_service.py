@@ -51,7 +51,10 @@ def ensure_deposit_indexes():
             {"keys": [("created_at", DESCENDING)]},
             {"keys": [("updated_at", DESCENDING)]},
             {"keys": [("submitted_at", DESCENDING)]},
+            {"keys": [("deposit_date", DESCENDING), ("created_at", DESCENDING)]},
             {"keys": [("status", ASCENDING), ("created_at", DESCENDING)]},
+            {"keys": [("status", ASCENDING), ("deposit_date", DESCENDING)]},
+            {"keys": [("admin_id", ASCENDING), ("status", ASCENDING), ("deposit_date", DESCENDING)]},
         ],
         collection_name="deposits",
     )

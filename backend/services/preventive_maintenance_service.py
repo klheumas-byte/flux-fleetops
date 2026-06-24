@@ -1,7 +1,9 @@
 from datetime import date, datetime, timedelta, timezone
+from time import perf_counter
 
 from bson import ObjectId
 from pymongo import ASCENDING, DESCENDING
+from flask import current_app
 
 from extensions import get_collection
 from models.preventive_maintenance import (
@@ -221,6 +223,7 @@ def ensure_preventive_maintenance_indexes():
             {"keys": [("recurrence_type", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("status", ASCENDING)]},
             {"keys": [("assigned_admin_id", ASCENDING)], "options": {"sparse": True}},
+            {"keys": [("due_date", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("next_due_date", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("next_due_odometer", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("created_at", DESCENDING)]},
@@ -228,6 +231,8 @@ def ensure_preventive_maintenance_indexes():
             {"keys": [("vehicle_id", ASCENDING), ("created_at", DESCENDING)]},
             {"keys": [("status", ASCENDING), ("created_at", DESCENDING)]},
             {"keys": [("vehicle_id", ASCENDING), ("status", ASCENDING)]},
+            {"keys": [("vehicle_id", ASCENDING), ("next_due_date", ASCENDING)]},
+            {"keys": [("vehicle_id", ASCENDING), ("due_date", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("vehicle_id", ASCENDING), ("maintenance_type", ASCENDING)], "options": {"unique": True}},
         ],
         collection_name="preventive_maintenance",
@@ -555,13 +560,17 @@ def _calculate_next_due_values(base_date, base_odometer, recurrence_type, interv
     return _serialize_date(next_due_date), next_due_odometer
 
 
-def _extract_vehicle_current_odometer(vehicle_id: ObjectId, fallback_odometer=None):
+def _extract_vehicle_current_odometer(vehicle_id: ObjectId | str, fallback_odometer=None):
     candidates = []
     if isinstance(fallback_odometer, (int, float)):
         candidates.append(float(fallback_odometer))
 
+    vehicle_query_candidates = _vehicle_id_query_candidates(str(vehicle_id))
+    if not vehicle_query_candidates:
+        return max(candidates) if candidates else None
+
     latest_fuel = fuel_logs_collection().find(
-        {"vehicle_id": vehicle_id, "odometer_reading": {"$ne": None}},
+        {"vehicle_id": {"$in": vehicle_query_candidates}, "odometer_reading": {"$ne": None}},
         {"odometer_reading": 1},
     ).sort([("fuel_date", DESCENDING), ("created_at", DESCENDING)]).limit(10)
     for item in latest_fuel:
@@ -569,7 +578,7 @@ def _extract_vehicle_current_odometer(vehicle_id: ObjectId, fallback_odometer=No
             candidates.append(float(item["odometer_reading"]))
 
     latest_jobs = maintenance_jobs_collection().find(
-        {"vehicle_id": vehicle_id, "odometer_reading": {"$ne": None}},
+        {"vehicle_id": {"$in": vehicle_query_candidates}, "odometer_reading": {"$ne": None}},
         {"odometer_reading": 1},
     ).sort([("updated_at", DESCENDING), ("created_at", DESCENDING)]).limit(10)
     for item in latest_jobs:
@@ -577,7 +586,13 @@ def _extract_vehicle_current_odometer(vehicle_id: ObjectId, fallback_odometer=No
             candidates.append(float(item["odometer_reading"]))
 
     latest_rides = rides_collection().find(
-        {"vehicle_id": vehicle_id},
+        {
+            "vehicle_id": {"$in": vehicle_query_candidates},
+            "$or": [
+                {"odometer_end": {"$ne": None}},
+                {"odometer_start": {"$ne": None}},
+            ],
+        },
         {"odometer_start": 1, "odometer_end": 1},
     ).sort([("trip_date", DESCENDING), ("created_at", DESCENDING)]).limit(20)
     for item in latest_rides:
@@ -699,6 +714,58 @@ def _enrich_schedule(document: dict):
     return schedule
 
 
+def _enrich_schedules_for_vehicle_endpoint(documents: list[dict]):
+    if not documents:
+        return []
+
+    unique_vehicle_ids: list[ObjectId] = []
+    seen_vehicle_ids: set[str] = set()
+    admin_ids: set[ObjectId] = set()
+
+    for document in documents:
+        vehicle_id = document.get("vehicle_id")
+        if isinstance(vehicle_id, ObjectId):
+            vehicle_key = str(vehicle_id)
+            if vehicle_key not in seen_vehicle_ids:
+                seen_vehicle_ids.add(vehicle_key)
+                unique_vehicle_ids.append(vehicle_id)
+        assigned_admin_id = document.get("assigned_admin_id")
+        if isinstance(assigned_admin_id, ObjectId):
+            admin_ids.add(assigned_admin_id)
+
+    vehicle_map = (
+        {
+            str(vehicle["_id"]): vehicle
+            for vehicle in vehicles_collection().find({"_id": {"$in": unique_vehicle_ids}})
+        }
+        if unique_vehicle_ids
+        else {}
+    )
+    admin_map = (
+        {
+            str(user["_id"]): user
+            for user in users_collection().find({"_id": {"$in": list(admin_ids)}})
+        }
+        if admin_ids
+        else {}
+    )
+    odometer_by_vehicle = {
+        str(vehicle_id): _extract_vehicle_current_odometer(vehicle_id)
+        for vehicle_id in unique_vehicle_ids
+    }
+
+    schedules = []
+    for document in documents:
+        schedule = serialize_preventive_schedule(document)
+        vehicle_document = vehicle_map.get(str(document.get("vehicle_id")))
+        assigned_admin_document = admin_map.get(str(document.get("assigned_admin_id")))
+        schedule["vehicle"] = serialize_vehicle(vehicle_document) if vehicle_document else None
+        schedule["assigned_admin"] = serialize_user(assigned_admin_document) if assigned_admin_document else None
+        schedule["current_odometer"] = odometer_by_vehicle.get(str(document.get("vehicle_id")))
+        schedules.append(schedule)
+    return schedules
+
+
 def _build_default_schedule_document(template: dict, vehicle_document: dict, created_by: ObjectId, assigned_admin_id: ObjectId | None):
     today = date.today()
     recurrence_type = template["recurrence_type"]
@@ -801,28 +868,123 @@ def _ensure_default_schedules(current_user_id: str, current_role: str, vehicle_i
         return
 
 
-def list_preventive_maintenance(current_user_id: str, current_role: str, vehicle_id: str | None = None):
-    _ensure_default_schedules(current_user_id, current_role, vehicle_id=vehicle_id)
+def _vehicle_id_query_candidates(vehicle_id: str | None):
+    if vehicle_id in (None, ""):
+        return []
+    candidates: list[object] = [str(vehicle_id)]
+    if ObjectId.is_valid(str(vehicle_id)):
+        candidates.insert(0, ObjectId(str(vehicle_id)))
+    return candidates
 
+
+def _query_preventive_schedule_documents(*, current_user_id: str, current_role: str, vehicle_id: str | None = None):
     query = {}
     if current_role == "driver":
         assigned_vehicle_id = _resolve_driver_vehicle_for_driver(current_user_id)
         if assigned_vehicle_id is None:
             return []
-        query["vehicle_id"] = assigned_vehicle_id
+        query["vehicle_id"] = {"$in": _vehicle_id_query_candidates(str(assigned_vehicle_id))}
     elif vehicle_id:
-        query["vehicle_id"] = _to_object_id(vehicle_id, "vehicle_id")
+        vehicle_candidates = _vehicle_id_query_candidates(vehicle_id)
+        if not vehicle_candidates:
+            return []
+        query["vehicle_id"] = {"$in": vehicle_candidates}
 
-    documents = list(
+    return list(
         preventive_maintenance_collection()
         .find(query)
         .sort([("status", ASCENDING), ("next_due_date", ASCENDING), ("created_at", DESCENDING)])
+    )
+
+
+def list_preventive_maintenance(current_user_id: str, current_role: str, vehicle_id: str | None = None):
+    _ensure_default_schedules(current_user_id, current_role, vehicle_id=vehicle_id)
+    documents = _query_preventive_schedule_documents(
+        current_user_id=current_user_id,
+        current_role=current_role,
+        vehicle_id=vehicle_id,
     )
     schedules = []
     for document in documents:
         document = _sync_status(document)
         _notify_schedule_status(document)
         schedules.append(_enrich_schedule(document))
+    return schedules
+
+
+def list_preventive_maintenance_for_vehicle(vehicle_id: str, *, current_user_id: str, current_role: str):
+    request_started_at = perf_counter()
+    current_app.logger.info(
+        "[Flux Preventive Maintenance] Vehicle endpoint start vehicle_id=%s role=%s",
+        vehicle_id,
+        current_role,
+    )
+
+    if current_role == "driver":
+        assigned_vehicle_id = _resolve_driver_vehicle_for_driver(current_user_id)
+        if assigned_vehicle_id is None:
+            current_app.logger.info(
+                "[Flux Preventive Maintenance] Vehicle endpoint end vehicle_id=%s records_found=0 duration_ms=%.2f",
+                vehicle_id,
+                (perf_counter() - request_started_at) * 1000,
+            )
+            return []
+        query = {"vehicle_id": {"$in": _vehicle_id_query_candidates(str(assigned_vehicle_id))}}
+    else:
+        vehicle_candidates = _vehicle_id_query_candidates(vehicle_id)
+        if not vehicle_candidates:
+            current_app.logger.info(
+                "[Flux Preventive Maintenance] Vehicle endpoint end vehicle_id=%s records_found=0 duration_ms=%.2f invalid_vehicle_id=true",
+                vehicle_id,
+                (perf_counter() - request_started_at) * 1000,
+            )
+            return []
+        query = {"vehicle_id": {"$in": vehicle_candidates}}
+
+    current_app.logger.info(
+        "[Flux Preventive Maintenance] Vehicle endpoint query vehicle_id=%s query=%s",
+        vehicle_id,
+        query,
+    )
+
+    db_query_started_at = perf_counter()
+    current_app.logger.info(
+        "[Flux Preventive Maintenance] Vehicle endpoint db_query_started vehicle_id=%s",
+        vehicle_id,
+    )
+    documents = list(
+        preventive_maintenance_collection()
+        .find(query)
+        .sort([("status", ASCENDING), ("next_due_date", ASCENDING), ("created_at", DESCENDING)])
+    )
+    current_app.logger.info(
+        "[Flux Preventive Maintenance] Vehicle endpoint db_query_completed vehicle_id=%s records_found=%s duration_ms=%.2f",
+        vehicle_id,
+        len(documents),
+        (perf_counter() - db_query_started_at) * 1000,
+    )
+    if not documents:
+        current_app.logger.info(
+            "[Flux Preventive Maintenance] Vehicle endpoint response_sent vehicle_id=%s records_found=0 duration_ms=%.2f",
+            vehicle_id,
+            (perf_counter() - request_started_at) * 1000,
+        )
+        return []
+
+    enrich_started_at = perf_counter()
+    schedules = _enrich_schedules_for_vehicle_endpoint(documents)
+    current_app.logger.info(
+        "[Flux Preventive Maintenance] Vehicle endpoint enrichment_completed vehicle_id=%s records_found=%s duration_ms=%.2f",
+        vehicle_id,
+        len(schedules),
+        (perf_counter() - enrich_started_at) * 1000,
+    )
+    current_app.logger.info(
+        "[Flux Preventive Maintenance] Vehicle endpoint response_sent vehicle_id=%s records_found=%s duration_ms=%.2f",
+        vehicle_id,
+        len(schedules),
+        (perf_counter() - request_started_at) * 1000,
+    )
     return schedules
 
 

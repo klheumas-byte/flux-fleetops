@@ -15,6 +15,7 @@ from services.preventive_maintenance_service import (
     list_due_soon_schedules,
     list_overdue_schedules,
     list_preventive_maintenance,
+    list_preventive_maintenance_for_vehicle,
     renew_compliance_record,
     update_preventive_schedule,
     update_compliance_item_type,
@@ -55,6 +56,19 @@ def get_due_soon_preventive_maintenance_route():
             )
         }
     )
+
+
+@preventive_maintenance_bp.get("/vehicle/<vehicle_id>")
+@role_required("owner", "admin", "driver")
+def get_vehicle_preventive_maintenance_route(vehicle_id: str):
+    schedules = list_preventive_maintenance_for_vehicle(
+        vehicle_id=vehicle_id,
+        current_user_id=get_jwt_identity(),
+        current_role=get_jwt().get("role"),
+    )
+    if not schedules:
+        return success_response(data=[], message="No preventive maintenance schedules found for this vehicle.")
+    return success_response(data=schedules)
 
 
 @preventive_maintenance_bp.get("/overdue")

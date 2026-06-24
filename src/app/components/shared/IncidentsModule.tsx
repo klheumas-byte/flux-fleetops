@@ -11,7 +11,7 @@ import {
   ShieldAlert,
   Wrench,
 } from 'lucide-react';
-import { apiRequest, ApiRequestError } from '../../lib/api';
+import { apiRequest, ApiRequestError, isRequestAborted } from '../../lib/api';
 import type { SessionUser } from '../../lib/auth-session';
 import type { DriverActiveAssignment } from '../../lib/driver-api';
 import { useDebouncedValue } from '../../lib/use-debounced-value';
@@ -392,11 +392,28 @@ export default function IncidentsModule({
       setIsLoading(true);
       setPageError('');
       try {
-        const requests: Promise<any>[] = [apiRequest<IncidentsResponse>('/incidents')];
-        if (role !== 'driver') {
-          requests.push(apiRequest<VehiclesResponse>('/vehicles'));
+        const incidentsRequest = apiRequest<IncidentsResponse>('/incidents', {
+          cacheTtlMs: 10000,
+          dedupeKey: `incidents-${role}`,
+          componentName: 'IncidentsModule',
+          requestLabel: 'incidents-primary',
+        });
+        const vehiclesRequest =
+          role !== 'driver'
+            ? apiRequest<VehiclesResponse>('/vehicles', {
+                cacheTtlMs: 10000,
+                dedupeKey: 'incidents-vehicles',
+                componentName: 'IncidentsModule',
+                requestLabel: 'incident-vehicle-options',
+              })
+            : Promise.resolve(null);
+
+        const [incidentsResult, vehiclesResult] = await Promise.allSettled([incidentsRequest, vehiclesRequest]);
+        if (incidentsResult.status === 'rejected') {
+          throw incidentsResult.reason;
         }
-        const [incidentsResponse, vehiclesResponse] = await Promise.all(requests);
+
+        const incidentsResponse = incidentsResult.value;
         setIncidents(Array.isArray(incidentsResponse.data?.incidents) ? incidentsResponse.data.incidents : []);
         setDashboard(incidentsResponse.data?.dashboard || null);
         setHighRiskDrivers(incidentsResponse.data?.high_risk_drivers || []);
@@ -404,11 +421,16 @@ export default function IncidentsModule({
         setAlerts(incidentsResponse.data?.alerts || []);
         setStatusOptions(incidentsResponse.data?.status_options || []);
         setSelectedIncidentId((current) => current || incidentsResponse.data?.incidents?.[0]?.id || null);
-        if (vehiclesResponse?.data?.vehicles) {
-          setVehicles(vehiclesResponse.data.vehicles);
+
+        if (vehiclesResult.status === 'fulfilled' && vehiclesResult.value?.data?.vehicles) {
+          setVehicles(vehiclesResult.value.data.vehicles);
+        } else if (vehiclesResult.status === 'rejected') {
+          console.warn('[Flux Incidents] Vehicle directory failed to load.', vehiclesResult.reason);
         }
       } catch (error) {
-        setPageError(error instanceof ApiRequestError ? error.message : 'Unable to load incidents right now.');
+        if (!isRequestAborted(error)) {
+          setPageError(error instanceof ApiRequestError ? error.message : 'Unable to load incidents right now.');
+        }
       } finally {
         setIsLoading(false);
       }
@@ -453,7 +475,12 @@ export default function IncidentsModule({
     setIsLoading(true);
     setPageError('');
     try {
-      const response = await apiRequest<IncidentsResponse>('/incidents');
+      const response = await apiRequest<IncidentsResponse>('/incidents', {
+        cacheTtlMs: 5000,
+        dedupeKey: `incidents-${role}`,
+        componentName: 'IncidentsModule',
+        requestLabel: 'incidents-refresh',
+      });
       setIncidents(response.data?.incidents || []);
       setDashboard(response.data?.dashboard || null);
       setHighRiskDrivers(response.data?.high_risk_drivers || []);
@@ -461,7 +488,9 @@ export default function IncidentsModule({
       setAlerts(response.data?.alerts || []);
       setStatusOptions(response.data?.status_options || []);
     } catch (error) {
-      setPageError(error instanceof ApiRequestError ? error.message : 'Unable to refresh incidents right now.');
+      if (!isRequestAborted(error)) {
+        setPageError(error instanceof ApiRequestError ? error.message : 'Unable to refresh incidents right now.');
+      }
     } finally {
       setIsLoading(false);
     }

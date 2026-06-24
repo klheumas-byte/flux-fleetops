@@ -173,8 +173,12 @@ export default function DriverDashboard({
   const loadRideWorkspace = async () => {
     setIsLoadingRideWorkspace(true);
     try {
-      const [nextOptions, rides] = await Promise.all([fetchRideOptions(), fetchRides()]);
-      setRideOptions(nextOptions);
+      const [optionsResult, ridesResult] = await Promise.allSettled([fetchRideOptions(), fetchRides()]);
+      if (optionsResult.status === 'rejected') {
+        throw optionsResult.reason;
+      }
+      setRideOptions(optionsResult.value);
+      const rides = ridesResult.status === 'fulfilled' ? ridesResult.value : [];
       const nextActiveRide = [...rides]
         .filter((ride) => !['Completed', 'Cancelled'].includes(ride.status))
         .sort((left, right) => {
@@ -192,6 +196,9 @@ export default function DriverDashboard({
         ...current,
         end_time: nowTimeValue(),
       }));
+      if (ridesResult.status === 'rejected') {
+        toast.error('Trip history is temporarily unavailable, but you can still start a new trip.');
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Unable to load trip actions right now.');
     } finally {

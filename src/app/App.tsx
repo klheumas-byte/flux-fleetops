@@ -206,14 +206,23 @@ export default function App() {
   };
 
   const refreshDriverPortalData = async () => {
-    const [assignment, summary, wallet] = await Promise.all([
+    const [assignmentResult, summaryResult, walletResult] = await Promise.allSettled([
       fetchDriverActiveAssignment(),
       fetchDriverDashboardSummary(),
       fetchDriverWallet(),
     ]);
-    setDriverActiveAssignment(assignment);
-    setDriverDashboardSummary(summary);
-    setDriverWalletData(wallet);
+
+    setDriverActiveAssignment(assignmentResult.status === 'fulfilled' ? assignmentResult.value : null);
+    setDriverDashboardSummary(summaryResult.status === 'fulfilled' ? summaryResult.value : null);
+    setDriverWalletData(walletResult.status === 'fulfilled' ? walletResult.value : null);
+
+    if (
+      assignmentResult.status === 'rejected' &&
+      assignmentResult.reason instanceof ApiRequestError &&
+      assignmentResult.reason.status === 401
+    ) {
+      throw assignmentResult.reason;
+    }
   };
 
   useEffect(() => {

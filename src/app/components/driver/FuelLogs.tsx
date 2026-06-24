@@ -155,21 +155,47 @@ export default function FuelLogs() {
     setIsLoading(true);
     setPageError('');
     try {
-      const [assignment, logsResponse, stationsResponse] = await Promise.all([
+      const [assignmentResult, logsResult, stationsResult] = await Promise.allSettled([
         fetchDriverActiveAssignment(),
-        apiRequest<DriverFuelLogsResponse>('/driver/fuel-logs'),
-        apiRequest<FuelStationsResponse>('/fuel-stations'),
+        apiRequest<DriverFuelLogsResponse>('/driver/fuel-logs', {
+          cacheTtlMs: 10000,
+          dedupeKey: 'fuel-logs-driver',
+          componentName: 'DriverFuelLogs',
+          requestLabel: 'driver-fuel-logs',
+        }),
+        apiRequest<FuelStationsResponse>('/fuel-stations', {
+          cacheTtlMs: 15000,
+          dedupeKey: 'fuel-stations',
+          componentName: 'DriverFuelLogs',
+          requestLabel: 'fuel-stations',
+        }),
       ]);
+
+      if (logsResult.status === 'rejected') {
+        throw logsResult.reason;
+      }
+
+      const assignment = assignmentResult.status === 'fulfilled' ? assignmentResult.value : null;
       setActiveAssignment(assignment);
-      setLogs(Array.isArray(logsResponse.data?.logs) ? logsResponse.data.logs : []);
-      setAnalytics(logsResponse.data?.analytics || analytics);
-      const nextStations = Array.isArray(stationsResponse.data?.stations) ? stationsResponse.data.stations : [];
+      setLogs(Array.isArray(logsResult.value.data?.logs) ? logsResult.value.data.logs : []);
+      setAnalytics(logsResult.value.data?.analytics || analytics);
+      const nextStations =
+        stationsResult.status === 'fulfilled' && Array.isArray(stationsResult.value.data?.stations)
+          ? stationsResult.value.data.stations
+          : [];
       setStations(nextStations);
       setFormState((current) => ({
         ...current,
         fuel_station_id: current.fuel_station_id || nextStations[0]?.id || '',
         fuel_type: assignment?.vehicle?.fuel_type || current.fuel_type,
       }));
+
+      if (assignmentResult.status === 'rejected') {
+        console.warn('[Flux Driver Fuel Logs] Active assignment failed while logs loaded.', assignmentResult.reason);
+      }
+      if (stationsResult.status === 'rejected') {
+        console.warn('[Flux Driver Fuel Logs] Station directory failed while logs loaded.', stationsResult.reason);
+      }
     } catch (error) {
       if (error instanceof ApiRequestError) {
         setPageError(error.message);

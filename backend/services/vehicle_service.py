@@ -3,10 +3,11 @@ from datetime import date, datetime, timedelta, timezone
 from time import perf_counter
 
 from bson import ObjectId
-from pymongo import ASCENDING
+from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import DuplicateKeyError
 
 from extensions import get_collection
+from models.user import serialize_user
 from models.vehicle import serialize_vehicle
 from services.preventive_maintenance_service import generate_default_preventive_schedules_for_vehicle
 from services.system_settings_service import (
@@ -186,6 +187,53 @@ def validate_reference_id(value, field_name: str) -> ObjectId | None:
     return ObjectId(value)
 
 
+def _driver_object_id_from_reference(value) -> ObjectId | None:
+    if isinstance(value, ObjectId):
+        return value
+    if isinstance(value, str) and ObjectId.is_valid(value):
+        return ObjectId(value)
+    return None
+
+
+def _serialize_assigned_driver_details(driver_document: dict | None) -> dict | None:
+    if not driver_document or driver_document.get("role") != "driver":
+        return None
+
+    serialized_driver = serialize_user(driver_document)
+    driver_profile = serialized_driver.get("driver_profile") or {}
+    return {
+        "id": serialized_driver.get("id"),
+        "full_name": serialized_driver.get("full_name"),
+        "phone": serialized_driver.get("phone"),
+        "email": serialized_driver.get("email"),
+        "status": serialized_driver.get("status"),
+        "license_number": driver_profile.get("license_number"),
+    }
+
+
+def _build_assigned_driver_map(vehicle_documents: list[dict]) -> dict[str, dict]:
+    driver_object_ids: list[ObjectId] = []
+    seen_driver_ids: set[str] = set()
+
+    for vehicle_document in vehicle_documents:
+        driver_object_id = _driver_object_id_from_reference(vehicle_document.get("assigned_driver_id"))
+        if not driver_object_id:
+            continue
+        driver_key = str(driver_object_id)
+        if driver_key in seen_driver_ids:
+            continue
+        seen_driver_ids.add(driver_key)
+        driver_object_ids.append(driver_object_id)
+
+    if not driver_object_ids:
+        return {}
+
+    return {
+        str(driver_document["_id"]): _serialize_assigned_driver_details(driver_document)
+        for driver_document in users_collection().find({"_id": {"$in": driver_object_ids}})
+    }
+
+
 def get_vehicle_document_by_id(vehicle_id: str) -> dict:
     if not ObjectId.is_valid(vehicle_id):
         raise ApiError("Vehicle not found.", status_code=404)
@@ -250,7 +298,7 @@ def _serialize_cost_item(document: dict) -> dict:
     }
 
 
-def _serialize_vehicle_list_item(vehicle_document: dict) -> dict:
+def _serialize_vehicle_list_item(vehicle_document: dict, assigned_driver_details: dict | None = None) -> dict:
     return {
         "id": str(vehicle_document.get("_id")),
         "registration_number": vehicle_document.get("registration_number"),
@@ -270,6 +318,7 @@ def _serialize_vehicle_list_item(vehicle_document: dict) -> dict:
         "default_daily_target": vehicle_document.get("default_daily_target"),
         "status": vehicle_document.get("status"),
         "assigned_driver_id": str(vehicle_document.get("assigned_driver_id")) if vehicle_document.get("assigned_driver_id") else None,
+        "assigned_driver_details": assigned_driver_details,
         "created_by": str(vehicle_document.get("created_by")) if vehicle_document.get("created_by") else None,
         "created_at": vehicle_document.get("created_at").isoformat() if vehicle_document.get("created_at") else None,
         "updated_at": vehicle_document.get("updated_at").isoformat() if vehicle_document.get("updated_at") else None,
@@ -819,6 +868,7 @@ def _filter_vehicle_for_role(vehicle_document: dict, *, current_role: str) -> di
     economics = vehicle_document.get("economics") or {}
     include_sensitive = current_role == "owner"
     serialized = serialize_vehicle(vehicle_document, include_sensitive=include_sensitive)
+    serialized["assigned_driver_details"] = vehicle_document.get("assigned_driver_details")
     if current_role == "owner":
         return serialized
     if current_role == "admin":
@@ -1017,7 +1067,7 @@ def sync_vehicle_assignment(
 def list_vehicles(*, current_role: str) -> list[dict]:
     del current_role
     query_started_at = perf_counter()
-    vehicles = (
+    vehicle_documents = list(
         vehicles_collection()
         .find(
             {},
@@ -1044,7 +1094,16 @@ def list_vehicles(*, current_role: str) -> list[dict]:
         )
         .sort("created_at", ASCENDING)
     )
-    serialized = [_serialize_vehicle_list_item(vehicle) for vehicle in vehicles]
+    assigned_driver_map = _build_assigned_driver_map(vehicle_documents)
+    serialized = []
+    for vehicle_document in vehicle_documents:
+        assigned_driver_object_id = _driver_object_id_from_reference(vehicle_document.get("assigned_driver_id"))
+        serialized.append(
+            _serialize_vehicle_list_item(
+                vehicle_document,
+                assigned_driver_details=assigned_driver_map.get(str(assigned_driver_object_id)) if assigned_driver_object_id else None,
+            )
+        )
     print(
         f"[Flux Performance] list_vehicles returned {len(serialized)} lightweight records in "
         f"{round((perf_counter() - query_started_at) * 1000, 2)}ms"
@@ -1061,6 +1120,12 @@ def get_vehicle_by_id(vehicle_id: str, *, current_role: str, include_economics: 
     vehicle = get_vehicle_document_by_id_with_projection(vehicle_id, _vehicle_detail_projection())
     if vehicle.get("current_odometer") is None:
         vehicle["current_odometer"] = _extract_vehicle_current_odometer(vehicle["_id"])
+    assigned_driver_object_id = _driver_object_id_from_reference(vehicle.get("assigned_driver_id"))
+    vehicle["assigned_driver_details"] = (
+        _serialize_assigned_driver_details(users_collection().find_one({"_id": assigned_driver_object_id}))
+        if assigned_driver_object_id
+        else None
+    )
     print(
         f"[Flux Performance] vehicle details query completed vehicle_id={vehicle_id} "
         f"durationMs={round((perf_counter() - query_started_at) * 1000, 2)}"

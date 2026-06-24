@@ -76,6 +76,14 @@ interface Vehicle {
   other_setup_cost?: number | null;
   status: string;
   assigned_driver_id: string | null;
+  assigned_driver_details?: {
+    id?: string | null;
+    full_name?: string | null;
+    phone?: string | null;
+    email?: string | null;
+    status?: string | null;
+    license_number?: string | null;
+  } | null;
   vehicle_cost_items?: Array<{
     id: string;
     item_name: string;
@@ -217,6 +225,37 @@ interface ComplianceRecordsResponse {
   success: boolean;
   data: {
     records: ComplianceRecord[];
+  };
+}
+
+function getAssignedDriverSummary(vehicle: Vehicle) {
+  if (!vehicle.assigned_driver_id) {
+    return {
+      headline: 'Unassigned',
+      phone: 'Unassigned',
+      email: 'Unassigned',
+      status: 'Unassigned',
+      licenseNumber: 'Unassigned',
+    };
+  }
+
+  const details = vehicle.assigned_driver_details;
+  if (!details?.full_name && !details?.phone && !details?.email && !details?.status && !details?.license_number) {
+    return {
+      headline: 'Assigned driver details unavailable',
+      phone: 'Assigned driver details unavailable',
+      email: 'Assigned driver details unavailable',
+      status: 'Assigned driver details unavailable',
+      licenseNumber: 'Assigned driver details unavailable',
+    };
+  }
+
+  return {
+    headline: details?.full_name || 'Assigned driver details unavailable',
+    phone: details?.phone || 'Assigned driver details unavailable',
+    email: details?.email || 'Assigned driver details unavailable',
+    status: details?.status ? formatLabel(details.status) : 'Assigned driver details unavailable',
+    licenseNumber: details?.license_number || 'Assigned driver details unavailable',
   };
 }
 
@@ -642,6 +681,7 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
   const vehiclePerformance = vehicle.economics?.performance;
   const health = vehicle.economics?.health;
   const fuelAnalytics = vehicle.economics?.fuel_analytics;
+  const assignedDriverSummary = getAssignedDriverSummary(vehicle);
   const economicsTabsActive = activeTab === 'investment' || activeTab === 'recovery' || activeTab === 'economics';
 
   return (
@@ -665,7 +705,7 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
         </div>
         <div className="rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-600">
           <div>Status: <span className="font-medium text-[#0F172A]">{formatLabel(vehicle.status)}</span></div>
-          <div className="mt-1">Assigned Driver: <span className="font-medium text-[#0F172A]">{vehicle.assigned_driver_id ? `Driver ID: ${vehicle.assigned_driver_id.slice(0, 8)}...` : 'Unassigned'}</span></div>
+          <div className="mt-1">Assigned Driver: <span className="font-medium text-[#0F172A]">{assignedDriverSummary.headline}</span></div>
         </div>
       </div>
 
@@ -712,6 +752,11 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
               <DetailRow label="Fuel Type" value={formatLabel(vehicle.fuel_type)} />
               <DetailRow label="Chassis Number" value={vehicle.chassis_number} />
               <DetailRow label="Engine Number" value={vehicle.engine_number} />
+              <DetailRow label="Assigned Driver" value={assignedDriverSummary.headline} />
+              <DetailRow label="Driver Phone" value={assignedDriverSummary.phone} />
+              <DetailRow label="Driver Email" value={assignedDriverSummary.email} />
+              <DetailRow label="Driver Status" value={assignedDriverSummary.status} />
+              <DetailRow label="License Number" value={assignedDriverSummary.licenseNumber} />
               <DetailRow
                 label="Current Odometer"
                 value={vehicle.current_odometer != null ? `${vehicle.current_odometer.toLocaleString()} km` : '-'}
@@ -762,10 +807,11 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
           <div className="rounded-xl border border-gray-200 bg-white p-5">
             <h2 className="text-lg font-semibold text-[#0F172A]">Assignment</h2>
             <div className="mt-4 grid grid-cols-1 gap-3">
-              <DetailRow
-                label="Assigned Driver"
-                value={vehicle.assigned_driver_id ? `Driver ID: ${vehicle.assigned_driver_id}` : 'Unassigned'}
-              />
+              <DetailRow label="Assigned Driver" value={assignedDriverSummary.headline} />
+              <DetailRow label="Phone" value={assignedDriverSummary.phone} />
+              <DetailRow label="Email" value={assignedDriverSummary.email} />
+              <DetailRow label="Driver Status" value={assignedDriverSummary.status} />
+              <DetailRow label="License Number" value={assignedDriverSummary.licenseNumber} />
               <DetailRow label="Vehicle Status" value={formatLabel(vehicle.status)} />
               <DetailRow label="Updated At" value={formatDate(vehicle.updated_at)} />
               <DetailRow label="Created By" value={vehicle.created_by} />

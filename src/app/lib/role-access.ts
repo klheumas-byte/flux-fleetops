@@ -102,7 +102,7 @@ export const MODULE_ACCESS_MATRIX: Record<AppModule, RoleMatrix> = {
   expenses: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
   'finance-accounts': { owner: FULL_ACCESS, admin: NO_ACCESS, driver: NO_ACCESS },
   revenue: { owner: FULL_ACCESS, admin: NO_ACCESS, driver: NO_ACCESS },
-  'driver-wallet': { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
+  'driver-wallet': { owner: NO_ACCESS, admin: NO_ACCESS, driver: NO_ACCESS },
   accountability: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
   customers: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: DRIVER_ACCESS },
   fuel: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },

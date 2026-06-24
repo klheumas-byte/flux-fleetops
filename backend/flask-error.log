@@ -1,226 +1,171 @@
-[2026-06-24 00:30:43,377] INFO in app: [Flux Startup] Route registration completed in 138.47ms
-[2026-06-24 00:30:43,382] INFO in app: [Flux Startup] App factory completed in 146.34ms (background maintenance started)
+[2026-06-24 00:57:21,609] INFO in app: [Flux Startup] Route registration completed in 106.84ms
+[2026-06-24 00:57:21,611] INFO in app: [Flux Startup] App factory completed in 110.55ms (background maintenance started)
 WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
  * Running on http://127.0.0.1:5000
 Press CTRL+C to quit
-[2026-06-24 00:30:47,154] INFO in app: [Flux Startup] Database connection verified in 3772.13ms
-[2026-06-24 00:30:51,323] INFO in app: [Flux API] GET /api/health role=anonymous start=2026-06-24T00:30:45.293646+00:00 end=2026-06-24T00:30:51.323465+00:00 duration_ms=6029.82 status=200
-[2026-06-24 00:30:51,324] WARNING in app: SLOW API WARNING GET /api/health role=anonymous duration_ms=6029.82 status=200
-127.0.0.1 - - [24/Jun/2026 00:30:51] "GET /api/health HTTP/1.1" 200 -
-[2026-06-24 00:30:53,262] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for users
-[2026-06-24 00:30:53,263] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for users: (('email', 1),), (('phone', 1),), (('role', 1),), (('status', 1),), (('created_at', 1),), (('updated_at', 1),), (('driver_profile.approval_status', 1),), (('driver_profile.approval_status', 1), ('created_at', 1))
-[2026-06-24 00:30:53,536] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for token_blocklist
-[2026-06-24 00:30:53,537] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for token_blocklist: (('jti', 1),), (('expires_at', 1),)
-[2026-06-24 00:30:54,933] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for assignments
-[2026-06-24 00:30:54,934] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for assignments: (('driver_id', 1),), (('vehicle_id', 1),), (('status', 1),), (('start_date', 1),), (('created_at', 1),), (('updated_at', 1),), (('driver_id', 1), ('created_at', 1)), (('vehicle_id', 1), ('created_at', 1)), (('status', 1), ('created_at', 1)), (('vehicle_id', 1), ('status', 1))
-[2026-06-24 00:30:57,776] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for bookings
-[2026-06-24 00:30:57,777] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for bookings: (('booking_id', 1),), (('customer_id', 1),), (('driver_id', 1),), (('vehicle_id', 1),), (('pickup_at', 1),), (('pickup_date', 1),), (('status', 1),), (('created_at', -1),), (('updated_at', -1),), (('is_recurring_template', 1), ('pickup_at', 1)), (('driver_id', 1), ('pickup_at', 1)), (('vehicle_id', 1), ('pickup_at', 1)), (('customer_id', 1), ('pickup_at', 1)), (('driver_id', 1), ('created_at', -1)), (('vehicle_id', 1), ('created_at', -1)), (('status', 1), ('created_at', -1)), (('vehicle_id', 1), ('status', 1)), (('source_booking_id', 1),), (('is_recurring_template', 1),), (('created_by', 1),)
-[2026-06-24 00:31:09,339] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for collections
-[2026-06-24 00:31:09,339] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for collections: (('driver_id', 1),), (('vehicle_id', 1),), (('assignment_id', 1),), (('created_at', -1),), (('updated_at', -1),), (('submitted_at', -1),), (('collection_date', -1),), (('status', 1),), (('status', 1), ('created_at', -1)), (('status', 1), ('collection_date', -1)), (('vehicle_id', 1), ('created_at', -1)), (('driver_id', 1), ('created_at', -1)), (('vehicle_id', 1), ('status', 1)), (('vehicle_id', 1), ('status', 1), ('collection_date', -1)), (('driver_id', 1), ('status', 1), ('collection_date', -1)), (('assignment_id', 1), ('status', 1), ('created_at', -1)), (('cycle_key', 1),), (('week_start', 1),), (('payment_deadline', 1),), (('received_by_admin_id', 1),), (('approved_by_admin_id', 1),)
-[2026-06-24 00:31:12,492] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for customers
-[2026-06-24 00:31:12,493] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for customers: (('customer_id', 1),), (('normalized_phone_number', 1),), (('normalized_email_address', 1),), (('created_by', 1),), (('created_by_user_id', 1),), (('created_by_role', 1),), (('created_by_driver_id', 1),), (('preferred_driver_id', 1),), (('source', 1),), (('customer_category_id', 1),), (('relationship_category_id', 1),), (('opportunity_level_id', 1),), (('network_value_id', 1),), (('lead_status_id', 1),), (('status', 1),), (('follow_up_date', 1),), (('next_follow_up_date', 1),), (('created_at', -1),), (('updated_at', -1),), (('preferred_driver_id', 1), ('created_at', -1)), (('status', 1), ('created_at', -1))
-[2026-06-24 00:31:14,125] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for deposits
-[2026-06-24 00:31:14,125] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for deposits: (('admin_id', 1),), (('status', 1),), (('deposit_date', -1),), (('submitted_by', 1),), (('verified_by', 1),), (('created_at', -1),), (('updated_at', -1),), (('submitted_at', -1),), (('deposit_date', -1), ('created_at', -1)), (('status', 1), ('created_at', -1)), (('status', 1), ('deposit_date', -1)), (('admin_id', 1), ('status', 1), ('deposit_date', -1))
-[2026-06-24 00:31:16,564] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for expenses
-[2026-06-24 00:31:16,564] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for expenses: (('status', 1),), (('expense_category', 1),), (('expense_date', -1),), (('vehicle_id', 1),), (('driver_id', 1),), (('finance_account_id', 1),), (('requested_by', 1),), (('approved_by', 1),), (('paid_by', 1),), (('created_at', -1),), (('updated_at', -1),), (('vehicle_id', 1), ('created_at', -1)), (('driver_id', 1), ('created_at', -1)), (('status', 1), ('created_at', -1)), (('vehicle_id', 1), ('status', 1)), (('vehicle_id', 1), ('status', 1), ('expense_date', -1)), (('driver_id', 1), ('status', 1), ('expense_date', -1))
-[2026-06-24 00:31:18,588] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for faults
-[2026-06-24 00:31:18,589] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for faults: (('vehicle_id', 1),), (('driver_id', 1),), (('category_id', 1),), (('component_id', 1),), (('severity', 1),), (('status', 1),), (('reported_at', -1),), (('created_at', -1),), (('updated_at', -1),), (('created_by', 1),), (('vehicle_id', 1), ('created_at', -1)), (('driver_id', 1), ('created_at', -1)), (('status', 1), ('created_at', -1)), (('vehicle_id', 1), ('status', 1))
-[2026-06-24 00:31:18,874] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for fault_categories
-[2026-06-24 00:31:18,874] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for fault_categories: (('code', 1),), (('status', 1),)
-[2026-06-24 00:31:19,294] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for fault_components
-[2026-06-24 00:31:19,294] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for fault_components: (('category_id', 1),), (('code', 1),), (('category_id', 1), ('name', 1))
-[2026-06-24 00:31:19,438] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for maintenance_jobs_fault_link
-[2026-06-24 00:31:19,439] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for maintenance_jobs_fault_link: (('fault_id', 1),)
-[2026-06-24 00:31:20,615] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for fuel_stations
-[2026-06-24 00:31:20,616] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for fuel_stations: (('normalized_name', 1),), (('status', 1),), (('created_at', -1),), (('updated_at', -1),)
-[2026-06-24 00:31:22,739] INFO in mongo_indexes: [Flux Indexes] Created 1 indexes on fuel_logs: vehicle_id_1_fuel_date_-1_created_at_-1
-[2026-06-24 00:31:22,739] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for fuel_logs: (('vehicle_id', 1),), (('driver_id', 1),), (('assignment_id', 1),), (('fuel_station_id', 1),), (('status', 1),), (('fuel_date', -1),), (('created_at', -1),), (('updated_at', -1),), (('vehicle_id', 1), ('created_at', -1)), (('driver_id', 1), ('created_at', -1)), (('status', 1), ('created_at', -1)), (('vehicle_id', 1), ('status', 1))
-[2026-06-24 00:31:24,316] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for incidents
-[2026-06-24 00:31:24,316] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for incidents: (('vehicle_id', 1),), (('driver_id', 1),), (('status', 1),), (('incident_type', 1),), (('incident_at', -1),), (('claim_status', 1),), (('created_at', -1),), (('updated_at', -1),), (('vehicle_id', 1), ('created_at', -1)), (('driver_id', 1), ('created_at', -1)), (('status', 1), ('created_at', -1))
-[2026-06-24 00:31:27,373] INFO in mongo_indexes: [Flux Indexes] Created 1 indexes on maintenance_jobs: vehicle_id_1_updated_at_-1_created_at_-1
-[2026-06-24 00:31:27,374] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for maintenance_jobs: (('vehicle_id', 1),), (('driver_id', 1),), (('fault_report_id', 1),), (('expense_id', 1),), (('maintenance_type', 1),), (('priority', 1),), (('status', 1),), (('maintenance_coordinator_id', 1),), (('next_follow_up_date', 1),), (('target_completion_date', 1),), (('current_stage', 1),), (('start_date', -1),), (('created_at', -1),), (('updated_at', -1),), (('vehicle_id', 1), ('created_at', -1)), (('driver_id', 1), ('created_at', -1)), (('status', 1), ('created_at', -1)), (('vehicle_id', 1), ('status', 1))
-[2026-06-24 00:31:27,990] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for maintenance_progress_logs
-[2026-06-24 00:31:27,990] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for maintenance_progress_logs: (('maintenance_job_id', 1),), (('update_type', 1),), (('current_stage', 1),), (('updated_at', -1),)
-[2026-06-24 00:31:29,747] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint start vehicle_id=6a2b42bb1a9f06b34e940cc8 role=owner
-[2026-06-24 00:31:29,747] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint query vehicle_id=6a2b42bb1a9f06b34e940cc8 query={'vehicle_id': {'$in': [ObjectId('6a2b42bb1a9f06b34e940cc8'), '6a2b42bb1a9f06b34e940cc8']}}
-[2026-06-24 00:31:29,747] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint db_query_started vehicle_id=6a2b42bb1a9f06b34e940cc8
-[2026-06-24 00:31:29,889] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint db_query_completed vehicle_id=6a2b42bb1a9f06b34e940cc8 records_found=14 duration_ms=142.22
-[2026-06-24 00:31:30,606] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint enrichment_completed vehicle_id=6a2b42bb1a9f06b34e940cc8 records_found=14 duration_ms=716.45
-[2026-06-24 00:31:30,607] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint response_sent vehicle_id=6a2b42bb1a9f06b34e940cc8 records_found=14 duration_ms=860.45
-[2026-06-24 00:31:30,608] INFO in app: [Flux API] GET /api/preventive-maintenance/vehicle/6a2b42bb1a9f06b34e940cc8 role=anonymous start=2026-06-24T00:31:28.776107+00:00 end=2026-06-24T00:31:30.608161+00:00 duration_ms=1832.05 status=200
-127.0.0.1 - - [24/Jun/2026 00:31:30] "GET /api/preventive-maintenance/vehicle/6a2b42bb1a9f06b34e940cc8 HTTP/1.1" 200 -
-[2026-06-24 00:31:30,826] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint start vehicle_id=6a33d2cdb9b9016e964cecf9 role=owner
-[2026-06-24 00:31:30,827] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint query vehicle_id=6a33d2cdb9b9016e964cecf9 query={'vehicle_id': {'$in': [ObjectId('6a33d2cdb9b9016e964cecf9'), '6a33d2cdb9b9016e964cecf9']}}
-[2026-06-24 00:31:30,827] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint db_query_started vehicle_id=6a33d2cdb9b9016e964cecf9
-[2026-06-24 00:31:30,967] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint db_query_completed vehicle_id=6a33d2cdb9b9016e964cecf9 records_found=10 duration_ms=139.78
-[2026-06-24 00:31:31,647] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint enrichment_completed vehicle_id=6a33d2cdb9b9016e964cecf9 records_found=10 duration_ms=680.05
-[2026-06-24 00:31:31,648] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint response_sent vehicle_id=6a33d2cdb9b9016e964cecf9 records_found=10 duration_ms=821.71
-[2026-06-24 00:31:31,649] INFO in app: [Flux API] GET /api/preventive-maintenance/vehicle/6a33d2cdb9b9016e964cecf9 role=anonymous start=2026-06-24T00:31:30.681233+00:00 end=2026-06-24T00:31:31.648981+00:00 duration_ms=967.75 status=200
-127.0.0.1 - - [24/Jun/2026 00:31:31] "GET /api/preventive-maintenance/vehicle/6a33d2cdb9b9016e964cecf9 HTTP/1.1" 200 -
-[2026-06-24 00:31:31,781] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for notifications
-[2026-06-24 00:31:31,781] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for notifications: (('recipient_user_id', 1),), (('recipient_user_id', 1), ('created_at', -1)), (('recipient_user_id', 1), ('is_read', 1)), (('category', 1),), (('priority', 1),), (('created_at', -1),), (('updated_at', -1),)
-[2026-06-24 00:31:34,056] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for preventive_maintenance
-[2026-06-24 00:31:34,057] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for preventive_maintenance: (('vehicle_id', 1),), (('maintenance_type', 1),), (('recurrence_type', 1),), (('status', 1),), (('assigned_admin_id', 1),), (('due_date', 1),), (('next_due_date', 1),), (('next_due_odometer', 1),), (('created_at', -1),), (('updated_at', -1),), (('vehicle_id', 1), ('created_at', -1)), (('status', 1), ('created_at', -1)), (('vehicle_id', 1), ('status', 1)), (('vehicle_id', 1), ('next_due_date', 1)), (('vehicle_id', 1), ('due_date', 1)), (('vehicle_id', 1), ('maintenance_type', 1))
-[2026-06-24 00:31:34,487] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for compliance_item_types
-[2026-06-24 00:31:34,487] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for compliance_item_types: (('normalized_name', 1),), (('status', 1),), (('created_at', -1),)
-[2026-06-24 00:31:35,778] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for vehicle_compliance_records
-[2026-06-24 00:31:35,778] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for vehicle_compliance_records: (('vehicle_id', 1),), (('compliance_type_id', 1),), (('status', 1),), (('expiry_date', 1),), (('created_at', -1),), (('updated_at', -1),), (('vehicle_id', 1), ('created_at', -1)), (('status', 1), ('created_at', -1)), (('vehicle_id', 1), ('status', 1))
-[2026-06-24 00:31:38,530] ERROR in app: [Flux Startup] Index checks failed.
-Traceback (most recent call last):
-  File "C:\Users\USER\OneDrive\Desktop\flux fleet ops\backend\app.py", line 78, in run_startup_maintenance
-    ensure_vehicle_indexes()
-    ~~~~~~~~~~~~~~~~~~~~~~^^
-  File "C:\Users\USER\OneDrive\Desktop\flux fleet ops\backend\services\vehicle_service.py", line 129, in ensure_vehicle_indexes
-    {"keys": [("created_at", DESCENDING)]},
-                             ^^^^^^^^^^
-NameError: name 'DESCENDING' is not defined. Did you mean: 'ASCENDING'?
-[2026-06-24 00:31:51,664] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint start vehicle_id=6a2b42bb1a9f06b34e940cc8 role=owner
-[2026-06-24 00:31:51,664] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint query vehicle_id=6a2b42bb1a9f06b34e940cc8 query={'vehicle_id': {'$in': [ObjectId('6a2b42bb1a9f06b34e940cc8'), '6a2b42bb1a9f06b34e940cc8']}}
-[2026-06-24 00:31:51,665] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint db_query_started vehicle_id=6a2b42bb1a9f06b34e940cc8
-[2026-06-24 00:31:51,820] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint db_query_completed vehicle_id=6a2b42bb1a9f06b34e940cc8 records_found=14 duration_ms=155.30
-[2026-06-24 00:31:52,540] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint enrichment_completed vehicle_id=6a2b42bb1a9f06b34e940cc8 records_found=14 duration_ms=718.88
-[2026-06-24 00:31:52,540] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint response_sent vehicle_id=6a2b42bb1a9f06b34e940cc8 records_found=14 duration_ms=876.66
-[2026-06-24 00:31:52,542] INFO in app: [Flux API] GET /api/preventive-maintenance/vehicle/6a2b42bb1a9f06b34e940cc8 role=anonymous start=2026-06-24T00:31:51.522938+00:00 end=2026-06-24T00:31:52.542288+00:00 duration_ms=1019.35 status=200
-127.0.0.1 - - [24/Jun/2026 00:31:52] "GET /api/preventive-maintenance/vehicle/6a2b42bb1a9f06b34e940cc8 HTTP/1.1" 200 -
-[2026-06-24 00:31:52,895] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint start vehicle_id=6a33d2cdb9b9016e964cecf9 role=owner
-[2026-06-24 00:31:52,896] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint query vehicle_id=6a33d2cdb9b9016e964cecf9 query={'vehicle_id': {'$in': [ObjectId('6a33d2cdb9b9016e964cecf9'), '6a33d2cdb9b9016e964cecf9']}}
-[2026-06-24 00:31:52,896] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint db_query_started vehicle_id=6a33d2cdb9b9016e964cecf9
-[2026-06-24 00:31:53,037] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint db_query_completed vehicle_id=6a33d2cdb9b9016e964cecf9 records_found=10 duration_ms=140.96
-[2026-06-24 00:31:53,735] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint enrichment_completed vehicle_id=6a33d2cdb9b9016e964cecf9 records_found=10 duration_ms=697.12
-[2026-06-24 00:31:53,735] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint response_sent vehicle_id=6a33d2cdb9b9016e964cecf9 records_found=10 duration_ms=839.93
-[2026-06-24 00:31:53,736] INFO in app: [Flux API] GET /api/preventive-maintenance/vehicle/6a33d2cdb9b9016e964cecf9 role=anonymous start=2026-06-24T00:31:52.753949+00:00 end=2026-06-24T00:31:53.736517+00:00 duration_ms=982.57 status=200
-127.0.0.1 - - [24/Jun/2026 00:31:53] "GET /api/preventive-maintenance/vehicle/6a33d2cdb9b9016e964cecf9 HTTP/1.1" 200 -
-[2026-06-24 00:31:53,964] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint start vehicle_id=000000000000000000000000 role=owner
-[2026-06-24 00:31:53,965] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint query vehicle_id=000000000000000000000000 query={'vehicle_id': {'$in': [ObjectId('000000000000000000000000'), '000000000000000000000000']}}
-[2026-06-24 00:31:53,965] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint db_query_started vehicle_id=000000000000000000000000
-[2026-06-24 00:31:54,101] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint db_query_completed vehicle_id=000000000000000000000000 records_found=0 duration_ms=135.79
-[2026-06-24 00:31:54,102] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint response_sent vehicle_id=000000000000000000000000 records_found=0 duration_ms=137.36
-[2026-06-24 00:31:54,102] INFO in app: [Flux API] GET /api/preventive-maintenance/vehicle/000000000000000000000000 role=anonymous start=2026-06-24T00:31:53.821051+00:00 end=2026-06-24T00:31:54.102588+00:00 duration_ms=281.54 status=200
-127.0.0.1 - - [24/Jun/2026 00:31:54] "GET /api/preventive-maintenance/vehicle/000000000000000000000000 HTTP/1.1" 200 -
-[2026-06-24 00:31:54,263] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint start vehicle_id=not-a-valid-id role=owner
-[2026-06-24 00:31:54,263] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint query vehicle_id=not-a-valid-id query={'vehicle_id': {'$in': ['not-a-valid-id']}}
-[2026-06-24 00:31:54,263] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint db_query_started vehicle_id=not-a-valid-id
-[2026-06-24 00:31:54,399] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint db_query_completed vehicle_id=not-a-valid-id records_found=0 duration_ms=135.37
-[2026-06-24 00:31:54,399] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint response_sent vehicle_id=not-a-valid-id records_found=0 duration_ms=136.86
-[2026-06-24 00:31:54,400] INFO in app: [Flux API] GET /api/preventive-maintenance/vehicle/not-a-valid-id role=anonymous start=2026-06-24T00:31:54.125855+00:00 end=2026-06-24T00:31:54.400218+00:00 duration_ms=274.36 status=200
-127.0.0.1 - - [24/Jun/2026 00:31:54] "GET /api/preventive-maintenance/vehicle/not-a-valid-id HTTP/1.1" 200 -
-[2026-06-24 00:32:59,896] INFO in app: [Flux Startup] Seed checks completed in 81344.87ms
-[2026-06-24 00:38:05,500] INFO in app: [Flux API] OPTIONS /api/auth/login role=anonymous start=2026-06-24T00:38:05.500290+00:00 end=2026-06-24T00:38:05.500579+00:00 duration_ms=0.29 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:05] "OPTIONS /api/auth/login HTTP/1.1" 200 -
-[2026-06-24 00:38:06,240] INFO in app: [Flux API] POST /api/auth/login role=anonymous start=2026-06-24T00:38:05.766841+00:00 end=2026-06-24T00:38:06.240219+00:00 duration_ms=473.38 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:06] "POST /api/auth/login HTTP/1.1" 200 -
-[2026-06-24 00:38:06,302] INFO in app: [Flux API] OPTIONS /api/faults/approvals role=anonymous start=2026-06-24T00:38:06.302139+00:00 end=2026-06-24T00:38:06.302304+00:00 duration_ms=0.16 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:06] "OPTIONS /api/faults/approvals HTTP/1.1" 200 -
-[2026-06-24 00:38:06,620] INFO in app: [Flux API] OPTIONS /api/faults/critical role=anonymous start=2026-06-24T00:38:06.620715+00:00 end=2026-06-24T00:38:06.620890+00:00 duration_ms=0.18 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:06] "OPTIONS /api/faults/critical HTTP/1.1" 200 -
-[2026-06-24 00:38:06,621] INFO in app: [Flux API] OPTIONS /api/bookings/summary role=anonymous start=2026-06-24T00:38:06.621608+00:00 end=2026-06-24T00:38:06.621747+00:00 duration_ms=0.14 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:06] "OPTIONS /api/bookings/summary HTTP/1.1" 200 -
-[2026-06-24 00:38:06,622] INFO in app: [Flux API] OPTIONS /api/customers/summary role=anonymous start=2026-06-24T00:38:06.622212+00:00 end=2026-06-24T00:38:06.622327+00:00 duration_ms=0.11 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:06] "OPTIONS /api/customers/summary HTTP/1.1" 200 -
-[2026-06-24 00:38:06,622] INFO in app: [Flux API] OPTIONS /api/dashboard/summary role=anonymous start=2026-06-24T00:38:06.622750+00:00 end=2026-06-24T00:38:06.622861+00:00 duration_ms=0.11 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:06] "OPTIONS /api/dashboard/summary HTTP/1.1" 200 -
-[2026-06-24 00:38:06,905] INFO in performance: [Flux DB] faults.approvals.query duration_ms=142.58
-[2026-06-24 00:38:07,046] INFO in performance: [Flux DB] faults.load_vehicles duration_ms=140.43
-[2026-06-24 00:38:07,185] INFO in dashboard_service: [Flux Dashboard] summary requested role=owner
-[2026-06-24 00:38:07,208] INFO in performance: [Flux DB] faults.critical.query duration_ms=132.13
-[2026-06-24 00:38:07,209] INFO in fault_service: [Flux Faults] critical count=0 total_ms=133.46
-[2026-06-24 00:38:07,213] INFO in app: [Flux API] GET /api/faults/critical role=anonymous start=2026-06-24T00:38:06.933024+00:00 end=2026-06-24T00:38:07.213031+00:00 duration_ms=280.01 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:07] "GET /api/faults/critical HTTP/1.1" 200 -
-[2026-06-24 00:38:07,323] INFO in performance: [Flux DB] faults.load_users duration_ms=276.64
-[2026-06-24 00:38:07,460] INFO in performance: [Flux DB] faults.load_categories duration_ms=136.66
-[2026-06-24 00:38:07,492] INFO in performance: [Flux DB] dashboard.vehicle_lookup duration_ms=143.8
-[2026-06-24 00:38:07,605] INFO in performance: [Flux DB] faults.load_components duration_ms=143.67
-[2026-06-24 00:38:07,605] INFO in fault_service: [Flux Faults] approvals count=4 enrichment_ms=699.67 total_ms=842.85
-[2026-06-24 00:38:07,606] INFO in app: [Flux API] GET /api/faults/approvals role=anonymous start=2026-06-24T00:38:06.623291+00:00 end=2026-06-24T00:38:07.606497+00:00 duration_ms=983.2 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:07] "GET /api/faults/approvals HTTP/1.1" 200 -
-[2026-06-24 00:38:07,630] INFO in performance: [Flux DB] dashboard.driver_lookup duration_ms=138.26
-[2026-06-24 00:38:07,918] INFO in performance: [Flux DB] dashboard.vehicle_counts duration_ms=286.67
-[2026-06-24 00:38:07,977] INFO in booking_service: [Flux Bookings] due reminder sweep duration_ms=139.39
-[2026-06-24 00:38:08,064] INFO in performance: [Flux DB] dashboard.driver_counts duration_ms=146.18
-[2026-06-24 00:38:08,200] INFO in performance: [Flux DB] dashboard.active_assignments duration_ms=135.04
-[2026-06-24 00:38:08,482] INFO in performance: [Flux DB] dashboard.collections duration_ms=281.39
-[2026-06-24 00:38:08,655] INFO in app: [Flux API] GET /api/bookings/summary role=anonymous start=2026-06-24T00:38:06.934589+00:00 end=2026-06-24T00:38:08.655213+00:00 duration_ms=1720.63 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:08] "GET /api/bookings/summary HTTP/1.1" 200 -
-[2026-06-24 00:38:08,787] INFO in performance: [Flux DB] dashboard.fuel_logs duration_ms=304.68
-[2026-06-24 00:38:08,924] INFO in performance: [Flux DB] dashboard.expenses duration_ms=135.66
-[2026-06-24 00:38:09,081] INFO in performance: [Flux DB] dashboard.maintenance_jobs duration_ms=156.85
-[2026-06-24 00:38:09,083] INFO in app: [Flux API] GET /api/customers/summary role=anonymous start=2026-06-24T00:38:06.936373+00:00 end=2026-06-24T00:38:09.083425+00:00 duration_ms=2147.03 status=200
-[2026-06-24 00:38:09,084] WARNING in app: SLOW API WARNING GET /api/customers/summary role=anonymous duration_ms=2147.03 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:09] "GET /api/customers/summary HTTP/1.1" 200 -
-[2026-06-24 00:38:09,222] INFO in performance: [Flux DB] dashboard.preventive_due_count duration_ms=140.55
-[2026-06-24 00:38:09,365] INFO in performance: [Flux DB] dashboard.compliance_records duration_ms=141.69
-[2026-06-24 00:38:09,645] INFO in performance: [Flux DB] dashboard.active_trip_counts duration_ms=280.07
-[2026-06-24 00:38:09,646] INFO in dashboard_service: [Flux Dashboard] summary generated role=owner duration_ms=2461.39
-[2026-06-24 00:38:09,646] WARNING in dashboard_service: SLOW API WARNING endpoint=/api/dashboard/summary role=owner duration_ms=2461.71
-[2026-06-24 00:38:09,647] INFO in app: [Flux API] GET /api/dashboard/summary role=anonymous start=2026-06-24T00:38:06.937284+00:00 end=2026-06-24T00:38:09.647351+00:00 duration_ms=2710.06 status=200
-[2026-06-24 00:38:09,647] WARNING in app: SLOW API WARNING GET /api/dashboard/summary role=anonymous duration_ms=2710.06 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:09] "GET /api/dashboard/summary HTTP/1.1" 200 -
-[2026-06-24 00:38:13,937] INFO in app: [Flux API] OPTIONS /api/auth/me role=anonymous start=2026-06-24T00:38:13.936988+00:00 end=2026-06-24T00:38:13.937193+00:00 duration_ms=0.2 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:13] "OPTIONS /api/auth/me HTTP/1.1" 200 -
-[2026-06-24 00:38:14,507] INFO in app: [Flux API] GET /api/auth/me role=anonymous start=2026-06-24T00:38:14.184240+00:00 end=2026-06-24T00:38:14.507709+00:00 duration_ms=323.47 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:14] "GET /api/auth/me HTTP/1.1" 200 -
-[2026-06-24 00:38:14,596] INFO in app: [Flux API] OPTIONS /api/faults/approvals role=anonymous start=2026-06-24T00:38:14.596513+00:00 end=2026-06-24T00:38:14.596824+00:00 duration_ms=0.31 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:14] "OPTIONS /api/faults/approvals HTTP/1.1" 200 -
-[2026-06-24 00:38:14,911] INFO in app: [Flux API] OPTIONS /api/faults/critical role=anonymous start=2026-06-24T00:38:14.910922+00:00 end=2026-06-24T00:38:14.911111+00:00 duration_ms=0.18 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:14] "OPTIONS /api/faults/critical HTTP/1.1" 200 -
-[2026-06-24 00:38:14,912] INFO in app: [Flux API] OPTIONS /api/dashboard/summary role=anonymous start=2026-06-24T00:38:14.912085+00:00 end=2026-06-24T00:38:14.912219+00:00 duration_ms=0.13 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:14] "OPTIONS /api/dashboard/summary HTTP/1.1" 200 -
-[2026-06-24 00:38:14,912] INFO in app: [Flux API] OPTIONS /api/bookings/summary role=anonymous start=2026-06-24T00:38:14.912744+00:00 end=2026-06-24T00:38:14.912868+00:00 duration_ms=0.12 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:14] "OPTIONS /api/bookings/summary HTTP/1.1" 200 -
-[2026-06-24 00:38:14,913] INFO in app: [Flux API] OPTIONS /api/customers/summary role=anonymous start=2026-06-24T00:38:14.913360+00:00 end=2026-06-24T00:38:14.913486+00:00 duration_ms=0.12 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:14] "OPTIONS /api/customers/summary HTTP/1.1" 200 -
-[2026-06-24 00:38:15,213] INFO in performance: [Flux DB] faults.approvals.query duration_ms=157.69
-[2026-06-24 00:38:15,360] INFO in performance: [Flux DB] faults.load_vehicles duration_ms=146.31
-[2026-06-24 00:38:15,378] INFO in app: [Flux API] GET /api/dashboard/summary role=anonymous start=2026-06-24T00:38:15.228383+00:00 end=2026-06-24T00:38:15.378034+00:00 duration_ms=149.65 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:15] "GET /api/dashboard/summary HTTP/1.1" 200 -
-[2026-06-24 00:38:15,507] INFO in performance: [Flux DB] faults.load_users duration_ms=147.16
-[2026-06-24 00:38:15,508] INFO in performance: [Flux DB] faults.critical.query duration_ms=139.16
-[2026-06-24 00:38:15,509] INFO in fault_service: [Flux Faults] critical count=0 total_ms=139.96
-[2026-06-24 00:38:15,509] INFO in app: [Flux API] GET /api/faults/critical role=anonymous start=2026-06-24T00:38:15.227474+00:00 end=2026-06-24T00:38:15.509355+00:00 duration_ms=281.88 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:15] "GET /api/faults/critical HTTP/1.1" 200 -
-[2026-06-24 00:38:15,646] INFO in performance: [Flux DB] faults.load_categories duration_ms=137.67
-[2026-06-24 00:38:15,785] INFO in performance: [Flux DB] faults.load_components duration_ms=138.28
-[2026-06-24 00:38:15,786] INFO in fault_service: [Flux Faults] approvals count=4 enrichment_ms=572.38 total_ms=730.77
-[2026-06-24 00:38:15,786] INFO in app: [Flux API] GET /api/faults/approvals role=anonymous start=2026-06-24T00:38:14.914548+00:00 end=2026-06-24T00:38:15.786728+00:00 duration_ms=872.18 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:15] "GET /api/faults/approvals HTTP/1.1" 200 -
-[2026-06-24 00:38:16,088] INFO in app: [Flux API] GET /api/bookings/summary role=anonymous start=2026-06-24T00:38:15.229248+00:00 end=2026-06-24T00:38:16.088068+00:00 duration_ms=858.82 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:16] "GET /api/bookings/summary HTTP/1.1" 200 -
-[2026-06-24 00:38:16,123] INFO in app: [Flux API] GET /api/customers/summary role=anonymous start=2026-06-24T00:38:15.230112+00:00 end=2026-06-24T00:38:16.123385+00:00 duration_ms=893.27 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:16] "GET /api/customers/summary HTTP/1.1" 200 -
-[2026-06-24 00:38:16,786] INFO in app: [Flux API] OPTIONS /api/vehicles role=anonymous start=2026-06-24T00:38:16.785938+00:00 end=2026-06-24T00:38:16.786056+00:00 duration_ms=0.11 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:16] "OPTIONS /api/vehicles HTTP/1.1" 200 -
-[2026-06-24 00:38:16,786] INFO in app: [Flux API] OPTIONS /api/vehicles/economics/dashboard role=anonymous start=2026-06-24T00:38:16.786651+00:00 end=2026-06-24T00:38:16.786756+00:00 duration_ms=0.1 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:16] "OPTIONS /api/vehicles/economics/dashboard HTTP/1.1" 200 -
-[2026-06-24 00:38:16,788] INFO in app: [Flux API] OPTIONS /api/system-settings role=anonymous start=2026-06-24T00:38:16.787912+00:00 end=2026-06-24T00:38:16.788024+00:00 duration_ms=0.11 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:16] "OPTIONS /api/system-settings HTTP/1.1" 200 -
-[2026-06-24 00:38:17,332] INFO in vehicles: [Flux Performance] GET /api/vehicles returned 5 records in 147.91ms
-[2026-06-24 00:38:17,333] INFO in app: [Flux API] GET /api/vehicles role=anonymous start=2026-06-24T00:38:17.037169+00:00 end=2026-06-24T00:38:17.333397+00:00 duration_ms=296.23 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:17] "GET /api/vehicles HTTP/1.1" 200 -
-[2026-06-24 00:38:17,397] INFO in app: [Flux API] GET /api/system-settings role=anonymous start=2026-06-24T00:38:17.102760+00:00 end=2026-06-24T00:38:17.397747+00:00 duration_ms=294.98 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:17] "GET /api/system-settings HTTP/1.1" 200 -
-[2026-06-24 00:38:18,446] INFO in app: [Flux API] OPTIONS /api/vehicles/6a282e85089632a2e3f2fcbd role=anonymous start=2026-06-24T00:38:18.446203+00:00 end=2026-06-24T00:38:18.446377+00:00 duration_ms=0.17 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:18] "OPTIONS /api/vehicles/6a282e85089632a2e3f2fcbd?include_economics=false HTTP/1.1" 200 -
-[2026-06-24 00:38:18,894] INFO in vehicles: [Flux Performance] vehicle details request received vehicle_id=6a282e85089632a2e3f2fcbd include_economics=False
-[2026-06-24 00:38:19,480] INFO in vehicles: [Flux Performance] vehicle details response completed vehicle_id=6a282e85089632a2e3f2fcbd include_economics=False responseTimeMs=585.45
-[2026-06-24 00:38:19,481] INFO in app: [Flux API] GET /api/vehicles/6a282e85089632a2e3f2fcbd role=anonymous start=2026-06-24T00:38:18.753890+00:00 end=2026-06-24T00:38:19.481106+00:00 duration_ms=727.22 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:19] "GET /api/vehicles/6a282e85089632a2e3f2fcbd?include_economics=false HTTP/1.1" 200 -
-[2026-06-24 00:38:22,772] INFO in app: [Flux API] OPTIONS /api/vehicles/6a282e85089632a2e3f2fcbd/economics role=anonymous start=2026-06-24T00:38:22.772671+00:00 end=2026-06-24T00:38:22.772801+00:00 duration_ms=0.13 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:22] "OPTIONS /api/vehicles/6a282e85089632a2e3f2fcbd/economics HTTP/1.1" 200 -
-[2026-06-24 00:38:23,223] INFO in vehicles: [Flux Performance] GET /api/vehicles/6a282e85089632a2e3f2fcbd/economics started
-[2026-06-24 00:38:24,032] INFO in app: [Flux API] GET /api/vehicles/economics/dashboard role=anonymous start=2026-06-24T00:38:17.101644+00:00 end=2026-06-24T00:38:24.032234+00:00 duration_ms=6930.59 status=200
-[2026-06-24 00:38:24,032] WARNING in app: SLOW API WARNING GET /api/vehicles/economics/dashboard role=anonymous duration_ms=6930.59 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:24] "GET /api/vehicles/economics/dashboard HTTP/1.1" 200 -
-[2026-06-24 00:38:25,120] INFO in vehicles: [Flux Performance] GET /api/vehicles/6a282e85089632a2e3f2fcbd/economics completed in 1897.52ms
-[2026-06-24 00:38:25,121] INFO in app: [Flux API] GET /api/vehicles/6a282e85089632a2e3f2fcbd/economics role=anonymous start=2026-06-24T00:38:23.086875+00:00 end=2026-06-24T00:38:25.121618+00:00 duration_ms=2034.75 status=200
-[2026-06-24 00:38:25,121] WARNING in app: SLOW API WARNING GET /api/vehicles/6a282e85089632a2e3f2fcbd/economics role=anonymous duration_ms=2034.75 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:25] "GET /api/vehicles/6a282e85089632a2e3f2fcbd/economics HTTP/1.1" 200 -
-[2026-06-24 00:38:27,470] INFO in app: [Flux API] OPTIONS /api/preventive-maintenance/vehicle/6a282e85089632a2e3f2fcbd role=anonymous start=2026-06-24T00:38:27.470776+00:00 end=2026-06-24T00:38:27.470916+00:00 duration_ms=0.14 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:27] "OPTIONS /api/preventive-maintenance/vehicle/6a282e85089632a2e3f2fcbd HTTP/1.1" 200 -
-[2026-06-24 00:38:27,890] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint start vehicle_id=6a282e85089632a2e3f2fcbd role=owner
-[2026-06-24 00:38:27,891] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint query vehicle_id=6a282e85089632a2e3f2fcbd query={'vehicle_id': {'$in': [ObjectId('6a282e85089632a2e3f2fcbd'), '6a282e85089632a2e3f2fcbd']}}
-[2026-06-24 00:38:27,891] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint db_query_started vehicle_id=6a282e85089632a2e3f2fcbd
-[2026-06-24 00:38:28,057] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint db_query_completed vehicle_id=6a282e85089632a2e3f2fcbd records_found=14 duration_ms=166.02
-[2026-06-24 00:38:28,816] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint enrichment_completed vehicle_id=6a282e85089632a2e3f2fcbd records_found=14 duration_ms=758.64
-[2026-06-24 00:38:28,817] INFO in preventive_maintenance_service: [Flux Preventive Maintenance] Vehicle endpoint response_sent vehicle_id=6a282e85089632a2e3f2fcbd records_found=14 duration_ms=926.84
-[2026-06-24 00:38:28,818] INFO in app: [Flux API] GET /api/preventive-maintenance/vehicle/6a282e85089632a2e3f2fcbd role=anonymous start=2026-06-24T00:38:27.721444+00:00 end=2026-06-24T00:38:28.818141+00:00 duration_ms=1096.69 status=200
-127.0.0.1 - - [24/Jun/2026 00:38:28] "GET /api/preventive-maintenance/vehicle/6a282e85089632a2e3f2fcbd HTTP/1.1" 200 -
+[2026-06-24 00:57:25,755] INFO in app: [Flux Startup] Database connection verified in 4144.24ms
+[2026-06-24 00:57:26,634] INFO in app: [Flux API] GET /api/health role=anonymous start=2026-06-24T00:57:25.617716+00:00 end=2026-06-24T00:57:26.634280+00:00 duration_ms=1016.56 status=200
+127.0.0.1 - - [24/Jun/2026 00:57:26] "GET /api/health HTTP/1.1" 200 -
+[2026-06-24 00:57:27,067] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for users
+[2026-06-24 00:57:27,068] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for users: (('email', 1),), (('phone', 1),), (('role', 1),), (('status', 1),), (('created_at', 1),), (('updated_at', 1),), (('driver_profile.approval_status', 1),), (('driver_profile.approval_status', 1), ('created_at', 1))
+[2026-06-24 00:57:27,386] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for token_blocklist
+[2026-06-24 00:57:27,387] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for token_blocklist: (('jti', 1),), (('expires_at', 1),)
+[2026-06-24 00:57:28,834] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for assignments
+[2026-06-24 00:57:28,834] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for assignments: (('driver_id', 1),), (('vehicle_id', 1),), (('status', 1),), (('start_date', 1),), (('created_at', 1),), (('updated_at', 1),), (('driver_id', 1), ('created_at', 1)), (('vehicle_id', 1), ('created_at', 1)), (('status', 1), ('created_at', 1)), (('vehicle_id', 1), ('status', 1))
+[2026-06-24 00:57:31,889] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for bookings
+[2026-06-24 00:57:31,889] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for bookings: (('booking_id', 1),), (('customer_id', 1),), (('driver_id', 1),), (('vehicle_id', 1),), (('pickup_at', 1),), (('pickup_date', 1),), (('status', 1),), (('created_at', -1),), (('updated_at', -1),), (('is_recurring_template', 1), ('pickup_at', 1)), (('driver_id', 1), ('pickup_at', 1)), (('vehicle_id', 1), ('pickup_at', 1)), (('customer_id', 1), ('pickup_at', 1)), (('driver_id', 1), ('created_at', -1)), (('vehicle_id', 1), ('created_at', -1)), (('status', 1), ('created_at', -1)), (('vehicle_id', 1), ('status', 1)), (('source_booking_id', 1),), (('is_recurring_template', 1),), (('created_by', 1),)
+[2026-06-24 00:57:34,982] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for collections
+[2026-06-24 00:57:34,983] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for collections: (('driver_id', 1),), (('vehicle_id', 1),), (('assignment_id', 1),), (('created_at', -1),), (('updated_at', -1),), (('submitted_at', -1),), (('collection_date', -1),), (('status', 1),), (('status', 1), ('created_at', -1)), (('status', 1), ('collection_date', -1)), (('vehicle_id', 1), ('created_at', -1)), (('driver_id', 1), ('created_at', -1)), (('vehicle_id', 1), ('status', 1)), (('vehicle_id', 1), ('status', 1), ('collection_date', -1)), (('driver_id', 1), ('status', 1), ('collection_date', -1)), (('assignment_id', 1), ('status', 1), ('created_at', -1)), (('cycle_key', 1),), (('week_start', 1),), (('payment_deadline', 1),), (('received_by_admin_id', 1),), (('approved_by_admin_id', 1),)
+[2026-06-24 00:57:38,231] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for customers
+[2026-06-24 00:57:38,232] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for customers: (('customer_id', 1),), (('normalized_phone_number', 1),), (('normalized_email_address', 1),), (('created_by', 1),), (('created_by_user_id', 1),), (('created_by_role', 1),), (('created_by_driver_id', 1),), (('preferred_driver_id', 1),), (('source', 1),), (('customer_category_id', 1),), (('relationship_category_id', 1),), (('opportunity_level_id', 1),), (('network_value_id', 1),), (('lead_status_id', 1),), (('status', 1),), (('follow_up_date', 1),), (('next_follow_up_date', 1),), (('created_at', -1),), (('updated_at', -1),), (('preferred_driver_id', 1), ('created_at', -1)), (('status', 1), ('created_at', -1))
+[2026-06-24 00:57:40,111] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for deposits
+[2026-06-24 00:57:40,112] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for deposits: (('admin_id', 1),), (('status', 1),), (('deposit_date', -1),), (('submitted_by', 1),), (('verified_by', 1),), (('created_at', -1),), (('updated_at', -1),), (('submitted_at', -1),), (('deposit_date', -1), ('created_at', -1)), (('status', 1), ('created_at', -1)), (('status', 1), ('deposit_date', -1)), (('admin_id', 1), ('status', 1), ('deposit_date', -1))
+[2026-06-24 00:57:42,878] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for expenses
+[2026-06-24 00:57:42,878] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for expenses: (('status', 1),), (('expense_category', 1),), (('expense_date', -1),), (('vehicle_id', 1),), (('driver_id', 1),), (('finance_account_id', 1),), (('requested_by', 1),), (('approved_by', 1),), (('paid_by', 1),), (('created_at', -1),), (('updated_at', -1),), (('vehicle_id', 1), ('created_at', -1)), (('driver_id', 1), ('created_at', -1)), (('status', 1), ('created_at', -1)), (('vehicle_id', 1), ('status', 1)), (('vehicle_id', 1), ('status', 1), ('expense_date', -1)), (('driver_id', 1), ('status', 1), ('expense_date', -1))
+[2026-06-24 00:57:44,969] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for faults
+[2026-06-24 00:57:44,969] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for faults: (('vehicle_id', 1),), (('driver_id', 1),), (('category_id', 1),), (('component_id', 1),), (('severity', 1),), (('status', 1),), (('reported_at', -1),), (('created_at', -1),), (('updated_at', -1),), (('created_by', 1),), (('vehicle_id', 1), ('created_at', -1)), (('driver_id', 1), ('created_at', -1)), (('status', 1), ('created_at', -1)), (('vehicle_id', 1), ('status', 1))
+[2026-06-24 00:57:45,255] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for fault_categories
+[2026-06-24 00:57:45,258] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for fault_categories: (('code', 1),), (('status', 1),)
+[2026-06-24 00:57:45,703] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for fault_components
+[2026-06-24 00:57:45,704] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for fault_components: (('category_id', 1),), (('code', 1),), (('category_id', 1), ('name', 1))
+[2026-06-24 00:57:45,845] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for maintenance_jobs_fault_link
+[2026-06-24 00:57:45,845] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for maintenance_jobs_fault_link: (('fault_id', 1),)
+[2026-06-24 00:57:47,059] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for fuel_stations
+[2026-06-24 00:57:47,059] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for fuel_stations: (('normalized_name', 1),), (('status', 1),), (('created_at', -1),), (('updated_at', -1),)
+[2026-06-24 00:57:49,194] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for fuel_logs
+[2026-06-24 00:57:49,194] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for fuel_logs: (('vehicle_id', 1),), (('driver_id', 1),), (('assignment_id', 1),), (('fuel_station_id', 1),), (('status', 1),), (('fuel_date', -1),), (('created_at', -1),), (('updated_at', -1),), (('vehicle_id', 1), ('created_at', -1)), (('vehicle_id', 1), ('fuel_date', -1), ('created_at', -1)), (('driver_id', 1), ('created_at', -1)), (('status', 1), ('created_at', -1)), (('vehicle_id', 1), ('status', 1))
+[2026-06-24 00:57:49,638] INFO in vehicles: [Flux Performance] vehicle details request received vehicle_id=6a2b42bb1a9f06b34e940cc8 include_economics=False
+[2026-06-24 00:57:50,438] INFO in vehicles: [Flux Performance] vehicle details response completed vehicle_id=6a2b42bb1a9f06b34e940cc8 include_economics=False responseTimeMs=799.88
+[2026-06-24 00:57:50,438] INFO in app: [Flux API] GET /api/vehicles/6a2b42bb1a9f06b34e940cc8 role=anonymous start=2026-06-24T00:57:49.494417+00:00 end=2026-06-24T00:57:50.438500+00:00 duration_ms=944.08 status=200
+127.0.0.1 - - [24/Jun/2026 00:57:50] "GET /api/vehicles/6a2b42bb1a9f06b34e940cc8?include_economics=false HTTP/1.1" 200 -
+[2026-06-24 00:57:50,905] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for incidents
+[2026-06-24 00:57:50,906] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for incidents: (('vehicle_id', 1),), (('driver_id', 1),), (('status', 1),), (('incident_type', 1),), (('incident_at', -1),), (('claim_status', 1),), (('created_at', -1),), (('updated_at', -1),), (('vehicle_id', 1), ('created_at', -1)), (('driver_id', 1), ('created_at', -1)), (('status', 1), ('created_at', -1))
+[2026-06-24 00:57:53,821] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for maintenance_jobs
+[2026-06-24 00:57:53,822] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for maintenance_jobs: (('vehicle_id', 1),), (('driver_id', 1),), (('fault_report_id', 1),), (('expense_id', 1),), (('maintenance_type', 1),), (('priority', 1),), (('status', 1),), (('maintenance_coordinator_id', 1),), (('next_follow_up_date', 1),), (('target_completion_date', 1),), (('current_stage', 1),), (('start_date', -1),), (('created_at', -1),), (('updated_at', -1),), (('vehicle_id', 1), ('created_at', -1)), (('vehicle_id', 1), ('updated_at', -1), ('created_at', -1)), (('driver_id', 1), ('created_at', -1)), (('status', 1), ('created_at', -1)), (('vehicle_id', 1), ('status', 1))
+[2026-06-24 00:57:54,420] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for maintenance_progress_logs
+[2026-06-24 00:57:54,420] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for maintenance_progress_logs: (('maintenance_job_id', 1),), (('update_type', 1),), (('current_stage', 1),), (('updated_at', -1),)
+[2026-06-24 00:57:58,713] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for notifications
+[2026-06-24 00:57:58,714] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for notifications: (('recipient_user_id', 1),), (('recipient_user_id', 1), ('created_at', -1)), (('recipient_user_id', 1), ('is_read', 1)), (('category', 1),), (('priority', 1),), (('created_at', -1),), (('updated_at', -1),)
+[2026-06-24 00:58:01,713] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for preventive_maintenance
+[2026-06-24 00:58:01,714] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for preventive_maintenance: (('vehicle_id', 1),), (('maintenance_type', 1),), (('recurrence_type', 1),), (('status', 1),), (('assigned_admin_id', 1),), (('due_date', 1),), (('next_due_date', 1),), (('next_due_odometer', 1),), (('created_at', -1),), (('updated_at', -1),), (('vehicle_id', 1), ('created_at', -1)), (('status', 1), ('created_at', -1)), (('vehicle_id', 1), ('status', 1)), (('vehicle_id', 1), ('next_due_date', 1)), (('vehicle_id', 1), ('due_date', 1)), (('vehicle_id', 1), ('maintenance_type', 1))
+[2026-06-24 00:58:02,261] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for compliance_item_types
+[2026-06-24 00:58:02,261] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for compliance_item_types: (('normalized_name', 1),), (('status', 1),), (('created_at', -1),)
+[2026-06-24 00:58:03,644] INFO in mongo_indexes: [Flux Indexes] No new indexes needed for vehicle_compliance_records
+[2026-06-24 00:58:03,644] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for vehicle_compliance_records: (('vehicle_id', 1),), (('compliance_type_id', 1),), (('status', 1),), (('expiry_date', 1),), (('created_at', -1),), (('updated_at', -1),), (('vehicle_id', 1), ('created_at', -1)), (('status', 1), ('created_at', -1)), (('vehicle_id', 1), ('status', 1))
+[2026-06-24 00:58:09,046] INFO in mongo_indexes: [Flux Indexes] Created 6 indexes on vehicles: created_at_-1, updated_at_-1, assigned_driver_id_1_created_at_-1, assigned_driver_id_1_updated_at_-1, status_1_created_at_-1, status_1_updated_at_-1
+[2026-06-24 00:58:09,046] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for vehicles: (('registration_number', 1),), (('chassis_number', 1),), (('engine_number', 1),), (('status', 1),), (('assigned_driver_id', 1),)
+[2026-06-24 00:58:09,802] INFO in mongo_indexes: [Flux Indexes] Created 2 indexes on vehicle_cost_items: created_at_-1, vehicle_id_1_created_at_-1
+[2026-06-24 00:58:09,802] DEBUG in mongo_indexes: [Flux Indexes] Existing indexes already satisfied for vehicle_cost_items: (('vehicle_id', 1),)
+[2026-06-24 00:58:10,642] INFO in app: [Flux Startup] Index checks completed in 44886.70ms
+[2026-06-24 00:59:15,071] INFO in app: [Flux API] OPTIONS /api/vehicles role=anonymous start=2026-06-24T00:59:15.071092+00:00 end=2026-06-24T00:59:15.071274+00:00 duration_ms=0.18 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:15] "OPTIONS /api/vehicles HTTP/1.1" 200 -
+[2026-06-24 00:59:15,072] INFO in app: [Flux API] OPTIONS /api/vehicles/economics/dashboard role=anonymous start=2026-06-24T00:59:15.071857+00:00 end=2026-06-24T00:59:15.071966+00:00 duration_ms=0.11 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:15] "OPTIONS /api/vehicles/economics/dashboard HTTP/1.1" 200 -
+[2026-06-24 00:59:15,073] INFO in app: [Flux API] OPTIONS /api/system-settings role=anonymous start=2026-06-24T00:59:15.072907+00:00 end=2026-06-24T00:59:15.072986+00:00 duration_ms=0.08 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:15] "OPTIONS /api/system-settings HTTP/1.1" 200 -
+[2026-06-24 00:59:15,786] INFO in vehicles: [Flux Performance] GET /api/vehicles returned 5 records in 280.34ms
+[2026-06-24 00:59:15,787] INFO in app: [Flux API] GET /api/vehicles role=anonymous start=2026-06-24T00:59:15.337214+00:00 end=2026-06-24T00:59:15.787146+00:00 duration_ms=449.93 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:15] "GET /api/vehicles HTTP/1.1" 200 -
+[2026-06-24 00:59:16,492] INFO in app: [Flux API] GET /api/system-settings role=anonymous start=2026-06-24T00:59:15.384953+00:00 end=2026-06-24T00:59:16.492223+00:00 duration_ms=1107.27 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:16] "GET /api/system-settings HTTP/1.1" 200 -
+[2026-06-24 00:59:18,958] INFO in app: [Flux API] OPTIONS /api/drivers role=anonymous start=2026-06-24T00:59:18.958044+00:00 end=2026-06-24T00:59:18.958184+00:00 duration_ms=0.14 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:18] "OPTIONS /api/drivers HTTP/1.1" 200 -
+[2026-06-24 00:59:19,274] INFO in app: [Flux API] OPTIONS /api/users role=anonymous start=2026-06-24T00:59:19.274822+00:00 end=2026-06-24T00:59:19.274922+00:00 duration_ms=0.1 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:19] "OPTIONS /api/users HTTP/1.1" 200 -
+[2026-06-24 00:59:19,568] INFO in app: [Flux API] GET /api/drivers role=anonymous start=2026-06-24T00:59:19.275402+00:00 end=2026-06-24T00:59:19.568377+00:00 duration_ms=292.97 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:19] "GET /api/drivers HTTP/1.1" 200 -
+[2026-06-24 00:59:19,886] INFO in app: [Flux API] GET /api/users role=anonymous start=2026-06-24T00:59:19.588462+00:00 end=2026-06-24T00:59:19.886163+00:00 duration_ms=297.7 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:19] "GET /api/users HTTP/1.1" 200 -
+[2026-06-24 00:59:21,021] INFO in app: [Flux API] OPTIONS /api/assignments role=anonymous start=2026-06-24T00:59:21.021386+00:00 end=2026-06-24T00:59:21.021562+00:00 duration_ms=0.17 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:21] "OPTIONS /api/assignments HTTP/1.1" 200 -
+[2026-06-24 00:59:21,022] INFO in app: [Flux API] OPTIONS /api/assignments/options role=anonymous start=2026-06-24T00:59:21.022291+00:00 end=2026-06-24T00:59:21.022427+00:00 duration_ms=0.13 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:21] "OPTIONS /api/assignments/options HTTP/1.1" 200 -
+[2026-06-24 00:59:21,764] INFO in app: [Flux API] GET /api/assignments/options role=anonymous start=2026-06-24T00:59:21.336582+00:00 end=2026-06-24T00:59:21.764842+00:00 duration_ms=428.26 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:21] "GET /api/assignments/options HTTP/1.1" 200 -
+[2026-06-24 00:59:22,734] INFO in app: [Flux API] GET /api/assignments role=anonymous start=2026-06-24T00:59:21.335167+00:00 end=2026-06-24T00:59:22.734128+00:00 duration_ms=1398.96 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:22] "GET /api/assignments HTTP/1.1" 200 -
+[2026-06-24 00:59:23,027] INFO in app: [Flux API] GET /api/vehicles/economics/dashboard role=anonymous start=2026-06-24T00:59:15.384153+00:00 end=2026-06-24T00:59:23.027090+00:00 duration_ms=7642.94 status=200
+[2026-06-24 00:59:23,027] WARNING in app: SLOW API WARNING GET /api/vehicles/economics/dashboard role=anonymous duration_ms=7642.94 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:23] "GET /api/vehicles/economics/dashboard HTTP/1.1" 200 -
+[2026-06-24 00:59:30,588] INFO in app: [Flux API] OPTIONS /api/vehicles role=anonymous start=2026-06-24T00:59:30.588226+00:00 end=2026-06-24T00:59:30.588353+00:00 duration_ms=0.12 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:30] "OPTIONS /api/vehicles HTTP/1.1" 200 -
+[2026-06-24 00:59:30,589] INFO in app: [Flux API] OPTIONS /api/system-settings role=anonymous start=2026-06-24T00:59:30.589228+00:00 end=2026-06-24T00:59:30.589383+00:00 duration_ms=0.15 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:30] "OPTIONS /api/system-settings HTTP/1.1" 200 -
+[2026-06-24 00:59:31,263] INFO in app: [Flux API] GET /api/system-settings role=anonymous start=2026-06-24T00:59:30.904482+00:00 end=2026-06-24T00:59:31.263792+00:00 duration_ms=359.31 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:31] "GET /api/system-settings HTTP/1.1" 200 -
+[2026-06-24 00:59:33,008] INFO in vehicles: [Flux Performance] GET /api/vehicles returned 5 records in 2015.38ms
+[2026-06-24 00:59:33,009] INFO in app: [Flux API] GET /api/vehicles role=anonymous start=2026-06-24T00:59:30.855637+00:00 end=2026-06-24T00:59:33.009404+00:00 duration_ms=2153.77 status=200
+[2026-06-24 00:59:33,009] WARNING in app: SLOW API WARNING GET /api/vehicles role=anonymous duration_ms=2153.77 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:33] "GET /api/vehicles HTTP/1.1" 200 -
+[2026-06-24 00:59:34,637] INFO in app: [Flux API] OPTIONS /api/vehicles/6a282e85089632a2e3f2fcbd role=anonymous start=2026-06-24T00:59:34.636886+00:00 end=2026-06-24T00:59:34.637133+00:00 duration_ms=0.24 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:34] "OPTIONS /api/vehicles/6a282e85089632a2e3f2fcbd?include_economics=false HTTP/1.1" 200 -
+[2026-06-24 00:59:37,178] INFO in vehicles: [Flux Performance] vehicle details request received vehicle_id=6a282e85089632a2e3f2fcbd include_economics=False
+[2026-06-24 00:59:37,736] INFO in vehicles: [Flux Performance] vehicle details response completed vehicle_id=6a282e85089632a2e3f2fcbd include_economics=False responseTimeMs=558.71
+[2026-06-24 00:59:37,738] INFO in app: [Flux API] GET /api/vehicles/6a282e85089632a2e3f2fcbd role=anonymous start=2026-06-24T00:59:34.957049+00:00 end=2026-06-24T00:59:37.738011+00:00 duration_ms=2780.96 status=200
+[2026-06-24 00:59:37,738] WARNING in app: SLOW API WARNING GET /api/vehicles/6a282e85089632a2e3f2fcbd role=anonymous duration_ms=2780.96 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:37] "GET /api/vehicles/6a282e85089632a2e3f2fcbd?include_economics=false HTTP/1.1" 200 -
+[2026-06-24 00:59:41,758] INFO in app: [Flux Startup] Seed checks completed in 91115.10ms
+[2026-06-24 00:59:47,762] INFO in app: [Flux API] OPTIONS /api/vehicles role=anonymous start=2026-06-24T00:59:47.761962+00:00 end=2026-06-24T00:59:47.762116+00:00 duration_ms=0.15 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:47] "OPTIONS /api/vehicles HTTP/1.1" 200 -
+[2026-06-24 00:59:48,077] INFO in app: [Flux API] OPTIONS /api/vehicles/economics/dashboard role=anonymous start=2026-06-24T00:59:48.077390+00:00 end=2026-06-24T00:59:48.077561+00:00 duration_ms=0.17 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:48] "OPTIONS /api/vehicles/economics/dashboard HTTP/1.1" 200 -
+[2026-06-24 00:59:48,078] INFO in app: [Flux API] OPTIONS /api/system-settings role=anonymous start=2026-06-24T00:59:48.078201+00:00 end=2026-06-24T00:59:48.078307+00:00 duration_ms=0.1 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:48] "OPTIONS /api/system-settings HTTP/1.1" 200 -
+[2026-06-24 00:59:48,497] INFO in vehicles: [Flux Performance] GET /api/vehicles returned 5 records in 283.56ms
+[2026-06-24 00:59:48,497] INFO in app: [Flux API] GET /api/vehicles role=anonymous start=2026-06-24T00:59:48.078708+00:00 end=2026-06-24T00:59:48.497810+00:00 duration_ms=419.1 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:48] "GET /api/vehicles HTTP/1.1" 200 -
+[2026-06-24 00:59:48,683] INFO in app: [Flux API] GET /api/system-settings role=anonymous start=2026-06-24T00:59:48.394926+00:00 end=2026-06-24T00:59:48.683767+00:00 duration_ms=288.84 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:48] "GET /api/system-settings HTTP/1.1" 200 -
+[2026-06-24 00:59:54,625] INFO in app: [Flux API] OPTIONS /api/vehicles/6a2b42bb1a9f06b34e940cc8 role=anonymous start=2026-06-24T00:59:54.625607+00:00 end=2026-06-24T00:59:54.625742+00:00 duration_ms=0.13 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:54] "OPTIONS /api/vehicles/6a2b42bb1a9f06b34e940cc8?include_economics=false HTTP/1.1" 200 -
+[2026-06-24 00:59:55,089] INFO in vehicles: [Flux Performance] vehicle details request received vehicle_id=6a2b42bb1a9f06b34e940cc8 include_economics=False
+[2026-06-24 00:59:55,363] INFO in app: [Flux API] GET /api/vehicles/economics/dashboard role=anonymous start=2026-06-24T00:59:48.393780+00:00 end=2026-06-24T00:59:55.363576+00:00 duration_ms=6969.8 status=200
+[2026-06-24 00:59:55,364] WARNING in app: SLOW API WARNING GET /api/vehicles/economics/dashboard role=anonymous duration_ms=6969.8 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:55] "GET /api/vehicles/economics/dashboard HTTP/1.1" 200 -
+[2026-06-24 00:59:55,792] INFO in vehicles: [Flux Performance] vehicle details response completed vehicle_id=6a2b42bb1a9f06b34e940cc8 include_economics=False responseTimeMs=703.34
+[2026-06-24 00:59:55,793] INFO in app: [Flux API] GET /api/vehicles/6a2b42bb1a9f06b34e940cc8 role=anonymous start=2026-06-24T00:59:54.930590+00:00 end=2026-06-24T00:59:55.793472+00:00 duration_ms=862.88 status=200
+127.0.0.1 - - [24/Jun/2026 00:59:55] "GET /api/vehicles/6a2b42bb1a9f06b34e940cc8?include_economics=false HTTP/1.1" 200 -
+[2026-06-24 01:01:17,613] INFO in app: [Flux API] OPTIONS /api/analytics/drivers role=anonymous start=2026-06-24T01:01:17.612711+00:00 end=2026-06-24T01:01:17.612930+00:00 duration_ms=0.21 status=200
+127.0.0.1 - - [24/Jun/2026 01:01:17] "OPTIONS /api/analytics/drivers?start_date=2026-06-22&end_date=2026-06-27 HTTP/1.1" 200 -
+[2026-06-24 01:01:17,613] INFO in app: [Flux API] OPTIONS /api/analytics/drivers/leaderboard role=anonymous start=2026-06-24T01:01:17.613665+00:00 end=2026-06-24T01:01:17.613815+00:00 duration_ms=0.15 status=200
+127.0.0.1 - - [24/Jun/2026 01:01:17] "OPTIONS /api/analytics/drivers/leaderboard?start_date=2026-06-22&end_date=2026-06-27 HTTP/1.1" 200 -
+[2026-06-24 01:01:23,318] INFO in app: [Flux API] GET /api/analytics/drivers role=anonymous start=2026-06-24T01:01:17.862156+00:00 end=2026-06-24T01:01:23.318714+00:00 duration_ms=5456.56 status=200
+[2026-06-24 01:01:23,319] WARNING in app: SLOW API WARNING GET /api/analytics/drivers role=anonymous duration_ms=5456.56 status=200
+127.0.0.1 - - [24/Jun/2026 01:01:23] "GET /api/analytics/drivers?start_date=2026-06-22&end_date=2026-06-27 HTTP/1.1" 200 -
+[2026-06-24 01:01:23,462] INFO in app: [Flux API] GET /api/analytics/drivers/leaderboard role=anonymous start=2026-06-24T01:01:17.929299+00:00 end=2026-06-24T01:01:23.462174+00:00 duration_ms=5532.87 status=200
+[2026-06-24 01:01:23,462] WARNING in app: SLOW API WARNING GET /api/analytics/drivers/leaderboard role=anonymous duration_ms=5532.87 status=200
+127.0.0.1 - - [24/Jun/2026 01:01:23] "GET /api/analytics/drivers/leaderboard?start_date=2026-06-22&end_date=2026-06-27 HTTP/1.1" 200 -
+[2026-06-24 01:01:28,639] INFO in app: [Flux API] OPTIONS /api/vehicles/6a2b42bb1a9f06b34e940cc8 role=anonymous start=2026-06-24T01:01:28.639545+00:00 end=2026-06-24T01:01:28.639716+00:00 duration_ms=0.17 status=200
+127.0.0.1 - - [24/Jun/2026 01:01:28] "OPTIONS /api/vehicles/6a2b42bb1a9f06b34e940cc8?include_economics=false HTTP/1.1" 200 -
+[2026-06-24 01:01:29,105] INFO in vehicles: [Flux Performance] vehicle details request received vehicle_id=6a2b42bb1a9f06b34e940cc8 include_economics=False
+[2026-06-24 01:01:30,006] INFO in vehicles: [Flux Performance] vehicle details response completed vehicle_id=6a2b42bb1a9f06b34e940cc8 include_economics=False responseTimeMs=900.59
+[2026-06-24 01:01:30,007] INFO in app: [Flux API] GET /api/vehicles/6a2b42bb1a9f06b34e940cc8 role=anonymous start=2026-06-24T01:01:28.958054+00:00 end=2026-06-24T01:01:30.007179+00:00 duration_ms=1049.12 status=200
+127.0.0.1 - - [24/Jun/2026 01:01:30] "GET /api/vehicles/6a2b42bb1a9f06b34e940cc8?include_economics=false HTTP/1.1" 200 -
+[2026-06-24 01:01:36,588] INFO in app: [Flux API] OPTIONS /api/master-data role=anonymous start=2026-06-24T01:01:36.588209+00:00 end=2026-06-24T01:01:36.588360+00:00 duration_ms=0.15 status=200
+127.0.0.1 - - [24/Jun/2026 01:01:36] "OPTIONS /api/master-data HTTP/1.1" 200 -
+[2026-06-24 01:01:36,898] INFO in app: [Flux API] OPTIONS /api/system-settings role=anonymous start=2026-06-24T01:01:36.898540+00:00 end=2026-06-24T01:01:36.898649+00:00 duration_ms=0.11 status=200
+127.0.0.1 - - [24/Jun/2026 01:01:36] "OPTIONS /api/system-settings HTTP/1.1" 200 -
+[2026-06-24 01:01:37,483] INFO in app: [Flux API] GET /api/system-settings role=anonymous start=2026-06-24T01:01:37.211679+00:00 end=2026-06-24T01:01:37.483810+00:00 duration_ms=272.13 status=200
+127.0.0.1 - - [24/Jun/2026 01:01:37] "GET /api/system-settings HTTP/1.1" 200 -
+[2026-06-24 01:01:37,757] INFO in app: [Flux API] GET /api/master-data role=anonymous start=2026-06-24T01:01:36.899274+00:00 end=2026-06-24T01:01:37.757781+00:00 duration_ms=858.5 status=200
+127.0.0.1 - - [24/Jun/2026 01:01:37] "GET /api/master-data HTTP/1.1" 200 -
+[2026-06-24 01:02:03,270] INFO in app: [Flux API] OPTIONS /api/master-data role=anonymous start=2026-06-24T01:02:03.269866+00:00 end=2026-06-24T01:02:03.269988+00:00 duration_ms=0.12 status=200
+127.0.0.1 - - [24/Jun/2026 01:02:03] "OPTIONS /api/master-data HTTP/1.1" 200 -
+[2026-06-24 01:02:03,270] INFO in app: [Flux API] OPTIONS /api/system-settings role=anonymous start=2026-06-24T01:02:03.270626+00:00 end=2026-06-24T01:02:03.270702+00:00 duration_ms=0.08 status=200
+127.0.0.1 - - [24/Jun/2026 01:02:03] "OPTIONS /api/system-settings HTTP/1.1" 200 -
+[2026-06-24 01:02:03,898] INFO in app: [Flux API] GET /api/system-settings role=anonymous start=2026-06-24T01:02:03.585213+00:00 end=2026-06-24T01:02:03.898141+00:00 duration_ms=312.93 status=200
+127.0.0.1 - - [24/Jun/2026 01:02:03] "GET /api/system-settings HTTP/1.1" 200 -
+[2026-06-24 01:02:04,144] INFO in app: [Flux API] GET /api/master-data role=anonymous start=2026-06-24T01:02:03.520793+00:00 end=2026-06-24T01:02:04.144434+00:00 duration_ms=623.64 status=200
+127.0.0.1 - - [24/Jun/2026 01:02:04] "GET /api/master-data HTTP/1.1" 200 -
+[2026-06-24 01:02:12,302] INFO in app: [Flux API] OPTIONS /api/notifications role=anonymous start=2026-06-24T01:02:12.302134+00:00 end=2026-06-24T01:02:12.302256+00:00 duration_ms=0.12 status=200
+127.0.0.1 - - [24/Jun/2026 01:02:12] "OPTIONS /api/notifications?limit=200 HTTP/1.1" 200 -
+[2026-06-24 01:02:13,465] INFO in app: [Flux API] GET /api/notifications role=anonymous start=2026-06-24T01:02:12.622996+00:00 end=2026-06-24T01:02:13.465403+00:00 duration_ms=842.4 status=200
+127.0.0.1 - - [24/Jun/2026 01:02:13] "GET /api/notifications?limit=200 HTTP/1.1" 200 -
+[2026-06-24 01:02:26,835] INFO in app: [Flux API] OPTIONS /api/notifications/6a38a4c7d58066f3e2bd55d2/read role=anonymous start=2026-06-24T01:02:26.835157+00:00 end=2026-06-24T01:02:26.835260+00:00 duration_ms=0.1 status=200
+127.0.0.1 - - [24/Jun/2026 01:02:26] "OPTIONS /api/notifications/6a38a4c7d58066f3e2bd55d2/read HTTP/1.1" 200 -
+[2026-06-24 01:02:27,680] INFO in app: [Flux API] PATCH /api/notifications/6a38a4c7d58066f3e2bd55d2/read role=anonymous start=2026-06-24T01:02:27.147770+00:00 end=2026-06-24T01:02:27.680900+00:00 duration_ms=533.13 status=200
+127.0.0.1 - - [24/Jun/2026 01:02:27] "PATCH /api/notifications/6a38a4c7d58066f3e2bd55d2/read HTTP/1.1" 200 -
+[2026-06-24 01:02:30,865] INFO in app: [Flux API] OPTIONS /api/notifications/6a3b057cb00813ab8fdc00e5/read role=anonymous start=2026-06-24T01:02:30.864862+00:00 end=2026-06-24T01:02:30.864975+00:00 duration_ms=0.11 status=200
+127.0.0.1 - - [24/Jun/2026 01:02:30] "OPTIONS /api/notifications/6a3b057cb00813ab8fdc00e5/read HTTP/1.1" 200 -
+[2026-06-24 01:02:31,642] INFO in app: [Flux API] PATCH /api/notifications/6a3b057cb00813ab8fdc00e5/read role=anonymous start=2026-06-24T01:02:31.180330+00:00 end=2026-06-24T01:02:31.642749+00:00 duration_ms=462.42 status=200
+127.0.0.1 - - [24/Jun/2026 01:02:31] "PATCH /api/notifications/6a3b057cb00813ab8fdc00e5/read HTTP/1.1" 200 -

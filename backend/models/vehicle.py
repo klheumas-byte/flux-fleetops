@@ -45,6 +45,7 @@ def serialize_vehicle(vehicle_document: dict, *, include_sensitive: bool = True)
         "economics": vehicle_document.get("economics"),
         "status": vehicle_document.get("status"),
         "assigned_driver_id": _serialize_reference_id(vehicle_document.get("assigned_driver_id")),
+        "assigned_driver_details": vehicle_document.get("assigned_driver_details"),
         "created_by": _serialize_reference_id(vehicle_document.get("created_by")),
         "updated_by": _serialize_reference_id(vehicle_document.get("updated_by")),
         "created_at": vehicle_document.get("created_at").isoformat()

@@ -86,6 +86,14 @@ interface Vehicle {
   };
   status: VehicleStatus;
   assigned_driver_id: string | null;
+  assigned_driver_details?: {
+    id?: string | null;
+    full_name?: string | null;
+    phone?: string | null;
+    email?: string | null;
+    status?: string | null;
+    license_number?: string | null;
+  } | null;
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -242,12 +250,12 @@ function formatCurrency(value: number | null) {
   return `GH₵ ${value.toLocaleString()}`;
 }
 
-function formatDriverLabel(assignedDriverId: string | null) {
-  if (!assignedDriverId) {
-    return null;
+function formatDriverLabel(vehicle: Vehicle) {
+  if (!vehicle.assigned_driver_id) {
+    return 'Unassigned';
   }
 
-  return `Driver ID: ${assignedDriverId.slice(0, 8)}...`;
+  return vehicle.assigned_driver_details?.full_name || 'Assigned driver details unavailable';
 }
 
 function getDaysUntilExpiry(expiryDate: string | null) {
@@ -482,7 +490,7 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
       vehicles.filter((vehicle) => {
         const searchValue = debouncedSearchQuery.trim().toLowerCase();
         const statusValue = selectedStatus.trim().toLowerCase();
-        const assignedDriverLabel = formatDriverLabel(vehicle.assigned_driver_id)?.toLowerCase() || '';
+        const assignedDriverLabel = formatDriverLabel(vehicle).toLowerCase();
         const searchTargets = [
           vehicle.registration_number,
           vehicle.vehicle_type,
@@ -801,7 +809,7 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
                     const roadworthyDays = getDaysUntilExpiry(vehicle.roadworthy_expiry);
                     const insuranceStatus = getExpiryStatus(insuranceDays);
                     const roadworthyStatus = getExpiryStatus(roadworthyDays);
-                    const assignedDriverLabel = formatDriverLabel(vehicle.assigned_driver_id);
+                    const assignedDriverLabel = formatDriverLabel(vehicle);
 
                     return (
                       <tr

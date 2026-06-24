@@ -21,7 +21,6 @@ import {
   Truck,
   Users,
   UsersRound,
-  Wallet,
   Wrench,
 } from 'lucide-react';
 import type { UserRole } from '../../App';
@@ -82,7 +81,6 @@ const SECTIONS: SidebarSection[] = [
     items: [
       { id: 'collections', label: 'Collections', icon: DollarSign },
       { id: 'deposits', label: 'Deposits', icon: Landmark },
-      { id: 'driver-wallet', label: 'Driver Wallets', icon: Wallet },
       { id: 'finance-accounts', label: 'Finance Accounts', icon: Building2 },
       { id: 'expenses', label: 'Expenses', icon: Receipt },
     ],

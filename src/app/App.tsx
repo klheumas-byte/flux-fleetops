@@ -29,7 +29,6 @@ import Deposits from './components/admin/Deposits';
 import Expenses from './components/admin/Expenses';
 import FinanceAccounts from './components/admin/FinanceAccounts';
 import Revenue from './components/admin/Revenue';
-import DriverWallet from './components/admin/DriverWallet';
 import AdminAccountability from './components/admin/AdminAccountability';
 import Customers from './components/admin/Customers';
 import FuelManagement from './components/admin/Fuel';
@@ -284,7 +283,6 @@ export default function App() {
         return 'Back to Vehicles';
       case 'drivers':
       case 'driver-approval':
-      case 'driver-wallet':
       case 'driver-performance':
         return 'Back to Drivers';
       case 'customers':
@@ -374,7 +372,6 @@ export default function App() {
           {currentPage === 'finance-accounts' && renderProtectedPage('finance-accounts', <FinanceAccounts />)}
           {currentPage === 'revenue' && renderProtectedPage('revenue', <Revenue />)}
           {currentPage === 'rides' && renderProtectedPage('dashboard', <Rides />)}
-          {currentPage === 'driver-wallet' && renderProtectedPage('driver-wallet', <DriverWallet />)}
           {currentPage === 'accountability' && renderProtectedPage('accountability', <AdminAccountability />)}
           {currentPage === 'customers' && renderProtectedPage('customers', <Customers userRole={userRole} />)}
           {currentPage === 'fuel' && renderProtectedPage('fuel', <FuelManagement />)}

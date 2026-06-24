@@ -43,6 +43,7 @@ const responseCache = new Map<string, { expiresAt: number; data: unknown }>();
 const inflightRequests = new Map<string, Promise<unknown>>();
 const requestControllers = new Map<string, AbortController>();
 const activeCancelGroups = new Map<string, Set<string>>();
+let authExpiryEventDispatched = false;
 
 export class ApiRequestError extends Error {
   status: number;
@@ -60,6 +61,10 @@ export class ApiRequestError extends Error {
 
 export function isRequestAborted(error: unknown) {
   return error instanceof ApiRequestError && error.status === -1;
+}
+
+export function resetAuthExpirySignal() {
+  authExpiryEventDispatched = false;
 }
 
 function addControllerToGroup(groupKey: string | undefined, requestKey: string) {
@@ -159,6 +164,15 @@ export async function apiRequest<T>(
   const requestKey = options.dedupeKey || `${method}:${requestUrl}`;
   const cacheTtlMs = options.cacheTtlMs ?? 0;
   const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  const isAuthSessionRequest = path === '/auth/me';
+
+  if (isAuthSessionRequest && !token) {
+    if (typeof window !== 'undefined' && !authExpiryEventDispatched) {
+      authExpiryEventDispatched = true;
+      window.dispatchEvent(new CustomEvent('flux-auth-expired'));
+    }
+    throw new ApiRequestError('Your session has expired. Please log in again.', 401);
+  }
 
   if (method === 'GET' && cacheTtlMs > 0) {
     const cached = responseCache.get(requestKey);
@@ -250,22 +264,33 @@ export async function apiRequest<T>(
         data,
         response.statusText || 'Unable to complete the request right now.',
       );
-      console.error('[Flux API] Request failed', {
-        path,
-        method,
-        status: response.status,
-        hasToken: Boolean(token),
-        message,
-        data,
-        componentName: options.componentName || null,
-        requestLabel: options.requestLabel || null,
-      });
-
       if (response.status === 401) {
-        console.warn('[Flux API] Unauthorized response received. Stored token may be missing, expired, or invalid.');
+        console.warn('[Flux API] Session expired', {
+          path,
+          method,
+          status: response.status,
+          hasToken: Boolean(token),
+          message,
+          componentName: options.componentName || null,
+          requestLabel: options.requestLabel || null,
+        });
         if (typeof window !== 'undefined') {
-          window.dispatchEvent(new CustomEvent('flux-auth-expired'));
+          if (!authExpiryEventDispatched) {
+            authExpiryEventDispatched = true;
+            window.dispatchEvent(new CustomEvent('flux-auth-expired'));
+          }
         }
+      } else {
+        console.error('[Flux API] Request failed', {
+          path,
+          method,
+          status: response.status,
+          hasToken: Boolean(token),
+          message,
+          data,
+          componentName: options.componentName || null,
+          requestLabel: options.requestLabel || null,
+        });
       }
 
       throw new ApiRequestError(message, response.status, data?.errors || [], data);

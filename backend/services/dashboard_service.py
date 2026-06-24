@@ -7,7 +7,7 @@ from flask import current_app
 from extensions import get_collection
 from services.payment_cycle_service import APPROVED_PAYMENT_STATUSES, get_weekly_cycle_window
 from services.system_settings_service import get_admin_role_permissions, should_include_fuel_in_profitability
-from services.vehicle_service import _matches_company_expense
+from services.vehicle_service import _matches_company_expense, get_vehicle_economics_dashboard
 from utils.performance import build_cache_key, get_ttl_cached, log_db_duration, set_ttl_cached
 
 
@@ -62,6 +62,10 @@ def preventive_maintenance_collection():
 
 def compliance_records_collection():
     return get_collection("vehicle_compliance_records")
+
+
+def incidents_collection():
+    return get_collection("incidents")
 
 
 def _safe_float(value) -> float:
@@ -153,6 +157,103 @@ def _load_driver_lookup() -> dict[str, str]:
         for driver in drivers
     }
     return set_ttl_cached(cache_key, lookup, ttl_seconds=60)
+
+
+def _empty_owner_fleet_economics_summary() -> dict:
+    return {
+        "total_fleet_investment": 0.0,
+        "total_capital_recovered": 0.0,
+        "outstanding_capital": 0.0,
+        "fleet_roi_percent": 0.0,
+        "total_revenue_collected": 0.0,
+        "net_revenue": 0.0,
+        "top_vehicle_profitability": {
+            "vehicle_id": None,
+            "vehicle": "No vehicle data yet",
+            "registration_number": None,
+            "net_profit": 0.0,
+            "gross_revenue": 0.0,
+            "roi_percent": 0.0,
+        },
+    }
+
+
+def _empty_owner_fleet_risk_summary(*, vehicles_due_service: int = 0) -> dict:
+    return {
+        "vehicles_due_service": vehicles_due_service,
+        "open_incidents": 0,
+        "open_claims": 0,
+        "expired_compliance_count": 0,
+    }
+
+
+def _build_owner_fleet_summaries(*, vehicles_due_service: int, net_revenue: float, today: date) -> tuple[dict, dict]:
+    fleet_economics_summary = _empty_owner_fleet_economics_summary()
+    fleet_risk_summary = _empty_owner_fleet_risk_summary(vehicles_due_service=vehicles_due_service)
+
+    economics_started_at = perf_counter()
+    economics_dashboard = get_vehicle_economics_dashboard(current_role="owner")
+    log_db_duration("dashboard.owner_fleet_economics", economics_started_at)
+
+    total_fleet_investment = round(_safe_float(economics_dashboard.get("total_fleet_investment")), 2)
+    total_capital_recovered = round(_safe_float(economics_dashboard.get("total_recovered")), 2)
+    outstanding_capital = round(_safe_float(economics_dashboard.get("remaining_recovery_balance")), 2)
+    top_vehicle = economics_dashboard.get("most_profitable_vehicle") or {}
+    top_vehicle_profitability = (top_vehicle.get("economics") or {}).get("profitability") or {}
+    total_revenue_collected = round(
+        sum(
+            _safe_float((vehicle.get("economics") or {}).get("profitability", {}).get("gross_revenue"))
+            for vehicle in (economics_dashboard.get("vehicles") or [])
+        ),
+        2,
+    )
+    fleet_roi_percent = round((net_revenue / total_fleet_investment) * 100, 2) if total_fleet_investment > 0 else 0.0
+
+    fleet_economics_summary = {
+        "total_fleet_investment": total_fleet_investment,
+        "total_capital_recovered": total_capital_recovered,
+        "outstanding_capital": outstanding_capital,
+        "fleet_roi_percent": fleet_roi_percent,
+        "total_revenue_collected": total_revenue_collected,
+        "net_revenue": round(net_revenue, 2),
+        "top_vehicle_profitability": {
+            "vehicle_id": top_vehicle.get("id"),
+            "vehicle": top_vehicle.get("registration_number") or "No vehicle data yet",
+            "registration_number": top_vehicle.get("registration_number"),
+            "net_profit": round(_safe_float(top_vehicle_profitability.get("net_profit")), 2),
+            "gross_revenue": round(_safe_float(top_vehicle_profitability.get("gross_revenue")), 2),
+            "roi_percent": round(_safe_float(top_vehicle_profitability.get("roi")), 2),
+        },
+    }
+
+    incidents_started_at = perf_counter()
+    open_incidents = incidents_collection().count_documents(
+        {"status": {"$nin": ["resolved", "rejected", "closed"]}}
+    )
+    open_claims = incidents_collection().count_documents(
+        {"claim_status": {"$in": ["under_review", "submitted", "assessment_scheduled", "approved", "partially_paid"]}}
+    )
+    log_db_duration("dashboard.owner_fleet_incidents", incidents_started_at)
+
+    compliance_started_at = perf_counter()
+    expired_compliance_count = compliance_records_collection().count_documents(
+        {
+            "status": {"$ne": "inactive"},
+            "$or": [
+                {"status": "expired"},
+                {"expiry_date": {"$lt": today.isoformat()}},
+            ],
+        }
+    )
+    log_db_duration("dashboard.owner_fleet_compliance", compliance_started_at)
+
+    fleet_risk_summary = {
+        "vehicles_due_service": int(vehicles_due_service or 0),
+        "open_incidents": int(open_incidents or 0),
+        "open_claims": int(open_claims or 0),
+        "expired_compliance_count": int(expired_compliance_count or 0),
+    }
+    return fleet_economics_summary, fleet_risk_summary
 
 
 def get_dashboard_summary(*, current_role: str) -> dict:
@@ -388,6 +489,15 @@ def get_dashboard_summary(*, current_role: str) -> dict:
         else 0.0
     )
 
+    fleet_economics_summary = _empty_owner_fleet_economics_summary()
+    fleet_risk_summary = _empty_owner_fleet_risk_summary(vehicles_due_service=due_service_count)
+    if current_role == "owner":
+        fleet_economics_summary, fleet_risk_summary = _build_owner_fleet_summaries(
+            vehicles_due_service=due_service_count,
+            net_revenue=net_revenue,
+            today=today,
+        )
+
     weekly_revenue = []
     for offset in range(7):
         day = (week_start + timedelta(days=offset)).date()
@@ -543,6 +653,8 @@ def get_dashboard_summary(*, current_role: str) -> dict:
             "active_trips": active_trips,
             "vehicles_due_service": due_service_count,
         },
+        "fleet_economics_summary": fleet_economics_summary,
+        "fleet_risk_summary": fleet_risk_summary,
         "charts": {
             "weekly_revenue": weekly_revenue,
             "vehicle_profitability": vehicle_profitability,

@@ -4,6 +4,8 @@ from flask_jwt_extended import JWTManager
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, PyMongoError, ServerSelectionTimeoutError
 
+from utils.responses import error_response
+
 
 cors = CORS()
 jwt = JWTManager()
@@ -29,10 +31,37 @@ def init_extensions(app):
 
 
 def register_jwt_callbacks():
+    def unauthorized_response():
+        return error_response(
+            "Unauthorized. Please login again.",
+            status_code=401,
+            public_message="Unauthorized. Please login again.",
+        )
+
     @jwt.token_in_blocklist_loader
     def is_token_revoked(_jwt_header, jwt_payload):
         token_blocklist = get_collection("token_blocklist")
         return token_blocklist.find_one({"jti": jwt_payload["jti"]}) is not None
+
+    @jwt.unauthorized_loader
+    def handle_missing_token(_reason):
+        return unauthorized_response()
+
+    @jwt.invalid_token_loader
+    def handle_invalid_token(_reason):
+        return unauthorized_response()
+
+    @jwt.expired_token_loader
+    def handle_expired_token(_jwt_header, _jwt_payload):
+        return unauthorized_response()
+
+    @jwt.revoked_token_loader
+    def handle_revoked_token(_jwt_header, _jwt_payload):
+        return unauthorized_response()
+
+    @jwt.needs_fresh_token_loader
+    def handle_needs_fresh_token(_jwt_header, _jwt_payload):
+        return unauthorized_response()
 
 
 def get_mongo_client() -> MongoClient:

@@ -57,6 +57,28 @@ interface DashboardSummaryResponse {
         active_trips: number;
         vehicles_due_service: number;
       };
+      fleet_economics_summary?: {
+        total_fleet_investment: number;
+        total_capital_recovered: number;
+        outstanding_capital: number;
+        fleet_roi_percent: number;
+        total_revenue_collected: number;
+        net_revenue: number;
+        top_vehicle_profitability?: {
+          vehicle_id?: string | null;
+          vehicle: string;
+          registration_number?: string | null;
+          net_profit: number;
+          gross_revenue: number;
+          roi_percent: number;
+        };
+      };
+      fleet_risk_summary?: {
+        vehicles_due_service: number;
+        open_incidents: number;
+        open_claims: number;
+        expired_compliance_count: number;
+      };
       charts: {
         weekly_revenue: Array<{ day: string; target: number; collected: number }>;
         vehicle_profitability: Array<{ vehicle: string; revenue: number; cost: number; profit: number }>;
@@ -164,6 +186,59 @@ export default function Dashboard({ onNavigate, userRole }: DashboardProps) {
   const maintenanceAlerts = dashboardData?.alerts.maintenance || [];
   const upcomingExpiries = dashboardData?.alerts.expiries || [];
   const activityFeed = dashboardData?.alerts.activity_feed || [];
+  const fleetEconomicsSummary = dashboardData?.fleet_economics_summary;
+  const fleetRiskSummary = dashboardData?.fleet_risk_summary;
+  const ownerFleetOverviewCards = useMemo(() => {
+    if (userRole !== 'owner') {
+      return [];
+    }
+
+    return [
+      {
+        label: 'Fleet Investment',
+        value: formatCurrency(fleetEconomicsSummary?.total_fleet_investment ?? 0),
+        helper: 'Total capital deployed across the fleet',
+        icon: DollarSign,
+        color: 'bg-slate-500',
+      },
+      {
+        label: 'Capital Recovered',
+        value: formatCurrency(fleetEconomicsSummary?.total_capital_recovered ?? 0),
+        helper: 'Capital recovered from fleet operations',
+        icon: TrendingUp,
+        color: 'bg-green-500',
+      },
+      {
+        label: 'Outstanding Capital',
+        value: formatCurrency(fleetEconomicsSummary?.outstanding_capital ?? 0),
+        helper: 'Remaining fleet capital still to recover',
+        icon: AlertTriangle,
+        color: 'bg-amber-500',
+      },
+      {
+        label: 'Fleet ROI',
+        value: `${(fleetEconomicsSummary?.fleet_roi_percent ?? 0).toLocaleString()}%`,
+        helper: 'Fleet-wide return on investment',
+        icon: ArrowUp,
+        color: 'bg-blue-500',
+      },
+      {
+        label: 'Open Incidents / Claims',
+        value: `${fleetRiskSummary?.open_incidents ?? 0} / ${fleetRiskSummary?.open_claims ?? 0}`,
+        helper: 'Active incidents and insurance claims',
+        icon: Shield,
+        color: 'bg-rose-500',
+      },
+      {
+        label: 'Expired Compliance',
+        value: String(fleetRiskSummary?.expired_compliance_count ?? 0),
+        helper: 'Compliance records already expired',
+        icon: Calendar,
+        color: 'bg-red-500',
+      },
+    ];
+  }, [fleetEconomicsSummary, fleetRiskSummary, userRole]);
+  const topVehicleProfitabilitySummary = fleetEconomicsSummary?.top_vehicle_profitability;
 
   return (
     <div className="p-6 space-y-6">
@@ -190,6 +265,71 @@ export default function Dashboard({ onNavigate, userRole }: DashboardProps) {
       {faultNotice && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
           {faultNotice}
+        </div>
+      )}
+
+      {userRole === 'owner' && (
+        <div className="rounded-xl border border-gray-200 bg-white p-5">
+          <div className="mb-5 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-[#0F172A]">Fleet Investment & Risk Overview</h2>
+              <p className="mt-1 text-sm text-gray-600">
+                Capital recovery, ROI, and operational risk from fleet economics, incidents, and compliance modules.
+              </p>
+            </div>
+            <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
+              <div>Revenue Collected: <span className="font-medium text-[#0F172A]">{formatCurrency(fleetEconomicsSummary?.total_revenue_collected ?? 0)}</span></div>
+              <div className="mt-1">Net Revenue: <span className="font-medium text-[#0F172A]">{formatCurrency(fleetEconomicsSummary?.net_revenue ?? 0)}</span></div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {ownerFleetOverviewCards.map((card) => {
+              const Icon = card.icon;
+              return (
+                <div key={card.label} className="rounded-xl border border-gray-200 bg-white p-5">
+                  <div className="mb-3 flex items-start justify-between gap-3">
+                    <div className={`flex h-11 w-11 items-center justify-center rounded-xl ${card.color}`}>
+                      <Icon className="h-5 w-5 text-white" />
+                    </div>
+                    {card.label === 'Open Incidents / Claims' ? (
+                      <button
+                        type="button"
+                        onClick={() => onNavigate('incidents')}
+                        className="text-xs font-medium text-[#2563EB] hover:text-[#1d4ed8]"
+                      >
+                        View incidents
+                      </button>
+                    ) : null}
+                  </div>
+                  <div className="text-sm font-semibold text-[#0F172A]">{card.label}</div>
+                  <div className="mt-2 text-3xl font-semibold text-[#0F172A]">{card.value}</div>
+                  <div className="mt-2 text-xs text-gray-500">{card.helper}</div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
+            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+              <div className="text-sm font-semibold text-[#0F172A]">Top Vehicle Profitability</div>
+              <div className="mt-2 text-2xl font-semibold text-[#0F172A]">
+                {topVehicleProfitabilitySummary?.vehicle || 'No vehicle data yet'}
+              </div>
+              <div className="mt-2 flex flex-wrap gap-4 text-sm text-gray-600">
+                <span>Net Profit: <span className="font-medium text-[#0F172A]">{formatCurrency(topVehicleProfitabilitySummary?.net_profit ?? 0)}</span></span>
+                <span>ROI: <span className="font-medium text-[#0F172A]">{(topVehicleProfitabilitySummary?.roi_percent ?? 0).toLocaleString()}%</span></span>
+              </div>
+            </div>
+            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+              <div className="text-sm font-semibold text-[#0F172A]">Operational Risk Snapshot</div>
+              <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3 text-sm text-gray-600">
+                <div>Due Service: <span className="font-medium text-[#0F172A]">{fleetRiskSummary?.vehicles_due_service ?? dashboardData?.summary.vehicles_due_service ?? 0}</span></div>
+                <div>Open Incidents: <span className="font-medium text-[#0F172A]">{fleetRiskSummary?.open_incidents ?? 0}</span></div>
+                <div>Open Claims: <span className="font-medium text-[#0F172A]">{fleetRiskSummary?.open_claims ?? 0}</span></div>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

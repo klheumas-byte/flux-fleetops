@@ -2,7 +2,7 @@ import { Suspense, lazy, useEffect, useState } from 'react';
 import { Toaster, toast } from 'sonner';
 import Login from './components/Login';
 import { API_BASE_URL } from './lib/api';
-import { ApiRequestError } from './lib/api';
+import { ApiRequestError, resetAuthExpirySignal } from './lib/api';
 import {
   clearStoredSession,
   fetchAuthenticatedUser,
@@ -147,6 +147,7 @@ export default function App() {
         setCurrentUser(verifiedUser);
         setUserRole(verifiedUser.role);
         setIsLoggedIn(true);
+        resetAuthExpirySignal();
         navigateToPage('dashboard', { replaceHistory: true, vehicleId: null });
       } catch (error) {
         if (error instanceof ApiRequestError && error.status === 401) {
@@ -163,6 +164,7 @@ export default function App() {
   }, []);
 
   const handleLogin = (user: AuthUser) => {
+    resetAuthExpirySignal();
     setCurrentUser(user);
     setUserRole(user.role);
     setIsLoggedIn(true);

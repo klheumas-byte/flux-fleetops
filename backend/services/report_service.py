@@ -8,6 +8,7 @@ from models.user import serialize_user
 from services.driver_analytics_service import list_driver_analytics
 from services.system_settings_service import get_admin_role_permissions
 from services.vehicle_service import get_vehicle_economics_dashboard
+from utils.api_error import ApiError
 from utils.performance import build_cache_key, get_ttl_cached, set_ttl_cached
 
 
@@ -68,14 +69,25 @@ def now_utc():
 
 
 def _normalize_string(value):
-    return (value or "").strip() or None
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        normalized = value.isoformat()
+    elif isinstance(value, date):
+        normalized = value.isoformat()
+    else:
+        normalized = str(value).strip()
+    return normalized or None
 
 
 def _normalize_date(value):
     raw = _normalize_string(value)
     if not raw:
         return None
-    return datetime.strptime(raw, "%Y-%m-%d").date()
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d").date()
+    except ValueError as error:
+        raise ApiError("date filters must use YYYY-MM-DD format.", status_code=400) from error
 
 
 def _to_utc_datetime(value):
@@ -224,6 +236,35 @@ def _base_section(*, records: list[dict], total_amount: float, last_updated: str
             "last_updated": last_updated,
             "active_filters": active_filters,
         },
+    }
+
+
+def _empty_validation(active_filters: list[str] | None = None):
+    return {
+        "total_records": 0,
+        "total_amount": 0,
+        "last_updated": None,
+        "active_filters": active_filters or ["All records"],
+    }
+
+
+def _empty_section(active_filters: list[str] | None = None):
+    return {
+        "records": [],
+        "validation": _empty_validation(active_filters),
+        "message": "No records found for this filter.",
+    }
+
+
+def _empty_vehicle_economics(active_filters: list[str] | None = None):
+    return {
+        "validation": _empty_validation(active_filters),
+        "message": "No records found for this filter.",
+        "total_fleet_investment": 0,
+        "total_recovered": 0,
+        "remaining_recovery_balance": 0,
+        "net_fleet_profit": 0,
+        "vehicles": [],
     }
 
 
@@ -759,7 +800,11 @@ def get_finance_reports(
     driver_documents = list(users_collection().find({"role": "driver"}).sort("full_name", 1))
     vehicle_documents = list(vehicles_collection().find({}).sort("registration_number", 1))
     finance_accounts = list(finance_accounts_collection().find({}).sort("account_name", 1))
-    current_user = users_collection().find_one({"_id": ObjectId(current_user_id)})
+    current_user = (
+        users_collection().find_one({"_id": ObjectId(current_user_id)})
+        if current_user_id and ObjectId.is_valid(current_user_id)
+        else None
+    )
 
     drivers_by_id = {str(document["_id"]): serialize_user(document) for document in driver_documents}
     vehicles_by_id = {
@@ -785,7 +830,24 @@ def get_finance_reports(
         if category in {"revenue", "drivers", "vehicles", "trips", "fuel", "maintenance", "customers"}
         else {"revenue", "drivers", "vehicles", "trips", "fuel", "maintenance", "customers"}
     )
-    reports = {}
+    reports = {
+        "collections": _empty_section(active_filters),
+        "deposits": _empty_section(active_filters),
+        "expenses": _empty_section(active_filters),
+        "fuel": {**_empty_section(active_filters), "total_litres": 0},
+        "maintenance": _empty_section(active_filters),
+        "faults": _empty_section(active_filters),
+        "customers": _empty_section(active_filters),
+        "bookings": {**_empty_section(active_filters), "status_breakdown": {}},
+        "trip_logs": {
+            **_empty_section(active_filters),
+            "trips_by_platform": [],
+            "trips_by_purpose": [],
+        },
+        "driver_performance": _empty_section(active_filters),
+        "vehicle_performance": _empty_section(active_filters),
+        "vehicle_economics": _empty_vehicle_economics(active_filters),
+    }
 
     if "revenue" in selected_categories:
         collections_query = _apply_common_filters(

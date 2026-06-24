@@ -183,6 +183,33 @@ function combineValidationSummaries(...validations: Array<ValidationSummary | un
   };
 }
 
+const DEFAULT_VALIDATION: ValidationSummary = {
+  total_records: 0,
+  total_amount: 0,
+  last_updated: null,
+  active_filters: ['All records'],
+};
+
+function createEmptySection<T = Record<string, unknown>>() {
+  return {
+    records: [] as T[],
+    validation: DEFAULT_VALIDATION,
+    message: 'No records found for this report.',
+  };
+}
+
+function createEmptyVehicleEconomics() {
+  return {
+    validation: DEFAULT_VALIDATION,
+    message: 'No records found for this report.',
+    total_fleet_investment: 0,
+    total_recovered: 0,
+    remaining_recovery_balance: 0,
+    net_fleet_profit: 0,
+    vehicles: [] as NonNullable<ReportsResponse['data']['reports']['vehicle_economics']['vehicles']>,
+  };
+}
+
 function toCsv(rows: Array<Record<string, unknown>>) {
   if (!rows.length) return '';
   const headers = Array.from(
@@ -238,6 +265,7 @@ export default function Reports() {
       const pageLoadStartedAt = performance.now();
       setIsLoading(true);
       setPageError('');
+      setReportData(null);
       const range = getDateRange(dateRange);
       const params = new URLSearchParams();
       params.set('category', activeCategory);
@@ -272,55 +300,56 @@ export default function Reports() {
     };
 
     void loadReportData();
-  }, [currentRole, dateRange, selectedDriverId, selectedVehicleId, selectedBranch, selectedCreatorRole, selectedCustomerCategoryId, selectedSource, refreshKey]);
+  }, [activeCategory, currentRole, dateRange, selectedDriverId, selectedVehicleId, selectedBranch, selectedCreatorRole, selectedCustomerCategoryId, selectedSource, refreshKey]);
+
+  const reports = useMemo(() => {
+    const source = reportData?.reports;
+    return {
+      collections: source?.collections ?? createEmptySection(),
+      deposits: source?.deposits ?? createEmptySection(),
+      expenses: source?.expenses ?? createEmptySection(),
+      fuel: source?.fuel ?? { ...createEmptySection(), total_litres: 0 },
+      maintenance: source?.maintenance ?? createEmptySection(),
+      faults: source?.faults ?? createEmptySection(),
+      customers: source?.customers ?? createEmptySection(),
+      bookings: source?.bookings ?? { ...createEmptySection(), status_breakdown: {} },
+      trip_logs: source?.trip_logs ?? { ...createEmptySection(), trips_by_platform: [], trips_by_purpose: [] },
+      driver_performance: source?.driver_performance ?? createEmptySection(),
+      vehicle_performance: source?.vehicle_performance ?? createEmptySection(),
+      vehicle_economics: source?.vehicle_economics ?? createEmptyVehicleEconomics(),
+    };
+  }, [reportData]);
 
   const validationSummary = useMemo(() => {
-    const reports = reportData?.reports;
-    if (!reports) {
-      return {
-        total_records: 0,
-        total_amount: 0,
-        last_updated: null,
-        active_filters: ['All records'],
-      };
-    }
-
-    if (activeCategory === 'revenue' && reports.collections && reports.deposits && reports.expenses) {
+    if (activeCategory === 'revenue') {
       return combineValidationSummaries(
         reports.collections.validation,
         reports.deposits.validation,
         reports.expenses.validation,
       );
     }
-    if (activeCategory === 'drivers' && reports.driver_performance) {
+    if (activeCategory === 'drivers') {
       return reports.driver_performance.validation;
     }
-    if (activeCategory === 'vehicles' && reports.vehicle_performance && reports.vehicle_economics) {
+    if (activeCategory === 'vehicles') {
       return combineValidationSummaries(
         reports.vehicle_performance.validation,
         reports.vehicle_economics.validation,
       );
     }
-    if (activeCategory === 'trips' && reports.bookings && reports.trip_logs) {
+    if (activeCategory === 'trips') {
       return combineValidationSummaries(reports.bookings.validation, reports.trip_logs.validation);
     }
-    if (activeCategory === 'fuel' && reports.fuel) {
+    if (activeCategory === 'fuel') {
       return reports.fuel.validation;
     }
-    if (activeCategory === 'maintenance' && reports.maintenance && reports.faults) {
+    if (activeCategory === 'maintenance') {
       return combineValidationSummaries(reports.maintenance.validation, reports.faults.validation);
     }
-    return reports.customers?.validation || {
-      total_records: 0,
-      total_amount: 0,
-      last_updated: null,
-      active_filters: ['All records'],
-    };
-  }, [activeCategory, reportData]);
+    return reports.customers.validation;
+  }, [activeCategory, reports]);
 
   const exportRows = useMemo(() => {
-    const reports = reportData?.reports;
-    if (!reports) return [];
     if (activeCategory === 'revenue') {
       return [
         ...reports.collections.records.map((item) => ({ report_type: 'Collection', ...item })),
@@ -360,10 +389,12 @@ export default function Reports() {
       ];
     }
     return reports.customers.records;
-  }, [activeCategory, reportData]);
+  }, [activeCategory, reports]);
+
+  const hasExportData = exportRows.length > 0;
 
   const handleExportExcel = () => {
-    if (!exportRows.length) return;
+    if (!hasExportData) return;
     const blob = new Blob([toCsv(exportRows)], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -374,10 +405,12 @@ export default function Reports() {
   };
 
   const handleExportPDF = () => {
+    if (!hasExportData) return;
     window.print();
   };
 
   const handlePrint = () => {
+    if (!hasExportData) return;
     window.print();
   };
 
@@ -416,21 +449,24 @@ export default function Reports() {
           </button>
           <button
             onClick={handleExportPDF}
-            className="flex w-full items-center justify-center gap-2 rounded-lg bg-red-600 px-4 py-2.5 text-sm font-medium text-white transition-all hover:bg-red-700 sm:w-auto"
+            disabled={!hasExportData}
+            className="flex w-full items-center justify-center gap-2 rounded-lg bg-red-600 px-4 py-2.5 text-sm font-medium text-white transition-all hover:bg-red-700 disabled:cursor-not-allowed disabled:bg-red-300 sm:w-auto"
           >
             <Download className="h-4 w-4" />
             PDF
           </button>
           <button
             onClick={handleExportExcel}
-            className="flex w-full items-center justify-center gap-2 rounded-lg bg-green-600 px-4 py-2.5 text-sm font-medium text-white transition-all hover:bg-green-700 sm:w-auto"
+            disabled={!hasExportData}
+            className="flex w-full items-center justify-center gap-2 rounded-lg bg-green-600 px-4 py-2.5 text-sm font-medium text-white transition-all hover:bg-green-700 disabled:cursor-not-allowed disabled:bg-green-300 sm:w-auto"
           >
             <Download className="h-4 w-4" />
             Excel
           </button>
           <button
             onClick={handlePrint}
-            className="flex w-full items-center justify-center gap-2 rounded-lg bg-gray-700 px-4 py-2.5 text-sm font-medium text-white transition-all hover:bg-gray-800 sm:w-auto"
+            disabled={!hasExportData}
+            className="flex w-full items-center justify-center gap-2 rounded-lg bg-gray-700 px-4 py-2.5 text-sm font-medium text-white transition-all hover:bg-gray-800 disabled:cursor-not-allowed disabled:bg-gray-300 sm:w-auto"
           >
             <Printer className="h-4 w-4" />
             Print
@@ -592,11 +628,11 @@ export default function Reports() {
 
           {reportData && activeCategory === 'revenue' && (
             <div className="space-y-6">
-              <SectionHeader title="Collections Report" validation={reportData.reports.collections.validation} />
+              <SectionHeader title="Collections Report" validation={reports.collections.validation} />
               <ReportTable
-                emptyMessage="No records found."
+                emptyMessage="No records found for this filter."
                 columns={['Date', 'Driver', 'Vehicle', 'Amount', 'Status', 'Method']}
-                rows={reportData.reports.collections.records.map((record: any) => [
+                rows={reports.collections.records.map((record: any) => [
                   record.collection_date || 'No date',
                   record.driver_name || 'Unassigned',
                   record.vehicle_registration || 'Unassigned',
@@ -606,11 +642,11 @@ export default function Reports() {
                 ])}
               />
 
-              <SectionHeader title="Deposits Report" validation={reportData.reports.deposits.validation} />
+              <SectionHeader title="Deposits Report" validation={reports.deposits.validation} />
               <ReportTable
-                emptyMessage="No records found."
+                emptyMessage="No records found for this filter."
                 columns={['Date', 'Destination', 'Branch', 'Amount', 'Status', 'Method']}
-                rows={reportData.reports.deposits.records.map((record: any) => [
+                rows={reports.deposits.records.map((record: any) => [
                   record.deposit_date || 'No date',
                   record.destination_name || 'No destination',
                   record.branch || 'No branch',
@@ -620,11 +656,11 @@ export default function Reports() {
                 ])}
               />
 
-              <SectionHeader title="Expenses Report" validation={reportData.reports.expenses.validation} />
+              <SectionHeader title="Expenses Report" validation={reports.expenses.validation} />
               <ReportTable
-                emptyMessage="No records found."
+                emptyMessage="No records found for this filter."
                 columns={['Date', 'Title', 'Category', 'Driver', 'Vehicle', 'Amount', 'Status']}
-                rows={reportData.reports.expenses.records.map((record: any) => [
+                rows={reports.expenses.records.map((record: any) => [
                   record.expense_date || 'No date',
                   record.expense_title || 'Untitled',
                   record.expense_category || 'Uncategorized',
@@ -639,11 +675,11 @@ export default function Reports() {
 
           {reportData && activeCategory === 'drivers' && (
             <div className="space-y-6">
-              <SectionHeader title="Driver Performance Report" validation={reportData.reports.driver_performance.validation} />
+              <SectionHeader title="Driver Performance Report" validation={reports.driver_performance.validation} />
               <ReportTable
-                emptyMessage="No records found."
+                emptyMessage="No records found for this filter."
                 columns={['Driver', 'Vehicle', 'Collected', 'Achievement %', 'Fuel Score', 'Critical Faults', 'Maintenance Days Lost']}
-                rows={reportData.reports.driver_performance.records.map((record: any) => [
+                rows={reports.driver_performance.records.map((record: any) => [
                   record.driver?.full_name || 'Unknown Driver',
                   record.vehicle?.registration_number || 'Unassigned',
                   formatCurrency(record.amount_collected || 0),
@@ -658,11 +694,11 @@ export default function Reports() {
 
           {reportData && activeCategory === 'vehicles' && (
             <div className="space-y-6">
-              <SectionHeader title="Vehicle Performance Report" validation={reportData.reports.vehicle_performance.validation} />
+              <SectionHeader title="Vehicle Performance Report" validation={reports.vehicle_performance.validation} />
               <ReportTable
-                emptyMessage="No records found."
+                emptyMessage="No records found for this filter."
                 columns={['Vehicle', 'Status', 'Trips', 'Active Days', 'Idle Days', 'Utilization %']}
-                rows={reportData.reports.vehicle_performance.records.map((record: any) => [
+                rows={reports.vehicle_performance.records.map((record: any) => [
                   record.registration_number || 'Unknown Vehicle',
                   record.status || 'Unknown',
                   `${record.trip_count || 0}`,
@@ -673,21 +709,21 @@ export default function Reports() {
               />
 
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-                <MetricCard label="Fleet Investment" value={formatCurrency(reportData.reports.vehicle_economics.total_fleet_investment || 0)} icon={DollarSign} />
-                <MetricCard label="Recovered" value={formatCurrency(reportData.reports.vehicle_economics.total_recovered || 0)} icon={Target} />
-                <MetricCard label="Remaining Balance" value={formatCurrency(reportData.reports.vehicle_economics.remaining_recovery_balance || 0)} icon={RefreshCw} />
-                <MetricCard label="Net Fleet Profit" value={formatCurrency(reportData.reports.vehicle_economics.net_fleet_profit || 0)} icon={Truck} />
+                <MetricCard label="Fleet Investment" value={formatCurrency(reports.vehicle_economics.total_fleet_investment || 0)} icon={DollarSign} />
+                <MetricCard label="Recovered" value={formatCurrency(reports.vehicle_economics.total_recovered || 0)} icon={Target} />
+                <MetricCard label="Remaining Balance" value={formatCurrency(reports.vehicle_economics.remaining_recovery_balance || 0)} icon={RefreshCw} />
+                <MetricCard label="Net Fleet Profit" value={formatCurrency(reports.vehicle_economics.net_fleet_profit || 0)} icon={Truck} />
               </div>
 
               <SectionHeader
                 title="Vehicle Economics Report"
-                validation={reportData.reports.vehicle_economics.validation}
-                description={reportData.reports.vehicle_economics.message}
+                validation={reports.vehicle_economics.validation}
+                description={reports.vehicle_economics.message}
               />
               <ReportTable
-                emptyMessage="No records found."
+                emptyMessage="No records found for this filter."
                 columns={['Vehicle', 'Total Investment', 'Amount Recovered', 'Remaining Balance', 'Recovery %', 'Recovery Status', 'Company Vehicle Costs', 'Net Vehicle Profit', 'Break-Even Forecast']}
-                rows={(reportData.reports.vehicle_economics.vehicles || []).map((vehicle) => [
+                rows={(reports.vehicle_economics.vehicles || []).map((vehicle) => [
                   vehicle.registration_number || 'Unknown Vehicle',
                   formatCurrency(vehicle.economics?.investment?.total_vehicle_investment || 0),
                   formatCurrency(vehicle.economics?.recovery?.amount_recovered || 0),
@@ -704,9 +740,9 @@ export default function Reports() {
 
           {reportData && activeCategory === 'trips' && (
             <div className="space-y-6">
-              <SectionHeader title="Booking Report" validation={reportData.reports.bookings.validation} />
+              <SectionHeader title="Booking Report" validation={reports.bookings.validation} />
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-                {Object.entries(reportData.reports.bookings.status_breakdown || {}).map(([status, count]) => (
+                {Object.entries(reports.bookings.status_breakdown || {}).map(([status, count]) => (
                   <div key={status} className="rounded-xl border border-gray-200 bg-white p-4">
                     <div className="text-sm text-gray-500">{status}</div>
                     <div className="mt-2 text-2xl font-semibold text-[#0F172A]">{count}</div>
@@ -714,9 +750,9 @@ export default function Reports() {
                 ))}
               </div>
               <ReportTable
-                emptyMessage="No records found."
+                emptyMessage="No records found for this filter."
                 columns={['Booking ID', 'Pickup Time', 'Type', 'Driver', 'Vehicle', 'Expected Fare', 'Status']}
-                rows={reportData.reports.bookings.records.map((record: any) => [
+                rows={reports.bookings.records.map((record: any) => [
                   record.booking_id || 'No ID',
                   formatDateTime(record.pickup_at),
                   record.booking_type || 'N/A',
@@ -727,15 +763,15 @@ export default function Reports() {
                 ])}
               />
 
-              <SectionHeader title="Trip Log Report" validation={reportData.reports.trip_logs.validation} />
+              <SectionHeader title="Trip Log Report" validation={reports.trip_logs.validation} />
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                <MiniListCard title="Trips By Platform" items={reportData.reports.trip_logs.trips_by_platform || []} />
-                <MiniListCard title="Trips By Purpose" items={reportData.reports.trip_logs.trips_by_purpose || []} />
+                <MiniListCard title="Trips By Platform" items={reports.trip_logs.trips_by_platform || []} />
+                <MiniListCard title="Trips By Purpose" items={reports.trip_logs.trips_by_purpose || []} />
               </div>
               <ReportTable
-                emptyMessage="No records found."
+                emptyMessage="No records found for this filter."
                 columns={['Trip ID', 'Date', 'Platform', 'Purpose', 'Driver', 'Vehicle', 'Route', 'Status']}
-                rows={reportData.reports.trip_logs.records.map((record: any) => [
+                rows={reports.trip_logs.records.map((record: any) => [
                   record.trip_id || 'No ID',
                   record.trip_date || 'No date',
                   record.trip_source || 'N/A',
@@ -752,16 +788,16 @@ export default function Reports() {
           {reportData && activeCategory === 'fuel' && (
             <div className="space-y-6">
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-                <MetricCard label="Fuel Records" value={reportData.reports.fuel.validation.total_records.toLocaleString()} icon={Fuel} />
-                <MetricCard label="Fuel Spend" value={formatCurrency(reportData.reports.fuel.validation.total_amount)} icon={DollarSign} />
-                <MetricCard label="Total Litres" value={(reportData.reports.fuel.total_litres || 0).toLocaleString()} icon={Target} />
-                <MetricCard label="Last Updated" value={formatDateTime(reportData.reports.fuel.validation.last_updated)} icon={RefreshCw} />
+                <MetricCard label="Fuel Records" value={reports.fuel.validation.total_records.toLocaleString()} icon={Fuel} />
+                <MetricCard label="Fuel Spend" value={formatCurrency(reports.fuel.validation.total_amount)} icon={DollarSign} />
+                <MetricCard label="Total Litres" value={(reports.fuel.total_litres || 0).toLocaleString()} icon={Target} />
+                <MetricCard label="Last Updated" value={formatDateTime(reports.fuel.validation.last_updated)} icon={RefreshCw} />
               </div>
-              <SectionHeader title="Fuel Report" validation={reportData.reports.fuel.validation} />
+              <SectionHeader title="Fuel Report" validation={reports.fuel.validation} />
               <ReportTable
-                emptyMessage="No records found."
+                emptyMessage="No records found for this filter."
                 columns={['Date', 'Driver', 'Vehicle', 'Fuel Type', 'Litres', 'Amount', 'Status']}
-                rows={reportData.reports.fuel.records.map((record: any) => [
+                rows={reports.fuel.records.map((record: any) => [
                   record.fuel_date || 'No date',
                   record.driver_name || 'Unassigned',
                   record.vehicle_registration || 'Unassigned',
@@ -776,11 +812,11 @@ export default function Reports() {
 
           {reportData && activeCategory === 'maintenance' && (
             <div className="space-y-6">
-              <SectionHeader title="Maintenance Report" validation={reportData.reports.maintenance.validation} />
+              <SectionHeader title="Maintenance Report" validation={reports.maintenance.validation} />
               <ReportTable
-                emptyMessage="No records found."
+                emptyMessage="No records found for this filter."
                 columns={['Reference Date', 'Title', 'Type', 'Driver', 'Vehicle', 'Cost', 'Status']}
-                rows={reportData.reports.maintenance.records.map((record: any) => [
+                rows={reports.maintenance.records.map((record: any) => [
                   record.reference_date || 'No date',
                   record.title || 'Untitled',
                   record.maintenance_type || 'N/A',
@@ -791,11 +827,11 @@ export default function Reports() {
                 ])}
               />
 
-              <SectionHeader title="Fault Report" validation={reportData.reports.faults.validation} />
+              <SectionHeader title="Fault Report" validation={reports.faults.validation} />
               <ReportTable
-                emptyMessage="No records found."
+                emptyMessage="No records found for this filter."
                 columns={['Reported At', 'Severity', 'Driver', 'Vehicle', 'Status', 'Description']}
-                rows={reportData.reports.faults.records.map((record: any) => [
+                rows={reports.faults.records.map((record: any) => [
                   formatDateTime(record.reported_at),
                   record.severity || 'N/A',
                   record.driver_name || 'N/A',
@@ -809,11 +845,11 @@ export default function Reports() {
 
           {reportData && activeCategory === 'customers' && (
             <div className="space-y-6">
-              <SectionHeader title="Customer Report" validation={reportData.reports.customers.validation} />
+              <SectionHeader title="Customer Report" validation={reports.customers.validation} />
               <ReportTable
-                emptyMessage="No records found."
+                emptyMessage="No records found for this filter."
                 columns={['Customer', 'Phone', 'Category', 'Creator', 'Role', 'Source', 'Relationship', 'Lead Status', 'Lead Value', 'Created']}
-                rows={reportData.reports.customers.records.map((record: any) => [
+                rows={reports.customers.records.map((record: any) => [
                   record.full_name || 'Unnamed Customer',
                   record.phone_number || 'No phone',
                   record.customer_category || 'N/A',
@@ -945,7 +981,7 @@ function MiniListCard({
     <div className="rounded-xl border border-gray-200 bg-white p-5">
       <h3 className="text-base font-semibold text-[#0F172A]">{title}</h3>
       {items.length === 0 ? (
-        <div className="mt-6 text-sm text-gray-500">No records found.</div>
+        <div className="mt-6 text-sm text-gray-500">No records found for this filter.</div>
       ) : (
         <div className="mt-4 space-y-3">
           {items.map((item) => (

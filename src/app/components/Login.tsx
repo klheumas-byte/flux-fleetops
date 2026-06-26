@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Eye, EyeOff, Lock, Mail, Shield, TrendingUp, MapPin, Users, DollarSign, Loader2 } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../lib/api';
+import { setStoredSessionUser } from '../lib/auth-session';
 import type { AuthUser } from '../App';
 
 const LOGO_URL = 'https://imagedelivery.net/h9fmMoa1o2c2P55TcWJGOg/42b18599-8959-49b5-c7a2-b78a9602ce00/public';
@@ -41,7 +42,7 @@ export default function Login({ onLogin }: LoginProps) {
       });
 
       localStorage.setItem('flux_token', response.data.access_token);
-      localStorage.setItem('flux_user', JSON.stringify(response.data.user));
+      setStoredSessionUser(response.data.user);
       onLogin(response.data.user);
     } catch (error) {
       if (error instanceof ApiRequestError) {

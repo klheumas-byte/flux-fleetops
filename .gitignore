@@ -3,3 +3,17 @@ backend/.env
 backend/.venv/
 backend/__pycache__/
 backend/**/*.pyc
+# Build output
+dist/
+
+# Python virtual environment
+venv/
+__pycache__/
+*.pyc
+
+# Log files
+*.log
+backend/flask-error.log
+
+# Environment variables
+.env

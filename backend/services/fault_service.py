@@ -246,6 +246,8 @@ def ensure_fault_indexes():
             {"keys": [("created_at", DESCENDING)]},
             {"keys": [("updated_at", DESCENDING)]},
             {"keys": [("created_by", ASCENDING)]},
+            {"keys": [("severity", ASCENDING), ("status", ASCENDING), ("created_at", DESCENDING)]},
+            {"keys": [("status", ASCENDING), ("severity", ASCENDING), ("vehicle_id", ASCENDING), ("created_at", DESCENDING)]},
             {"keys": [("vehicle_id", ASCENDING), ("created_at", DESCENDING)]},
             {"keys": [("driver_id", ASCENDING), ("created_at", DESCENDING)]},
             {"keys": [("status", ASCENDING), ("created_at", DESCENDING)]},
@@ -656,29 +658,38 @@ def list_critical_faults(current_role: str) -> list[dict]:
         raise ApiError("You do not have permission to view critical faults.", status_code=403)
 
     request_started_at = perf_counter()
-    documents = list(
-        faults_collection()
-        .find({"severity": "critical", "status": {"$ne": "resolved"}}, FAULT_LIST_PROJECTION)
-        .sort([("reported_at", DESCENDING), ("created_at", DESCENDING)])
-    )
-    log_db_duration("faults.critical.query", request_started_at)
-    sorted_documents = _sort_fault_documents(documents)
-    vehicle_map, user_map, category_map, component_map = _load_fault_relationship_maps(sorted_documents)
-    result = [
-        _enrich_fault(
-            document,
-            vehicle_map=vehicle_map,
-            user_map=user_map,
-            category_map=category_map,
-            component_map=component_map,
+    result: list[dict] = []
+    try:
+        query_started_at = perf_counter()
+        documents = list(
+            faults_collection()
+            .find({"severity": "critical", "status": {"$ne": "resolved"}}, FAULT_LIST_PROJECTION)
+            .sort([("reported_at", DESCENDING), ("created_at", DESCENDING)])
+            .limit(50)
         )
-        for document in sorted_documents
-    ]
-    current_app.logger.info(
-        "[Flux Faults] critical count=%s total_ms=%.2f",
-        len(result),
-        (perf_counter() - request_started_at) * 1000,
-    )
+        log_db_duration("faults.critical.query", query_started_at)
+        sorted_documents = _sort_fault_documents(documents)
+        vehicle_map, user_map, category_map, component_map = _load_fault_relationship_maps(sorted_documents)
+        result = [
+            _enrich_fault(
+                document,
+                vehicle_map=vehicle_map,
+                user_map=user_map,
+                category_map=category_map,
+                component_map=component_map,
+            )
+            for document in sorted_documents
+        ]
+        current_app.logger.info(
+            "[Flux Section] section=critical_faults endpoint=/api/faults/critical duration_ms=%.2f success=true records_count=%s",
+            (perf_counter() - request_started_at) * 1000,
+            len(result),
+        )
+    except Exception:
+        current_app.logger.exception(
+            "[Flux Section] section=critical_faults endpoint=/api/faults/critical success=false"
+        )
+        result = []
     total_duration_ms = (perf_counter() - request_started_at) * 1000
     if total_duration_ms > 2000:
         current_app.logger.warning(

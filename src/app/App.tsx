@@ -7,6 +7,7 @@ import {
   clearStoredSession,
   fetchAuthenticatedUser,
   getStoredSessionUser,
+  setStoredSessionUser,
   type SessionUser,
   type SessionUserRole,
 } from './lib/auth-session';
@@ -164,9 +165,11 @@ export default function App() {
   }, []);
 
   const handleLogin = (user: AuthUser) => {
+    setStoredSessionUser(user);
     resetAuthExpirySignal();
-    setCurrentUser(user);
-    setUserRole(user.role);
+    const normalizedRole = String(user.role || '').trim().toLowerCase() as UserRole;
+    setCurrentUser({ ...user, role: normalizedRole });
+    setUserRole(normalizedRole);
     setIsLoggedIn(true);
     navigateToPage('dashboard', { replaceHistory: true, vehicleId: null });
   };

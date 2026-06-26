@@ -1,6 +1,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import {
@@ -58,12 +59,27 @@ interface DashboardSummaryResponse {
         vehicles_due_service: number;
       };
       fleet_economics_summary?: {
+        total_managed_fleet?: number;
+        total_active_vehicles?: number;
+        total_managed_fleet_value?: number;
         total_fleet_investment: number;
         total_capital_recovered: number;
         outstanding_capital: number;
         fleet_roi_percent: number;
         total_revenue_collected: number;
         net_revenue: number;
+        portfolio_breakdown?: Array<{
+          asset_owner_name: string;
+          asset_owner_type?: string | null;
+          vehicle_count: number;
+          fleet_value: number;
+          capital_basis_for_recovery: number;
+          revenue_generated: number;
+          net_profit: number;
+          capital_recovered: number;
+          outstanding_capital: number;
+          roi_percent: number;
+        }>;
         top_vehicle_profitability?: {
           vehicle_id?: string | null;
           vehicle: string;
@@ -92,6 +108,7 @@ interface DashboardSummaryResponse {
         expiries: Array<{ vehicle: string; type: string; expiryDate: string; daysLeft: number }>;
         activity_feed: Array<{ id: string; title: string; subtitle: string; tone: string }>;
       };
+      warnings?: string[];
     };
   };
 }
@@ -109,6 +126,8 @@ export default function Dashboard({ onNavigate, userRole }: DashboardProps) {
   const [customerSummary, setCustomerSummary] = useState<CustomerSummary | null>(null);
   const [dashboardData, setDashboardData] = useState<DashboardSummaryResponse['data']['dashboard'] | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [selectedAssetOwnerGroup, setSelectedAssetOwnerGroup] = useState('all');
+  const hasLoadedRef = useRef(false);
 
   const loadFaultSummaries = async () => {
       const pageLoadStartedAt = performance.now();
@@ -123,24 +142,33 @@ export default function Dashboard({ onNavigate, userRole }: DashboardProps) {
         apiRequestSafe<DashboardSummaryResponse>('/dashboard/summary', { cacheTtlMs: 15000, fallbackData: { success: true, data: { dashboard: null as unknown as DashboardSummaryResponse['data']['dashboard'] } } }),
       ]);
 
+      const unauthorizedResponses = [
+        queueResponse,
+        criticalResponse,
+        bookingResponse,
+        customerResponse,
+        dashboardResponse,
+      ].filter((result) => result.status === 401);
+      if (unauthorizedResponses.length > 0) {
+        setIsLoading(false);
+        return;
+      }
+
       setFaults(Array.isArray(queueResponse.data?.data?.faults) ? queueResponse.data.data.faults : []);
       setCriticalFaults(Array.isArray(criticalResponse.data?.data?.faults) ? criticalResponse.data.data.faults : []);
       setBookingSummary(bookingResponse.data?.data?.summary || null);
       setCustomerSummary(customerResponse.data?.data?.summary || null);
       setDashboardData(dashboardResponse.data?.data?.dashboard || null);
+      const dashboardWarnings = Array.isArray(dashboardResponse.data?.data?.dashboard?.warnings)
+        ? dashboardResponse.data.data.dashboard.warnings
+        : [];
 
       const coreFailures = [queueResponse, criticalResponse].filter((result) => !result.ok);
       if (coreFailures.length === 2) {
         setFaultError(coreFailures[0].error || 'Unable to load dashboard insights right now.');
       } else {
-        const unavailableSections: string[] = [];
-        if (!queueResponse.ok) unavailableSections.push('fault approvals');
-        if (!criticalResponse.ok) unavailableSections.push('critical faults');
-        if (!bookingResponse.ok) unavailableSections.push('booking summary');
-        if (!customerResponse.ok) unavailableSections.push('CRM summary');
-        if (!dashboardResponse.ok) unavailableSections.push('operations summary');
-        if (unavailableSections.length > 0) {
-          setFaultNotice(`Some sections are temporarily unavailable: ${unavailableSections.join(', ')}.`);
+        if (dashboardWarnings.length > 0) {
+          setFaultNotice(`Some sections are temporarily unavailable: ${dashboardWarnings.join(', ')}.`);
         }
       }
       console.info('[Flux Performance] Admin dashboard loaded', {
@@ -150,6 +178,10 @@ export default function Dashboard({ onNavigate, userRole }: DashboardProps) {
   };
 
   useEffect(() => {
+    if (hasLoadedRef.current) {
+      return;
+    }
+    hasLoadedRef.current = true;
     void loadFaultSummaries();
   }, []);
 
@@ -188,6 +220,48 @@ export default function Dashboard({ onNavigate, userRole }: DashboardProps) {
   const activityFeed = dashboardData?.alerts.activity_feed || [];
   const fleetEconomicsSummary = dashboardData?.fleet_economics_summary;
   const fleetRiskSummary = dashboardData?.fleet_risk_summary;
+  const portfolioBreakdown = fleetEconomicsSummary?.portfolio_breakdown || [];
+  const ownerGroupLabel = (entry: NonNullable<typeof portfolioBreakdown>[number]) => {
+    const ownerName = (entry.asset_owner_name || '').toLowerCase();
+    const ownerType = (entry.asset_owner_type || '').toLowerCase();
+    if (ownerName.includes('axelera') || ownerType.includes('axelera')) return 'axelera';
+    if (ownerName.includes('smart living')) return 'smart-living';
+    if (ownerType.includes('investor')) return 'investors';
+    if (ownerType.includes('partner')) return 'partners';
+    return 'external';
+  };
+  const filteredPortfolioBreakdown = useMemo(() => {
+    if (selectedAssetOwnerGroup === 'all') {
+      return portfolioBreakdown;
+    }
+    return portfolioBreakdown.filter((entry) => ownerGroupLabel(entry) === selectedAssetOwnerGroup);
+  }, [portfolioBreakdown, selectedAssetOwnerGroup]);
+  const filteredPortfolioSummary = useMemo(() => {
+    if (selectedAssetOwnerGroup === 'all') {
+      return {
+        totalManagedFleet: fleetEconomicsSummary?.total_managed_fleet ?? 0,
+        totalManagedFleetValue: fleetEconomicsSummary?.total_managed_fleet_value ?? 0,
+        totalFleetInvestment: fleetEconomicsSummary?.total_fleet_investment ?? 0,
+        totalCapitalRecovered: fleetEconomicsSummary?.total_capital_recovered ?? 0,
+        outstandingCapital: fleetEconomicsSummary?.outstanding_capital ?? 0,
+        fleetRoiPercent: fleetEconomicsSummary?.fleet_roi_percent ?? 0,
+      };
+    }
+    const totalFleetInvestment = filteredPortfolioBreakdown.reduce((sum, entry) => sum + (entry.capital_basis_for_recovery || 0), 0);
+    const totalCapitalRecovered = filteredPortfolioBreakdown.reduce((sum, entry) => sum + (entry.capital_recovered || 0), 0);
+    const outstandingCapital = filteredPortfolioBreakdown.reduce((sum, entry) => sum + (entry.outstanding_capital || 0), 0);
+    const totalManagedFleetValue = filteredPortfolioBreakdown.reduce((sum, entry) => sum + (entry.fleet_value || 0), 0);
+    const totalManagedFleet = filteredPortfolioBreakdown.reduce((sum, entry) => sum + (entry.vehicle_count || 0), 0);
+    const netProfit = filteredPortfolioBreakdown.reduce((sum, entry) => sum + (entry.net_profit || 0), 0);
+    return {
+      totalManagedFleet,
+      totalManagedFleetValue,
+      totalFleetInvestment,
+      totalCapitalRecovered,
+      outstandingCapital,
+      fleetRoiPercent: totalFleetInvestment > 0 ? Number(((netProfit / totalFleetInvestment) * 100).toFixed(2)) : 0,
+    };
+  }, [filteredPortfolioBreakdown, fleetEconomicsSummary, selectedAssetOwnerGroup]);
   const ownerFleetOverviewCards = useMemo(() => {
     if (userRole !== 'owner') {
       return [];
@@ -195,29 +269,36 @@ export default function Dashboard({ onNavigate, userRole }: DashboardProps) {
 
     return [
       {
+        label: 'Managed Fleet Value',
+        value: formatCurrency(filteredPortfolioSummary.totalManagedFleetValue),
+        helper: 'Current estimated value of managed fleet assets',
+        icon: Truck,
+        color: 'bg-indigo-500',
+      },
+      {
         label: 'Fleet Investment',
-        value: formatCurrency(fleetEconomicsSummary?.total_fleet_investment ?? 0),
+        value: formatCurrency(filteredPortfolioSummary.totalFleetInvestment),
         helper: 'Total capital deployed across the fleet',
         icon: DollarSign,
         color: 'bg-slate-500',
       },
       {
         label: 'Capital Recovered',
-        value: formatCurrency(fleetEconomicsSummary?.total_capital_recovered ?? 0),
+        value: formatCurrency(filteredPortfolioSummary.totalCapitalRecovered),
         helper: 'Capital recovered from fleet operations',
         icon: TrendingUp,
         color: 'bg-green-500',
       },
       {
         label: 'Outstanding Capital',
-        value: formatCurrency(fleetEconomicsSummary?.outstanding_capital ?? 0),
+        value: formatCurrency(filteredPortfolioSummary.outstandingCapital),
         helper: 'Remaining fleet capital still to recover',
         icon: AlertTriangle,
         color: 'bg-amber-500',
       },
       {
         label: 'Fleet ROI',
-        value: `${(fleetEconomicsSummary?.fleet_roi_percent ?? 0).toLocaleString()}%`,
+        value: `${filteredPortfolioSummary.fleetRoiPercent.toLocaleString()}%`,
         helper: 'Fleet-wide return on investment',
         icon: ArrowUp,
         color: 'bg-blue-500',
@@ -237,7 +318,7 @@ export default function Dashboard({ onNavigate, userRole }: DashboardProps) {
         color: 'bg-red-500',
       },
     ];
-  }, [fleetEconomicsSummary, fleetRiskSummary, userRole]);
+  }, [filteredPortfolioSummary, fleetRiskSummary, userRole]);
   const topVehicleProfitabilitySummary = fleetEconomicsSummary?.top_vehicle_profitability;
 
   return (
@@ -277,9 +358,24 @@ export default function Dashboard({ onNavigate, userRole }: DashboardProps) {
                 Capital recovery, ROI, and operational risk from fleet economics, incidents, and compliance modules.
               </p>
             </div>
-            <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
-              <div>Revenue Collected: <span className="font-medium text-[#0F172A]">{formatCurrency(fleetEconomicsSummary?.total_revenue_collected ?? 0)}</span></div>
-              <div className="mt-1">Net Revenue: <span className="font-medium text-[#0F172A]">{formatCurrency(fleetEconomicsSummary?.net_revenue ?? 0)}</span></div>
+            <div className="flex flex-col gap-3 sm:items-end">
+              <select
+                value={selectedAssetOwnerGroup}
+                onChange={(event) => setSelectedAssetOwnerGroup(event.target.value)}
+                className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700"
+              >
+                <option value="all">All Asset Owners</option>
+                <option value="axelera">Axelera</option>
+                <option value="smart-living">Smart Living</option>
+                <option value="external">External Owners</option>
+                <option value="investors">Investors</option>
+                <option value="partners">Partners</option>
+              </select>
+              <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
+                <div>Managed Vehicles: <span className="font-medium text-[#0F172A]">{filteredPortfolioSummary.totalManagedFleet}</span></div>
+                <div className="mt-1">Revenue Collected: <span className="font-medium text-[#0F172A]">{formatCurrency(fleetEconomicsSummary?.total_revenue_collected ?? 0)}</span></div>
+                <div className="mt-1">Net Revenue: <span className="font-medium text-[#0F172A]">{formatCurrency(fleetEconomicsSummary?.net_revenue ?? 0)}</span></div>
+              </div>
             </div>
           </div>
 
@@ -328,6 +424,48 @@ export default function Dashboard({ onNavigate, userRole }: DashboardProps) {
                 <div>Open Incidents: <span className="font-medium text-[#0F172A]">{fleetRiskSummary?.open_incidents ?? 0}</span></div>
                 <div>Open Claims: <span className="font-medium text-[#0F172A]">{fleetRiskSummary?.open_claims ?? 0}</span></div>
               </div>
+            </div>
+          </div>
+
+          <div className="mt-4 rounded-xl border border-gray-200 bg-white">
+            <div className="border-b border-gray-200 px-4 py-3">
+              <h3 className="text-sm font-semibold text-[#0F172A]">Fleet Portfolio Breakdown</h3>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200 text-sm">
+                <thead className="bg-gray-50">
+                  <tr>
+                    {['Asset Owner', 'Ownership Type', 'Vehicles', 'Fleet Value', 'Revenue', 'Net Profit', 'ROI', 'Capital Recovered', 'Outstanding Capital'].map((header) => (
+                      <th key={header} className="px-4 py-3 text-left font-semibold text-gray-600">
+                        {header}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-200">
+                  {filteredPortfolioBreakdown.length > 0 ? (
+                    filteredPortfolioBreakdown.map((entry) => (
+                      <tr key={`${entry.asset_owner_name}-${entry.asset_owner_type || 'owner'}`}>
+                        <td className="px-4 py-3 text-gray-900">{entry.asset_owner_name}</td>
+                        <td className="px-4 py-3 text-gray-600">{entry.asset_owner_type || 'Unspecified'}</td>
+                        <td className="px-4 py-3 text-gray-600">{entry.vehicle_count}</td>
+                        <td className="px-4 py-3 text-gray-600">{formatCurrency(entry.fleet_value || 0)}</td>
+                        <td className="px-4 py-3 text-gray-600">{formatCurrency(entry.revenue_generated || 0)}</td>
+                        <td className="px-4 py-3 text-gray-600">{formatCurrency(entry.net_profit || 0)}</td>
+                        <td className="px-4 py-3 text-gray-600">{entry.roi_percent || 0}%</td>
+                        <td className="px-4 py-3 text-gray-600">{formatCurrency(entry.capital_recovered || 0)}</td>
+                        <td className="px-4 py-3 text-gray-600">{formatCurrency(entry.outstanding_capital || 0)}</td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={9} className="px-4 py-8 text-center text-gray-500">
+                        No portfolio records found for this owner filter.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
             </div>
           </div>
         </div>

@@ -25,6 +25,7 @@ def get_finance_report():
                 vehicle_id=request.args.get("vehicle_id"),
                 branch=request.args.get("branch"),
                 category=request.args.get("category"),
+                asset_owner_name=request.args.get("asset_owner_name"),
                 creator_role=request.args.get("creator_role"),
                 customer_category_id=request.args.get("customer_category_id"),
                 source=request.args.get("source"),

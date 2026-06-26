@@ -168,6 +168,8 @@ def ensure_booking_indexes():
             {"keys": [("driver_id", ASCENDING), ("created_at", DESCENDING)]},
             {"keys": [("vehicle_id", ASCENDING), ("created_at", DESCENDING)]},
             {"keys": [("status", ASCENDING), ("created_at", DESCENDING)]},
+            {"keys": [("status", ASCENDING), ("driver_id", ASCENDING), ("created_at", DESCENDING)]},
+            {"keys": [("status", ASCENDING), ("vehicle_id", ASCENDING), ("created_at", DESCENDING)]},
             {"keys": [("vehicle_id", ASCENDING), ("status", ASCENDING)]},
             {"keys": [("source_booking_id", ASCENDING)]},
             {"keys": [("is_recurring_template", ASCENDING)]},
@@ -175,6 +177,37 @@ def ensure_booking_indexes():
         ],
         collection_name="bookings",
     )
+
+
+def _empty_booking_dashboard_summary() -> dict:
+    return {
+        "upcoming_bookings": 0,
+        "missed_bookings": 0,
+        "active_recurring_customers": 0,
+        "total_customers": 0,
+        "total_recurring_customers": 0,
+        "today_schedule": 0,
+        "upcoming_pickups": 0,
+        "recent_customers": 0,
+        "customer_growth_trend": [
+            {"label": "Last 30 days", "value": 0},
+            {"label": "Last 90 days", "value": 0},
+        ],
+        "scheduled_today": 0,
+        "total_scheduled_bookings": 0,
+        "pending_acknowledgement": 0,
+        "in_progress_bookings": 0,
+        "completed_today": 0,
+        "overdue_reminders": 0,
+        "follow_ups_due_today": 0,
+        "upcoming_corporate_bookings": 0,
+        "total_future_bookings": 0,
+        "vip_bookings": 0,
+        "strategic_meetings": 0,
+        "driver_schedules": 0,
+        "follow_up_completion_rate": 0.0,
+        "bookings_by_status": {status: 0 for status in BOOKING_STATUSES},
+    }
 
 
 def _to_object_id(value, field_name: str, *, required: bool = True):
@@ -1469,124 +1502,139 @@ def get_booking_dashboard_summary(current_role: str, current_user_id: str) -> di
     cached = get_ttl_cached(cache_key)
     if cached is not None:
         return cached
-    _ensure_due_booking_reminders()
-    query = {"is_recurring_template": False}
+    request_started_at = perf_counter()
+    base_query: dict[str, Any] = {"is_recurring_template": False}
+    recurring_query: dict[str, Any] = {"is_recurring_template": True}
     if current_role == "driver":
-        query["driver_id"] = _to_object_id(current_user_id, "current_user_id")
+        driver_object_id = _to_object_id(current_user_id, "current_user_id")
+        base_query["driver_id"] = driver_object_id
+        recurring_query["driver_id"] = driver_object_id
 
-    all_bookings = list(
-        bookings_collection().find(
-            query,
-            {
-                "pickup_at": 1,
-                "status": 1,
-                "booking_type": 1,
-                "customer_id": 1,
-                "driver_id": 1,
-                "is_recurring_template": 1,
-            },
-        )
-    )
     now = now_utc()
     today_start, today_end = _calendar_window("today")
-    bookings_with_pickup = [
-        (booking, _as_utc_datetime(booking.get("pickup_at")))
-        for booking in all_bookings
-    ]
-    recurring_customers = {
-        str(booking.get("customer_id"))
-        for booking in bookings_collection().find(
-            {"is_recurring_template": True, **({"driver_id": query["driver_id"]} if current_role == "driver" else {})},
-            {"customer_id": 1},
-        )
-    }
-    today_bookings = [
-        booking
-        for booking, pickup_at in bookings_with_pickup
-        if pickup_at and today_start <= pickup_at < today_end
-    ]
-    overdue_reminders = [
-        booking
-        for booking, pickup_at in bookings_with_pickup
-        if pickup_at
-        and pickup_at < now
-        and booking.get("booking_type") in REMINDER_BOOKING_TYPES
-        and _map_booking_status_for_display(booking.get("status")) not in {"Completed", "Cancelled", "Missed"}
-    ]
-    follow_ups_due_today = [
-        booking
-        for booking, pickup_at in bookings_with_pickup
-        if pickup_at
-        and today_start <= pickup_at < today_end
-        and booking.get("booking_type") in FOLLOW_UP_BOOKING_TYPES
-    ]
-    pending_acknowledgement = [booking for booking in today_bookings if _map_booking_status_for_display(booking.get("status")) == "Scheduled"]
-    in_progress_bookings = [
-        booking
-        for booking in all_bookings
-        if _map_booking_status_for_display(booking.get("status")) in IN_PROGRESS_BOOKING_STATUSES
-    ]
-    completed_today = [
-        booking for booking in today_bookings if _map_booking_status_for_display(booking.get("status")) == "Completed"
-    ]
-    trips_by_status = {
-        status: len([booking for booking in all_bookings if _map_booking_status_for_display(booking.get("status")) == status])
-        for status in BOOKING_STATUSES
-    }
+    active_statuses = list(ACTIVE_BOOKING_STATUSES)
+    result = _empty_booking_dashboard_summary()
 
-    result = {
-        "upcoming_bookings": len(
-            [
-                booking
-                for booking, pickup_at in bookings_with_pickup
-                if pickup_at
-                and today_start <= pickup_at < today_end
-                and _map_booking_status_for_display(booking.get("status")) in ACTIVE_BOOKING_STATUSES
-            ]
-        ),
-        "missed_bookings": len([booking for booking in all_bookings if _map_booking_status_for_display(booking.get("status")) == "Missed"]),
-        "active_recurring_customers": len(recurring_customers),
-        "total_customers": customers_collection().count_documents({}),
-        "total_recurring_customers": len(recurring_customers),
-        "today_schedule": len(today_bookings),
-        "upcoming_pickups": len(
-            [
-                booking
-                for booking, pickup_at in bookings_with_pickup
-                if pickup_at
-                and pickup_at >= now
-                and _map_booking_status_for_display(booking.get("status")) in ACTIVE_BOOKING_STATUSES
-            ]
-        ),
-        "recent_customers": len(
+    try:
+        bookings_started_at = perf_counter()
+        result["upcoming_bookings"] = bookings_collection().count_documents(
+            {
+                **base_query,
+                "pickup_at": {"$gte": today_start, "$lt": today_end},
+                "status": {"$in": active_statuses},
+            }
+        )
+        result["missed_bookings"] = bookings_collection().count_documents({**base_query, "status": "Missed"})
+        recurring_customers = {
+            str(booking.get("customer_id"))
+            for booking in bookings_collection().find(recurring_query, {"customer_id": 1})
+            if booking.get("customer_id")
+        }
+        result["active_recurring_customers"] = len(recurring_customers)
+        result["total_recurring_customers"] = len(recurring_customers)
+        result["total_customers"] = customers_collection().count_documents({})
+        result["today_schedule"] = bookings_collection().count_documents(
+            {**base_query, "pickup_at": {"$gte": today_start, "$lt": today_end}}
+        )
+        result["scheduled_today"] = result["today_schedule"]
+        result["upcoming_pickups"] = bookings_collection().count_documents(
+            {
+                **base_query,
+                "pickup_at": {"$gte": now},
+                "status": {"$in": active_statuses},
+            }
+        )
+        result["recent_customers"] = len(
             {
                 str(booking.get("customer_id"))
-                for booking, pickup_at in bookings_with_pickup
-                if pickup_at and pickup_at >= now - timedelta(days=7)
+                for booking in bookings_collection().find(
+                    {
+                        **base_query,
+                        "pickup_at": {"$gte": now - timedelta(days=7)},
+                    },
+                    {"customer_id": 1},
+                )
+                if booking.get("customer_id")
             }
-        ),
-        "customer_growth_trend": [
+        )
+        result["customer_growth_trend"] = [
             {"label": "Last 30 days", "value": customers_collection().count_documents({"created_at": {"$gte": now - timedelta(days=30)}})},
             {"label": "Last 90 days", "value": customers_collection().count_documents({"created_at": {"$gte": now - timedelta(days=90)}})},
-        ],
-        "scheduled_today": len(today_bookings),
-        "total_scheduled_bookings": len([booking for booking in all_bookings if _map_booking_status_for_display(booking.get("status")) in ACTIVE_BOOKING_STATUSES]),
-        "pending_acknowledgement": len(pending_acknowledgement),
-        "in_progress_bookings": len(in_progress_bookings),
-        "completed_today": len(completed_today),
-        "overdue_reminders": len(overdue_reminders),
-        "follow_ups_due_today": len(follow_ups_due_today),
-        "upcoming_corporate_bookings": len([booking for booking in all_bookings if booking.get("booking_type") in CORPORATE_BOOKING_TYPES and _map_booking_status_for_display(booking.get("status")) in ACTIVE_BOOKING_STATUSES]),
-        "total_future_bookings": len([booking for booking, pickup_at in bookings_with_pickup if pickup_at and pickup_at >= now]),
-        "vip_bookings": len([booking for booking in all_bookings if booking.get("booking_type") in VIP_BOOKING_TYPES]),
-        "strategic_meetings": len([booking for booking in all_bookings if booking.get("booking_type") in STRATEGIC_BOOKING_TYPES]),
-        "driver_schedules": len({str(booking.get("driver_id")) for booking in all_bookings if booking.get("driver_id")}),
-        "follow_up_completion_rate": round(
-            (
-                len([booking for booking in all_bookings if booking.get("booking_type") in FOLLOW_UP_BOOKING_TYPES and _map_booking_status_for_display(booking.get("status")) == "Completed"])
-                / max(1, len([booking for booking in all_bookings if booking.get("booking_type") in FOLLOW_UP_BOOKING_TYPES]))
-            ) * 100,
-            1,
-        ),
-        "bookings_by_status": trips_by_status,
-    }
+        ]
+        result["total_scheduled_bookings"] = bookings_collection().count_documents(
+            {**base_query, "status": {"$in": active_statuses}}
+        )
+        result["pending_acknowledgement"] = bookings_collection().count_documents(
+            {**base_query, "pickup_at": {"$gte": today_start, "$lt": today_end}, "status": "Scheduled"}
+        )
+        result["in_progress_bookings"] = bookings_collection().count_documents(
+            {**base_query, "status": {"$in": list(IN_PROGRESS_BOOKING_STATUSES)}}
+        )
+        result["completed_today"] = bookings_collection().count_documents(
+            {**base_query, "pickup_at": {"$gte": today_start, "$lt": today_end}, "status": "Completed"}
+        )
+        result["overdue_reminders"] = bookings_collection().count_documents(
+            {
+                **base_query,
+                "pickup_at": {"$lt": now},
+                "booking_type": {"$in": list(REMINDER_BOOKING_TYPES)},
+                "status": {"$nin": ["Completed", "Cancelled", "Missed"]},
+            }
+        )
+        result["follow_ups_due_today"] = bookings_collection().count_documents(
+            {
+                **base_query,
+                "pickup_at": {"$gte": today_start, "$lt": today_end},
+                "booking_type": {"$in": list(FOLLOW_UP_BOOKING_TYPES)},
+            }
+        )
+        result["upcoming_corporate_bookings"] = bookings_collection().count_documents(
+            {
+                **base_query,
+                "booking_type": {"$in": list(CORPORATE_BOOKING_TYPES)},
+                "status": {"$in": active_statuses},
+            }
+        )
+        result["total_future_bookings"] = bookings_collection().count_documents(
+            {**base_query, "pickup_at": {"$gte": now}}
+        )
+        result["vip_bookings"] = bookings_collection().count_documents(
+            {**base_query, "booking_type": {"$in": list(VIP_BOOKING_TYPES)}}
+        )
+        result["strategic_meetings"] = bookings_collection().count_documents(
+            {**base_query, "booking_type": {"$in": list(STRATEGIC_BOOKING_TYPES)}}
+        )
+        result["driver_schedules"] = len(
+            bookings_collection().distinct("driver_id", {**base_query, "driver_id": {"$ne": None}})
+        )
+        follow_up_total = bookings_collection().count_documents(
+            {**base_query, "booking_type": {"$in": list(FOLLOW_UP_BOOKING_TYPES)}}
+        )
+        follow_up_completed = bookings_collection().count_documents(
+            {**base_query, "booking_type": {"$in": list(FOLLOW_UP_BOOKING_TYPES)}, "status": "Completed"}
+        )
+        result["follow_up_completion_rate"] = round((follow_up_completed / max(1, follow_up_total)) * 100, 1)
+        result["bookings_by_status"] = {
+            status: bookings_collection().count_documents({**base_query, "status": status})
+            for status in BOOKING_STATUSES
+        }
+        log_db_duration("bookings.summary.fast_counts", bookings_started_at)
+        current_app.logger.info(
+            "[Flux Section] section=booking_summary endpoint=/api/bookings/summary duration_ms=%.2f success=true records_count=%s",
+            (perf_counter() - request_started_at) * 1000,
+            result["total_scheduled_bookings"],
+        )
+    except Exception:
+        current_app.logger.exception(
+            "[Flux Section] section=booking_summary endpoint=/api/bookings/summary success=false"
+        )
+        result = _empty_booking_dashboard_summary()
+
+    total_duration_ms = (perf_counter() - request_started_at) * 1000
+    if total_duration_ms > 2000:
+        current_app.logger.warning(
+            "SLOW API WARNING endpoint=/api/bookings/summary role=%s duration_ms=%.2f",
+            current_role,
+            total_duration_ms,
+        )
+    return set_ttl_cached(cache_key, result, ttl_seconds=30)

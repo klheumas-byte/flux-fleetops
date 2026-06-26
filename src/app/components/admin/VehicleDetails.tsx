@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   Calendar,
@@ -61,6 +61,47 @@ interface Vehicle {
   roadworthy_expiry: string | null;
   default_weekly_target: number;
   default_daily_target: number;
+  operating_fleet_name?: string | null;
+  asset_owner_type?: string | null;
+  asset_owner_name?: string | null;
+  asset_owner_contact?: {
+    phone?: string | null;
+    email?: string | null;
+    address?: string | null;
+  } | null;
+  ownership_notes?: string | null;
+  ownership_start_date?: string | null;
+  recovery_basis_type?: string | null;
+  original_purchase_price?: number | null;
+  original_purchase_date?: string | null;
+  current_estimated_value?: number | null;
+  custom_recovery_value?: number | null;
+  capital_basis_for_recovery?: number | null;
+  capital_recovery_tracking_enabled?: boolean;
+  ownership_summary?: {
+    operating_fleet_name?: string | null;
+    asset_owner_type?: string | null;
+    asset_owner_name?: string | null;
+    ownership_start_date?: string | null;
+    recovery_basis_type?: string | null;
+    capital_basis_for_recovery?: number | null;
+  } | null;
+  ownership_history?: Array<{
+    transfer_id?: string;
+    previous_owner?: string | null;
+    new_owner?: string | null;
+    ownership_type?: string | null;
+    transfer_date?: string | null;
+    effective_date?: string | null;
+    transfer_value?: number | null;
+    previous_recovery_balance?: number | null;
+    new_capital_basis?: number | null;
+    transfer_reason?: string | null;
+    notes?: string | null;
+    approved_by?: string | null;
+    created_at?: string | null;
+    current_record?: boolean;
+  }>;
   current_odometer?: number | null;
   purchase_cost?: number | null;
   shipping_cost?: number | null;
@@ -107,6 +148,12 @@ interface Vehicle {
       other_setup_cost?: number;
       custom_cost_total?: number;
       total_vehicle_investment?: number;
+      original_purchase_price?: number;
+      original_purchase_date?: string | null;
+      current_estimated_value?: number;
+      custom_recovery_value?: number;
+      recovery_basis_type?: string | null;
+      capital_basis_for_recovery?: number;
     };
     recovery?: {
       amount_recovered?: number;
@@ -138,6 +185,7 @@ interface Vehicle {
       net_profit?: number;
       profit_margin?: number;
       roi?: number;
+      capital_basis_for_recovery?: number;
     };
     performance?: {
       trips_today?: number;
@@ -191,8 +239,50 @@ interface VehicleEconomicsResponse {
     initial_repairs_cost?: number | null;
     registration_cost?: number | null;
     other_setup_cost?: number | null;
+    operating_fleet_name?: string | null;
+    asset_owner_type?: string | null;
+    asset_owner_name?: string | null;
+    ownership_summary?: Vehicle['ownership_summary'] | null;
+    original_purchase_price?: number | null;
+    original_purchase_date?: string | null;
+    current_estimated_value?: number | null;
+    custom_recovery_value?: number | null;
+    capital_basis_for_recovery?: number | null;
+    recovery_basis_type?: string | null;
   };
 }
+
+interface TransferOwnershipFormState {
+  asset_owner_name: string;
+  asset_owner_type: string;
+  asset_owner_phone: string;
+  asset_owner_email: string;
+  asset_owner_address: string;
+  transfer_date: string;
+  effective_date: string;
+  transfer_value: string;
+  recovery_basis_type: string;
+  custom_recovery_value: string;
+  current_estimated_value: string;
+  capital_recovery_tracking_enabled: string;
+  reason: string;
+  notes: string;
+}
+
+const TRANSFER_OWNER_TYPES = [
+  'Axelera Owned',
+  'Existing Company Asset',
+  'Managed Third-Party Vehicle',
+  'Investor-Funded Vehicle',
+  'Leased Vehicle',
+  'Partner Vehicle',
+] as const;
+
+const TRANSFER_RECOVERY_BASIS_TYPES = [
+  'Original Purchase Cost',
+  'Current Estimated Value',
+  'Custom Recovery Value',
+] as const;
 
 interface PreventiveSchedule {
   id: string;
@@ -301,6 +391,34 @@ function formatDate(value: string | null | undefined) {
   return date.toLocaleDateString();
 }
 
+function normalizeCurrencyInput(value: string) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+function calculateTransferCapitalBasis(form: TransferOwnershipFormState, currentVehicle: Vehicle | null) {
+  if (!currentVehicle) {
+    return 0;
+  }
+
+  const trackingEnabled = form.capital_recovery_tracking_enabled !== 'false';
+  if (form.asset_owner_type === 'Leased Vehicle' && !trackingEnabled) {
+    return 0;
+  }
+  if (form.recovery_basis_type === 'Custom Recovery Value') {
+    return normalizeCurrencyInput(form.custom_recovery_value);
+  }
+  if (form.recovery_basis_type === 'Current Estimated Value') {
+    return normalizeCurrencyInput(form.current_estimated_value);
+  }
+  return (
+    currentVehicle.economics?.investment?.total_vehicle_investment
+    ?? currentVehicle.capital_basis_for_recovery
+    ?? currentVehicle.purchase_cost
+    ?? 0
+  );
+}
+
 function StatCard({
   label,
   value,
@@ -341,6 +459,8 @@ function resolveVehicleDetailsError(error: unknown) {
 }
 
 export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: VehicleDetailsProps) {
+  const storedUser = typeof window !== 'undefined' ? localStorage.getItem('flux_user') : null;
+  const currentUserRole = storedUser ? JSON.parse(storedUser).role : null;
   const [activeTab, setActiveTab] = useState<DetailTab>('overview');
   const [vehicle, setVehicle] = useState<Vehicle | null>(null);
   const [maintenance, setMaintenance] = useState<PreventiveSchedule[]>([]);
@@ -352,6 +472,10 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
   const [hasLoadedCompliance, setHasLoadedCompliance] = useState(false);
   const [pageError, setPageError] = useState('');
   const [tabError, setTabError] = useState('');
+  const [refreshSeed, setRefreshSeed] = useState(0);
+  const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
+  const [isSubmittingTransfer, setIsSubmittingTransfer] = useState(false);
+  const [transferError, setTransferError] = useState('');
   const overviewRequestSequence = useRef(0);
   const hasVehicle = Boolean(vehicle?.id);
   usePageToastFeedback(pageError, tabError);
@@ -365,6 +489,8 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
     setCompliance([]);
     setPageError('');
     setTabError('');
+    setIsTransferModalOpen(false);
+    setTransferError('');
   }, [vehicleId]);
 
   useEffect(() => {
@@ -457,7 +583,7 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
     return () => {
       isMounted = false;
     };
-  }, [vehicleId]);
+  }, [vehicleId, refreshSeed]);
 
   useEffect(() => {
     let isMounted = true;
@@ -527,6 +653,22 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
                     response.data?.data.initial_repairs_cost ?? currentVehicle.initial_repairs_cost,
                   registration_cost: response.data?.data.registration_cost ?? currentVehicle.registration_cost,
                   other_setup_cost: response.data?.data.other_setup_cost ?? currentVehicle.other_setup_cost,
+                  operating_fleet_name: response.data?.data.operating_fleet_name ?? currentVehicle.operating_fleet_name,
+                  asset_owner_type: response.data?.data.asset_owner_type ?? currentVehicle.asset_owner_type,
+                  asset_owner_name: response.data?.data.asset_owner_name ?? currentVehicle.asset_owner_name,
+                  ownership_summary: response.data?.data.ownership_summary ?? currentVehicle.ownership_summary,
+                  original_purchase_price:
+                    response.data?.data.original_purchase_price ?? currentVehicle.original_purchase_price,
+                  original_purchase_date:
+                    response.data?.data.original_purchase_date ?? currentVehicle.original_purchase_date,
+                  current_estimated_value:
+                    response.data?.data.current_estimated_value ?? currentVehicle.current_estimated_value,
+                  custom_recovery_value:
+                    response.data?.data.custom_recovery_value ?? currentVehicle.custom_recovery_value,
+                  capital_basis_for_recovery:
+                    response.data?.data.capital_basis_for_recovery ?? currentVehicle.capital_basis_for_recovery,
+                  recovery_basis_type:
+                    response.data?.data.recovery_basis_type ?? currentVehicle.recovery_basis_type,
                   vehicle_cost_items: response.data?.data.vehicle_cost_items || [],
                   economics: response.data?.data.economics || {},
                 }
@@ -638,6 +780,31 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
     [vehicle],
   );
 
+  const transferFormDefaults: TransferOwnershipFormState = useMemo(
+    () => ({
+      asset_owner_name: vehicle?.asset_owner_name || vehicle?.ownership_summary?.asset_owner_name || '',
+      asset_owner_type: vehicle?.asset_owner_type || vehicle?.ownership_summary?.asset_owner_type || 'Axelera Owned',
+      asset_owner_phone: vehicle?.asset_owner_contact?.phone || '',
+      asset_owner_email: vehicle?.asset_owner_contact?.email || '',
+      asset_owner_address: vehicle?.asset_owner_contact?.address || '',
+      transfer_date: new Date().toISOString().slice(0, 10),
+      effective_date: new Date().toISOString().slice(0, 10),
+      transfer_value: '',
+      recovery_basis_type: vehicle?.recovery_basis_type || 'Original Purchase Cost',
+      custom_recovery_value: vehicle?.custom_recovery_value != null ? String(vehicle.custom_recovery_value) : '',
+      current_estimated_value: vehicle?.current_estimated_value != null ? String(vehicle.current_estimated_value) : '',
+      capital_recovery_tracking_enabled: vehicle?.capital_recovery_tracking_enabled === false ? 'false' : 'true',
+      reason: '',
+      notes: '',
+    }),
+    [vehicle],
+  );
+  const [transferForm, setTransferForm] = useState<TransferOwnershipFormState>(transferFormDefaults);
+
+  useEffect(() => {
+    setTransferForm(transferFormDefaults);
+  }, [transferFormDefaults]);
+
   if (isLoading) {
     return (
       <div className="space-y-6 p-4 sm:p-6">
@@ -683,6 +850,66 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
   const fuelAnalytics = vehicle.economics?.fuel_analytics;
   const assignedDriverSummary = getAssignedDriverSummary(vehicle);
   const economicsTabsActive = activeTab === 'investment' || activeTab === 'recovery' || activeTab === 'economics';
+  const canTransferOwnership = currentUserRole === 'owner' || currentUserRole === 'admin';
+  const transferCapitalBasisPreview = calculateTransferCapitalBasis(transferForm, vehicle);
+  const ownershipHistory = vehicle.ownership_history || [];
+
+  const handleTransferFieldChange = (field: keyof TransferOwnershipFormState, value: string) => {
+    setTransferForm((current) => ({ ...current, [field]: value }));
+  };
+
+  const handleSubmitTransfer = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!vehicle) {
+      return;
+    }
+    if (!transferForm.asset_owner_name.trim()) {
+      setTransferError('Please enter the new asset owner name.');
+      return;
+    }
+    if (!transferForm.reason.trim()) {
+      setTransferError('Please add a reason for this ownership transfer.');
+      return;
+    }
+    if (transferForm.recovery_basis_type === 'Current Estimated Value' && !transferForm.current_estimated_value.trim()) {
+      setTransferError('Please enter the current estimated value for this recovery basis.');
+      return;
+    }
+    if (transferForm.recovery_basis_type === 'Custom Recovery Value' && !transferForm.custom_recovery_value.trim()) {
+      setTransferError('Please enter the custom recovery value for this transfer.');
+      return;
+    }
+
+    setIsSubmittingTransfer(true);
+    setTransferError('');
+    try {
+      await apiRequest(`/vehicles/${vehicle.id}/transfer-ownership`, {
+        method: 'POST',
+        body: JSON.stringify({
+          ...transferForm,
+          transfer_value: transferForm.transfer_value ? normalizeCurrencyInput(transferForm.transfer_value) : null,
+          custom_recovery_value: transferForm.custom_recovery_value
+            ? normalizeCurrencyInput(transferForm.custom_recovery_value)
+            : null,
+          current_estimated_value: transferForm.current_estimated_value
+            ? normalizeCurrencyInput(transferForm.current_estimated_value)
+            : null,
+          capital_basis_for_recovery: transferCapitalBasisPreview,
+          ownership_notes: transferForm.notes,
+        }),
+      });
+      setIsTransferModalOpen(false);
+      setRefreshSeed((current) => current + 1);
+    } catch (error) {
+      setTransferError(
+        error instanceof ApiRequestError
+          ? error.message
+          : 'We could not complete the ownership transfer right now.',
+      );
+    } finally {
+      setIsSubmittingTransfer(false);
+    }
+  };
 
   return (
     <div className="space-y-6 p-4 sm:p-6">
@@ -703,9 +930,25 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
             {vehicle.make} {vehicle.model} • {vehicle.year} • {formatLabel(vehicle.vehicle_type)}
           </p>
         </div>
-        <div className="rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-600">
-          <div>Status: <span className="font-medium text-[#0F172A]">{formatLabel(vehicle.status)}</span></div>
-          <div className="mt-1">Assigned Driver: <span className="font-medium text-[#0F172A]">{assignedDriverSummary.headline}</span></div>
+        <div className="flex flex-col gap-3 sm:items-end">
+          {canTransferOwnership ? (
+            <button
+              type="button"
+              onClick={() => {
+                setTransferError('');
+                setIsTransferModalOpen(true);
+              }}
+              className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100"
+            >
+              <DollarSign className="h-4 w-4" />
+              Transfer Ownership
+            </button>
+          ) : null}
+          <div className="rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-600">
+            <div>Status: <span className="font-medium text-[#0F172A]">{formatLabel(vehicle.status)}</span></div>
+            <div className="mt-1">Assigned Driver: <span className="font-medium text-[#0F172A]">{assignedDriverSummary.headline}</span></div>
+            <div className="mt-1">Asset Owner: <span className="font-medium text-[#0F172A]">{vehicle.asset_owner_name || 'Axelera'}</span></div>
+          </div>
         </div>
       </div>
 
@@ -757,12 +1000,29 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
               <DetailRow label="Driver Email" value={assignedDriverSummary.email} />
               <DetailRow label="Driver Status" value={assignedDriverSummary.status} />
               <DetailRow label="License Number" value={assignedDriverSummary.licenseNumber} />
+              <DetailRow label="Operating Fleet" value={vehicle.operating_fleet_name || vehicle.ownership_summary?.operating_fleet_name} />
+              <DetailRow label="Asset Owner" value={vehicle.asset_owner_name || vehicle.ownership_summary?.asset_owner_name} />
+              <DetailRow label="Ownership Type" value={vehicle.asset_owner_type || vehicle.ownership_summary?.asset_owner_type} />
+              <DetailRow label="Ownership Start Date" value={formatDate(vehicle.ownership_start_date || vehicle.ownership_summary?.ownership_start_date)} />
+              <DetailRow label="Recovery Basis" value={vehicle.recovery_basis_type || vehicle.ownership_summary?.recovery_basis_type} />
+              <DetailRow label="Capital Basis" value={formatCurrency(vehicle.capital_basis_for_recovery || vehicle.ownership_summary?.capital_basis_for_recovery)} />
               <DetailRow
                 label="Current Odometer"
                 value={vehicle.current_odometer != null ? `${vehicle.current_odometer.toLocaleString()} km` : '-'}
               />
               <DetailRow label="Created" value={formatDate(vehicle.created_at)} />
             </div>
+            {(vehicle.asset_owner_contact?.phone || vehicle.asset_owner_contact?.email || vehicle.asset_owner_contact?.address || vehicle.ownership_notes) && (
+              <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <div className="text-sm font-semibold text-[#0F172A]">Owner Contact</div>
+                <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <DetailRow label="Phone" value={vehicle.asset_owner_contact?.phone} />
+                  <DetailRow label="Email" value={vehicle.asset_owner_contact?.email} />
+                  <DetailRow label="Address" value={vehicle.asset_owner_contact?.address} />
+                  <DetailRow label="Notes" value={vehicle.ownership_notes} />
+                </div>
+              </div>
+            )}
           </div>
           <div className="rounded-xl border border-gray-200 bg-white p-5">
             <h2 className="text-lg font-semibold text-[#0F172A]">Expiry Snapshot</h2>
@@ -814,16 +1074,39 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
               <DetailRow label="License Number" value={assignedDriverSummary.licenseNumber} />
               <DetailRow label="Vehicle Status" value={formatLabel(vehicle.status)} />
               <DetailRow label="Updated At" value={formatDate(vehicle.updated_at)} />
-              <DetailRow label="Created By" value={vehicle.created_by} />
+              <DetailRow label="Asset Owner" value={vehicle.asset_owner_name || vehicle.ownership_summary?.asset_owner_name} />
+              <DetailRow label="Ownership Type" value={vehicle.asset_owner_type || vehicle.ownership_summary?.asset_owner_type} />
+              <DetailRow label="Operating Fleet" value={vehicle.operating_fleet_name || vehicle.ownership_summary?.operating_fleet_name} />
+              <DetailRow label="Created By" value="Fleet record" />
             </div>
           </div>
           <div className="rounded-xl border border-gray-200 bg-white p-5">
-            <h2 className="text-lg font-semibold text-[#0F172A]">Targets</h2>
+            <h2 className="text-lg font-semibold text-[#0F172A]">Targets & Ownership History</h2>
             <div className="mt-4 grid grid-cols-1 gap-3">
               <DetailRow label="Default Weekly Target" value={formatCurrency(vehicle.default_weekly_target)} />
               <DetailRow label="Default Daily Target" value={formatCurrency(vehicle.default_daily_target)} />
               <DetailRow label="Trips Today" value={vehiclePerformance?.trips_today ?? 0} />
               <DetailRow label="Trips This Month" value={vehiclePerformance?.trips_this_month ?? 0} />
+            </div>
+            <div className="mt-5">
+              <div className="text-sm font-semibold text-[#0F172A]">Ownership Timeline</div>
+              {ownershipHistory.length > 0 ? (
+                <div className="mt-3 space-y-3">
+                  {ownershipHistory.slice(0, 4).map((entry) => (
+                    <div key={entry.transfer_id || `${entry.new_owner}-${entry.effective_date}`} className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+                      <div className="text-sm font-medium text-[#0F172A]">{entry.new_owner || 'Asset owner record'}</div>
+                      <div className="mt-1 text-xs text-gray-500">
+                        {formatLabel(entry.ownership_type)} • Effective {formatDate(entry.effective_date)}
+                      </div>
+                      <div className="mt-2 text-xs text-gray-600">
+                        Capital Basis {formatCurrency(entry.new_capital_basis)} • Previous Balance {formatCurrency(entry.previous_recovery_balance)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <EmptyPanel label="Ownership history will appear here once transfers are recorded." />
+              )}
             </div>
           </div>
         </div>
@@ -841,6 +1124,12 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
                 {investmentItems.map(([label, value]) => (
                   <DetailRow key={label} label={label} value={formatCurrency(value as number | null | undefined)} />
                 ))}
+                <DetailRow label="Historical Purchase Price" value={formatCurrency(vehicle.economics?.investment?.original_purchase_price ?? vehicle.original_purchase_price)} />
+                <DetailRow label="Historical Purchase Date" value={formatDate(vehicle.economics?.investment?.original_purchase_date ?? vehicle.original_purchase_date)} />
+                <DetailRow label="Current Estimated Value" value={formatCurrency(vehicle.economics?.investment?.current_estimated_value ?? vehicle.current_estimated_value)} />
+                <DetailRow label="Custom Recovery Value" value={formatCurrency(vehicle.economics?.investment?.custom_recovery_value ?? vehicle.custom_recovery_value)} />
+                <DetailRow label="Recovery Basis" value={vehicle.economics?.investment?.recovery_basis_type ?? vehicle.recovery_basis_type} />
+                <DetailRow label="Capital Basis For Recovery" value={formatCurrency(vehicle.economics?.investment?.capital_basis_for_recovery ?? vehicle.capital_basis_for_recovery)} />
               </div>
               <div className="mt-6">
                 <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-500">Custom Cost Items</h3>
@@ -887,6 +1176,8 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
             <TabSkeleton />
           ) : recovery && Object.keys(recovery).length > 0 ? (
             <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              <DetailRow label="Recovery Basis" value={recovery.recovery_basis_type || vehicle.recovery_basis_type} />
+              <DetailRow label="Capital Basis For Recovery" value={formatCurrency(recovery.capital_basis_for_recovery ?? vehicle.capital_basis_for_recovery)} />
               <DetailRow label="Amount Recovered" value={formatCurrency(recovery.amount_recovered)} />
               <DetailRow label="Remaining Balance" value={formatCurrency(recovery.remaining_balance)} />
               <DetailRow label="Recovery %" value={`${recovery.recovery_percentage ?? 0}%`} />
@@ -996,6 +1287,10 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
             <div className="rounded-xl border border-gray-200 bg-white p-5">
               <h2 className="text-lg font-semibold text-[#0F172A]">Performance & Profitability</h2>
               <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <DetailRow label="Operating Fleet" value={vehicle.operating_fleet_name || vehicle.ownership_summary?.operating_fleet_name} />
+                <DetailRow label="Asset Owner" value={vehicle.asset_owner_name || vehicle.ownership_summary?.asset_owner_name} />
+                <DetailRow label="Ownership Type" value={vehicle.asset_owner_type || vehicle.ownership_summary?.asset_owner_type} />
+                <DetailRow label="Capital Basis For ROI" value={formatCurrency(profitability?.capital_basis_for_recovery ?? vehicle.capital_basis_for_recovery)} />
                 <DetailRow label="Gross Revenue" value={formatCurrency(profitability?.gross_revenue)} />
                 <DetailRow label="Net Profit" value={formatCurrency(profitability?.net_profit)} />
                 <DetailRow label="Profit Margin" value={profitability?.profit_margin != null ? `${profitability.profit_margin}%` : '-'} />
@@ -1008,6 +1303,196 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
             </div>
           </div>
         )
+      )}
+
+      {isTransferModalOpen && canTransferOwnership && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-900/50 p-3 sm:p-4">
+          <div className="flex max-h-[85vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl">
+            <div className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-gray-200 bg-white px-4 py-4 sm:px-6">
+              <div>
+                <h2 className="text-xl font-semibold text-[#0F172A]">Transfer Ownership</h2>
+                <p className="mt-1 text-sm text-gray-500">
+                  Preserve historical reporting while updating the current legal asset owner.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsTransferModalOpen(false)}
+                className="rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-600 hover:bg-gray-50"
+              >
+                Close
+              </button>
+            </div>
+            <form onSubmit={handleSubmitTransfer} className="flex min-h-0 flex-1 flex-col">
+              <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6">
+                {transferError && (
+                  <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                    {transferError}
+                  </div>
+                )}
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <div>
+                    <label className="mb-1.5 block text-sm font-medium text-gray-700">New Asset Owner</label>
+                    <input
+                      value={transferForm.asset_owner_name}
+                      onChange={(event) => handleTransferFieldChange('asset_owner_name', event.target.value)}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1.5 block text-sm font-medium text-gray-700">Ownership Type</label>
+                    <select
+                      value={transferForm.asset_owner_type}
+                      onChange={(event) => handleTransferFieldChange('asset_owner_type', event.target.value)}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm"
+                    >
+                      {TRANSFER_OWNER_TYPES.map((option) => (
+                        <option key={option} value={option}>{option}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="mb-1.5 block text-sm font-medium text-gray-700">Transfer Date</label>
+                    <input
+                      type="date"
+                      value={transferForm.transfer_date}
+                      onChange={(event) => handleTransferFieldChange('transfer_date', event.target.value)}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1.5 block text-sm font-medium text-gray-700">Effective Date</label>
+                    <input
+                      type="date"
+                      value={transferForm.effective_date}
+                      onChange={(event) => handleTransferFieldChange('effective_date', event.target.value)}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1.5 block text-sm font-medium text-gray-700">Transfer Value</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={transferForm.transfer_value}
+                      onChange={(event) => handleTransferFieldChange('transfer_value', event.target.value)}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1.5 block text-sm font-medium text-gray-700">Recovery Basis</label>
+                    <select
+                      value={transferForm.recovery_basis_type}
+                      onChange={(event) => handleTransferFieldChange('recovery_basis_type', event.target.value)}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm"
+                    >
+                      {TRANSFER_RECOVERY_BASIS_TYPES.map((option) => (
+                        <option key={option} value={option}>{option}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="mb-1.5 block text-sm font-medium text-gray-700">Current Estimated Value</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={transferForm.current_estimated_value}
+                      onChange={(event) => handleTransferFieldChange('current_estimated_value', event.target.value)}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1.5 block text-sm font-medium text-gray-700">Custom Recovery Value</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={transferForm.custom_recovery_value}
+                      onChange={(event) => handleTransferFieldChange('custom_recovery_value', event.target.value)}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1.5 block text-sm font-medium text-gray-700">Owner Phone</label>
+                    <input
+                      value={transferForm.asset_owner_phone}
+                      onChange={(event) => handleTransferFieldChange('asset_owner_phone', event.target.value)}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1.5 block text-sm font-medium text-gray-700">Owner Email</label>
+                    <input
+                      type="email"
+                      value={transferForm.asset_owner_email}
+                      onChange={(event) => handleTransferFieldChange('asset_owner_email', event.target.value)}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm"
+                    />
+                  </div>
+                  <div className="md:col-span-2">
+                    <label className="mb-1.5 block text-sm font-medium text-gray-700">Owner Address</label>
+                    <input
+                      value={transferForm.asset_owner_address}
+                      onChange={(event) => handleTransferFieldChange('asset_owner_address', event.target.value)}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1.5 block text-sm font-medium text-gray-700">Capital Recovery Tracking</label>
+                    <select
+                      value={transferForm.capital_recovery_tracking_enabled}
+                      onChange={(event) => handleTransferFieldChange('capital_recovery_tracking_enabled', event.target.value)}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm"
+                    >
+                      <option value="true">Enabled</option>
+                      <option value="false">Disabled</option>
+                    </select>
+                  </div>
+                  <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3">
+                    <div className="text-xs font-semibold uppercase tracking-wide text-blue-700">Capital Basis Preview</div>
+                    <div className="mt-1 text-lg font-semibold text-[#0F172A]">{formatCurrency(transferCapitalBasisPreview)}</div>
+                    <div className="mt-1 text-xs text-gray-600">This will be used for recovery and ROI going forward.</div>
+                  </div>
+                  <div className="md:col-span-2">
+                    <label className="mb-1.5 block text-sm font-medium text-gray-700">Reason for Transfer</label>
+                    <input
+                      value={transferForm.reason}
+                      onChange={(event) => handleTransferFieldChange('reason', event.target.value)}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm"
+                    />
+                  </div>
+                  <div className="md:col-span-2">
+                    <label className="mb-1.5 block text-sm font-medium text-gray-700">Notes</label>
+                    <textarea
+                      rows={3}
+                      value={transferForm.notes}
+                      onChange={(event) => handleTransferFieldChange('notes', event.target.value)}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm"
+                    />
+                  </div>
+                </div>
+              </div>
+              <div className="sticky bottom-0 z-10 flex flex-col-reverse gap-3 border-t border-gray-200 bg-white px-4 py-4 sm:flex-row sm:justify-end sm:px-6">
+                <button
+                  type="button"
+                  onClick={() => setIsTransferModalOpen(false)}
+                  className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmittingTransfer}
+                  className="rounded-lg bg-[#2563EB] px-4 py-2.5 text-sm font-medium text-white hover:bg-[#1d4ed8] disabled:cursor-not-allowed disabled:opacity-70"
+                >
+                  {isSubmittingTransfer ? 'Transferring...' : 'Confirm Transfer'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
     </div>
   );

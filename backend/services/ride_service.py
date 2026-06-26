@@ -81,6 +81,8 @@ def ensure_ride_indexes():
     _ensure_index_if_missing([("vehicle_id", ASCENDING), ("created_at", DESCENDING)])
     _ensure_index_if_missing([("vehicle_id", ASCENDING), ("trip_date", DESCENDING), ("created_at", DESCENDING)])
     _ensure_index_if_missing([("status", ASCENDING), ("created_at", DESCENDING)])
+    _ensure_index_if_missing([("status", ASCENDING), ("vehicle_id", ASCENDING), ("created_at", DESCENDING)])
+    _ensure_index_if_missing([("status", ASCENDING), ("driver_id", ASCENDING), ("created_at", DESCENDING)])
     _ensure_index_if_missing([("trip_source_id", ASCENDING)])
     _ensure_index_if_missing([("trip_purpose_id", ASCENDING)])
     _ensure_index_if_missing([("source_booking_id", ASCENDING)])

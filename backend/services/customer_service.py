@@ -85,6 +85,7 @@ def ensure_customer_indexes():
             {"keys": [("created_by_role", ASCENDING)]},
             {"keys": [("created_by_driver_id", ASCENDING)]},
             {"keys": [("preferred_driver_id", ASCENDING)]},
+            {"keys": [("assigned_driver_id", ASCENDING)]},
             {"keys": [("source", ASCENDING)]},
             {"keys": [("customer_category_id", ASCENDING)]},
             {"keys": [("relationship_category_id", ASCENDING)]},
@@ -243,6 +244,42 @@ def _get_driver_document(driver_id: str | None):
 
 def _source_label(source: str | None):
     return SOURCE_OPTIONS.get((source or "").lower())
+
+
+def _empty_customer_summary() -> dict:
+    return {
+        "total_customers": 0,
+        "new_customers_this_week": 0,
+        "new_customers_this_month": 0,
+        "total_business_leads": 0,
+        "total_strategic_contacts": 0,
+        "total_investors": 0,
+        "total_gatekeepers": 0,
+        "follow_ups_due_today": 0,
+        "follow_ups_overdue": 0,
+        "high_priority_follow_ups_due": 0,
+        "lead_conversion_rate": 0.0,
+        "follow_up_due_customers": [],
+        "customer_growth_trend": [],
+        "customers_by_creator": [],
+        "customers_by_driver": [],
+        "customers_by_source": [],
+        "top_customer_generators": [],
+        "available_filters": {
+            "creator_roles": [],
+            "drivers": [],
+            "customer_categories": [],
+            "sources": [{"value": key, "label": value} for key, value in SOURCE_OPTIONS.items()],
+        },
+        "applied_filters": {
+            "date_from": None,
+            "date_to": None,
+            "creator_role": None,
+            "driver_id": None,
+            "customer_category_id": None,
+            "source": None,
+        },
+    }
 
 
 def _parse_filter_date(value: Any, field_name: str):
@@ -442,6 +479,7 @@ def _normalized_customer_payload(payload: dict, *, partial: bool = False) -> tup
     if "preferred_driver_id" in payload or "assigned_driver_id" in payload:
         preferred_driver = _get_driver_document(assigned_driver_identifier)
         normalized["preferred_driver_id"] = preferred_driver["_id"] if preferred_driver else None
+        normalized["assigned_driver_id"] = preferred_driver["_id"] if preferred_driver else None
 
     if not partial or "source" in payload:
         normalized["source"] = _validate_source(payload.get("source"))
@@ -859,179 +897,276 @@ def get_customer_summary(current_user_id: str, current_role: str, filters: dict 
     cached = get_ttl_cached(cache_key)
     if cached is not None:
         return cached
-    scoped_customer_documents = list(customers_collection().find(_customer_scope_query(current_user_id, current_role)))
-    customer_documents = [
-        customer
-        for customer in scoped_customer_documents
-        if _customer_matches_filters(customer, filters=normalized_filters)
-    ]
+    request_started_at = perf_counter()
     today = now_utc().date()
+    result = _empty_customer_summary()
+    result["applied_filters"] = {
+        "date_from": normalized_filters["date_from"].isoformat() if normalized_filters["date_from"] else None,
+        "date_to": normalized_filters["date_to"].isoformat() if normalized_filters["date_to"] else None,
+        "creator_role": normalized_filters["creator_role"],
+        "driver_id": str(normalized_filters["driver_id"]) if normalized_filters["driver_id"] else None,
+        "customer_category_id": str(normalized_filters["customer_category_id"]) if normalized_filters["customer_category_id"] else None,
+        "source": normalized_filters["source"],
+    }
 
-    total_business_leads = len([customer for customer in customer_documents if customer.get("is_business_lead")])
-    total_strategic_contacts = len(
-        [customer for customer in customer_documents if (customer.get("opportunity_level") or "").lower() == "strategic"]
-    )
-    total_investors = len(
-        [customer for customer in customer_documents if (customer.get("relationship_category") or "").lower() == "investor"]
-    )
-    total_gatekeepers = len(
-        [
-            customer
-            for customer in customer_documents
-            if (customer.get("relationship_category") or "").lower() == "gatekeeper"
-            or (customer.get("network_value") or "").lower() == "industry gatekeeper"
-        ]
-    )
+    try:
+        no_filters = not any(
+            (
+                normalized_filters["date_from"],
+                normalized_filters["date_to"],
+                normalized_filters["creator_role"],
+                normalized_filters["driver_id"],
+                normalized_filters["customer_category_id"],
+                normalized_filters["source"],
+            )
+        )
+        scope_query = _customer_scope_query(current_user_id, current_role)
 
-    follow_ups_due_today = 0
-    follow_ups_overdue = 0
-    high_priority_due = 0
-    due_customers: list[dict] = []
-
-    for customer_document in customer_documents:
-        follow_up = _follow_up_flags(customer_document)
-        active_follow_up_date = follow_up.get("active_follow_up_date")
-        if follow_up["is_follow_up_due_today"]:
-            follow_ups_due_today += 1
-        if follow_up["is_follow_up_overdue"]:
-            follow_ups_overdue += 1
-        if follow_up["is_high_priority_follow_up"]:
-            high_priority_due += 1
-        if active_follow_up_date and (
-            follow_up["is_follow_up_due_today"]
-            or follow_up["is_follow_up_overdue"]
-            or follow_up["is_high_priority_follow_up"]
-        ):
-            enriched = _enrich_customer(customer_document)
-            due_customers.append(
+        if no_filters:
+            started_at = perf_counter()
+            today_iso = today.isoformat()
+            week_start = (today - timedelta(days=6)).isoformat()
+            month_start_iso = today.replace(day=1).isoformat()
+            result["total_customers"] = customers_collection().count_documents(scope_query)
+            result["new_customers_this_week"] = customers_collection().count_documents(
+                {**scope_query, "created_at": {"$gte": datetime.fromisoformat(f"{week_start}T00:00:00").replace(tzinfo=timezone.utc)}}
+            )
+            result["new_customers_this_month"] = customers_collection().count_documents(
+                {**scope_query, "created_at": {"$gte": datetime.fromisoformat(f"{month_start_iso}T00:00:00").replace(tzinfo=timezone.utc)}}
+            )
+            result["total_business_leads"] = customers_collection().count_documents({**scope_query, "is_business_lead": True})
+            result["total_strategic_contacts"] = customers_collection().count_documents(
+                {**scope_query, "opportunity_level": {"$in": ["Strategic", "strategic"]}}
+            )
+            result["total_investors"] = customers_collection().count_documents(
+                {**scope_query, "relationship_category": {"$in": ["Investor", "investor"]}}
+            )
+            result["total_gatekeepers"] = customers_collection().count_documents(
                 {
-                    "id": enriched["id"],
-                    "full_name": enriched["full_name"],
-                    "phone_number": enriched["phone_number"],
-                    "follow_up_date": active_follow_up_date,
-                    "follow_up_priority": enriched.get("follow_up_priority"),
-                    "follow_up_status_label": enriched.get("follow_up_status_label"),
-                    "lead_status": enriched.get("lead_status"),
-                    "relationship_category": enriched.get("relationship_category"),
+                    **scope_query,
+                    "$or": [
+                        {"relationship_category": {"$in": ["Gatekeeper", "gatekeeper"]}},
+                        {"network_value": {"$in": ["Industry Gatekeeper", "industry gatekeeper"]}},
+                    ],
                 }
             )
-
-    converted_leads = len(
-        [customer for customer in customer_documents if (customer.get("lead_status") or "").lower() == "converted"]
-    )
-    lead_conversion_rate = round((converted_leads / total_business_leads) * 100, 1) if total_business_leads else 0.0
-
-    seven_days_ago = today - timedelta(days=6)
-    month_start = today.replace(day=1)
-    trend_map = {
-        (seven_days_ago + timedelta(days=offset)).isoformat(): 0
-        for offset in range(7)
-    }
-    customers_by_creator_counter: Counter[str] = Counter()
-    customers_by_driver_counter: Counter[str] = Counter()
-    customers_by_source_counter: Counter[str] = Counter()
-    creator_lookup: dict[str, dict] = {}
-    driver_lookup: dict[str, dict] = {}
-    new_customers_this_week = 0
-    new_customers_this_month = 0
-    for customer_document in customer_documents:
-        created_at = _extract_datetime(customer_document.get("created_at"))
-        if not created_at:
-            continue
-        day_key = created_at.date().isoformat()
-        if day_key in trend_map:
-            trend_map[day_key] += 1
-        if created_at.date() >= seven_days_ago:
-            new_customers_this_week += 1
-        if created_at.date() >= month_start:
-            new_customers_this_month += 1
-        creator_name = _creator_display_name(customer_document)
-        creator_role = (customer_document.get("created_by_role") or "legacy").lower()
-        if current_role == "owner" or creator_role != "owner":
-            creator_key = f"{creator_role}:{creator_name}"
-            customers_by_creator_counter[creator_key] += 1
-            creator_lookup[creator_key] = {
-                "name": creator_name,
-                "role": creator_role,
-                "user_id": str(customer_document.get("created_by_user_id") or customer_document.get("created_by"))
-                if customer_document.get("created_by_user_id") or customer_document.get("created_by")
-                else None,
+            result["follow_ups_due_today"] = customers_collection().count_documents(
+                {
+                    **scope_query,
+                    "$or": [
+                        {"next_follow_up_date": today_iso},
+                        {"next_follow_up_date": None, "follow_up_date": today_iso},
+                    ],
+                }
+            )
+            result["follow_ups_overdue"] = customers_collection().count_documents(
+                {
+                    **scope_query,
+                    "$or": [
+                        {"next_follow_up_date": {"$lt": today_iso}},
+                        {"next_follow_up_date": None, "follow_up_date": {"$lt": today_iso}},
+                    ],
+                }
+            )
+            result["high_priority_follow_ups_due"] = customers_collection().count_documents(
+                {
+                    **scope_query,
+                    "follow_up_priority": "high",
+                    "$or": [
+                        {"next_follow_up_date": {"$lte": today_iso}},
+                        {"next_follow_up_date": None, "follow_up_date": {"$lte": today_iso}},
+                    ],
+                }
+            )
+            converted_leads = customers_collection().count_documents(
+                {**scope_query, "lead_status": {"$in": ["Converted", "converted"]}}
+            )
+            result["lead_conversion_rate"] = round(
+                (converted_leads / result["total_business_leads"]) * 100, 1
+            ) if result["total_business_leads"] else 0.0
+            result["customer_growth_trend"] = [
+                {
+                    "label": (today - timedelta(days=offset)).isoformat(),
+                    "value": customers_collection().count_documents(
+                        {
+                            **scope_query,
+                            "created_at": {
+                                "$gte": datetime.combine(today - timedelta(days=offset), datetime.min.time(), tzinfo=timezone.utc),
+                                "$lt": datetime.combine(today - timedelta(days=offset - 1), datetime.min.time(), tzinfo=timezone.utc)
+                                if offset > 0
+                                else datetime.combine(today + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc),
+                            },
+                        }
+                    ),
+                }
+                for offset in range(6, -1, -1)
+            ]
+            due_documents = list(
+                customers_collection().find(
+                    {
+                        **scope_query,
+                        "$or": [
+                            {"next_follow_up_date": {"$lte": today_iso}},
+                            {"next_follow_up_date": None, "follow_up_date": {"$lte": today_iso}},
+                        ],
+                    },
+                    {
+                        "full_name": 1,
+                        "phone_number": 1,
+                        "next_follow_up_date": 1,
+                        "follow_up_date": 1,
+                        "follow_up_priority": 1,
+                        "lead_status": 1,
+                        "relationship_category": 1,
+                    },
+                ).sort([("next_follow_up_date", ASCENDING), ("follow_up_date", ASCENDING)]).limit(10)
+            )
+            result["follow_up_due_customers"] = [
+                {
+                    "id": str(document["_id"]),
+                    "full_name": document.get("full_name"),
+                    "phone_number": document.get("phone_number"),
+                    "follow_up_date": document.get("next_follow_up_date") or document.get("follow_up_date"),
+                    "follow_up_priority": document.get("follow_up_priority"),
+                    "follow_up_status_label": "Follow-up due today"
+                    if (document.get("next_follow_up_date") or document.get("follow_up_date")) == today_iso
+                    else "Follow-up overdue",
+                    "lead_status": document.get("lead_status"),
+                    "relationship_category": document.get("relationship_category"),
+                }
+                for document in due_documents
+            ]
+            result["customers_by_source"] = [
+                {
+                    "source": item["_id"] or "other",
+                    "label": SOURCE_OPTIONS.get(item["_id"] or "other", "Other"),
+                    "count": item["count"],
+                }
+                for item in customers_collection().aggregate(
+                    [
+                        {"$match": scope_query},
+                        {"$group": {"_id": "$source", "count": {"$sum": 1}}},
+                        {"$sort": {"count": -1}},
+                    ]
+                )
+            ]
+            creator_groups = list(
+                customers_collection().aggregate(
+                    [
+                        {"$match": scope_query},
+                        {
+                            "$group": {
+                                "_id": {
+                                    "name": {"$ifNull": ["$created_by_name", "Unknown / Legacy Record"]},
+                                    "role": {"$ifNull": ["$created_by_role", "legacy"]},
+                                    "user_id": {"$ifNull": ["$created_by_user_id", "$created_by"]},
+                                },
+                                "count": {"$sum": 1},
+                            }
+                        },
+                        {"$sort": {"count": -1}},
+                    ]
+                )
+            )
+            result["customers_by_creator"] = [
+                {
+                    "creator_name": item["_id"]["name"],
+                    "creator_role": item["_id"]["role"],
+                    "creator_user_id": str(item["_id"]["user_id"]) if item["_id"].get("user_id") else None,
+                    "count": item["count"],
+                }
+                for item in creator_groups
+                if current_role == "owner" or item["_id"]["role"] != "owner"
+            ]
+            result["top_customer_generators"] = result["customers_by_creator"][:5]
+            driver_groups = list(
+                customers_collection().aggregate(
+                    [
+                        {"$match": scope_query},
+                        {"$group": {"_id": {"$ifNull": ["$assigned_driver_id", "$preferred_driver_id"]}, "count": {"$sum": 1}}},
+                        {"$match": {"_id": {"$ne": None}}},
+                        {"$sort": {"count": -1}},
+                    ]
+                )
+            )
+            driver_ids = [item["_id"] for item in driver_groups if isinstance(item["_id"], ObjectId)]
+            driver_lookup = {
+                str(driver["_id"]): serialize_user(driver)
+                for driver in users_collection().find({"_id": {"$in": driver_ids}})
+            } if driver_ids else {}
+            result["customers_by_driver"] = [
+                {
+                    "driver_id": str(item["_id"]),
+                    "driver_name": (driver_lookup.get(str(item["_id"])) or {}).get("full_name") or "Unknown Driver",
+                    "count": item["count"],
+                }
+                for item in driver_groups
+            ]
+            result["available_filters"] = {
+                "creator_roles": sorted(
+                    role for role in customers_collection().distinct("created_by_role", scope_query) if role
+                ),
+                "drivers": [
+                    serialize_user(driver)
+                    for driver in users_collection().find({"role": "driver", "status": "active"}).sort("full_name", ASCENDING)
+                ],
+                "customer_categories": [
+                    {"id": item["id"], "name": item["name"]}
+                    for item in get_active_master_data_items("customer_categories")
+                ],
+                "sources": [{"value": key, "label": value} for key, value in SOURCE_OPTIONS.items()],
             }
-        driver_object_id = customer_document.get("preferred_driver_id") or customer_document.get("created_by_driver_id")
-        if driver_object_id:
-            driver_key = str(driver_object_id)
-            customers_by_driver_counter[driver_key] += 1
-        source_key = (customer_document.get("source") or "other").lower()
-        customers_by_source_counter[source_key] += 1
+            log_db_duration("customers.summary.fast_counts", started_at)
+        else:
+            scoped_customer_documents = list(customers_collection().find(scope_query))
+            customer_documents = [
+                customer for customer in scoped_customer_documents if _customer_matches_filters(customer, filters=normalized_filters)
+            ]
+            result["available_filters"] = _customer_analytics_available_filters(scoped_customer_documents, current_role=current_role)
+            result["total_customers"] = len(customer_documents)
+            result["total_business_leads"] = len([customer for customer in customer_documents if customer.get("is_business_lead")])
+            result["total_strategic_contacts"] = len(
+                [customer for customer in customer_documents if (customer.get("opportunity_level") or "").lower() == "strategic"]
+            )
+            result["total_investors"] = len(
+                [customer for customer in customer_documents if (customer.get("relationship_category") or "").lower() == "investor"]
+            )
+            result["total_gatekeepers"] = len(
+                [
+                    customer
+                    for customer in customer_documents
+                    if (customer.get("relationship_category") or "").lower() == "gatekeeper"
+                    or (customer.get("network_value") or "").lower() == "industry gatekeeper"
+                ]
+            )
 
-    if customers_by_driver_counter:
-        for driver in users_collection().find({"_id": {"$in": [ObjectId(item) for item in customers_by_driver_counter.keys() if ObjectId.is_valid(item)]}}):
-            driver_lookup[str(driver["_id"])] = serialize_user(driver)
-
-    due_customers.sort(key=lambda item: (item["follow_up_date"], item["full_name"]))
-
-    result = {
-        "total_customers": len(customer_documents),
-        "new_customers_this_week": new_customers_this_week,
-        "new_customers_this_month": new_customers_this_month,
-        "total_business_leads": total_business_leads,
-        "total_strategic_contacts": total_strategic_contacts,
-        "total_investors": total_investors,
-        "total_gatekeepers": total_gatekeepers,
-        "follow_ups_due_today": follow_ups_due_today,
-        "follow_ups_overdue": follow_ups_overdue,
-        "high_priority_follow_ups_due": high_priority_due,
-        "lead_conversion_rate": lead_conversion_rate,
-        "follow_up_due_customers": due_customers[:10],
-        "customer_growth_trend": [
-            {"label": day_key, "value": value}
-            for day_key, value in trend_map.items()
-        ],
-        "customers_by_creator": [
-            {
-                "creator_name": creator_lookup[key]["name"],
-                "creator_role": creator_lookup[key]["role"],
-                "creator_user_id": creator_lookup[key]["user_id"],
-                "count": count,
-            }
-            for key, count in customers_by_creator_counter.most_common()
-        ],
-        "customers_by_driver": [
-            {
-                "driver_id": driver_id,
-                "driver_name": (driver_lookup.get(driver_id) or {}).get("full_name") or "Unknown Driver",
-                "count": count,
-            }
-            for driver_id, count in customers_by_driver_counter.most_common()
-        ],
-        "customers_by_source": [
-            {
-                "source": source,
-                "label": SOURCE_OPTIONS.get(source, "Other"),
-                "count": count,
-            }
-            for source, count in customers_by_source_counter.most_common()
-        ],
-        "top_customer_generators": [
-            {
-                "creator_name": creator_lookup[key]["name"],
-                "creator_role": creator_lookup[key]["role"],
-                "creator_user_id": creator_lookup[key]["user_id"],
-                "count": count,
-            }
-            for key, count in customers_by_creator_counter.most_common(5)
-        ],
-        "available_filters": _customer_analytics_available_filters(scoped_customer_documents, current_role=current_role),
-        "applied_filters": {
+        current_app.logger.info(
+            "[Flux Section] section=customer_summary endpoint=/api/customers/summary duration_ms=%.2f success=true records_count=%s",
+            (perf_counter() - request_started_at) * 1000,
+            result["total_customers"],
+        )
+    except Exception:
+        current_app.logger.exception(
+            "[Flux Section] section=customer_summary endpoint=/api/customers/summary success=false"
+        )
+        result = _empty_customer_summary()
+        result["applied_filters"] = {
             "date_from": normalized_filters["date_from"].isoformat() if normalized_filters["date_from"] else None,
             "date_to": normalized_filters["date_to"].isoformat() if normalized_filters["date_to"] else None,
             "creator_role": normalized_filters["creator_role"],
             "driver_id": str(normalized_filters["driver_id"]) if normalized_filters["driver_id"] else None,
             "customer_category_id": str(normalized_filters["customer_category_id"]) if normalized_filters["customer_category_id"] else None,
             "source": normalized_filters["source"],
-        },
-    }
-    return set_ttl_cached(cache_key, result, ttl_seconds=15)
+        }
+
+    total_duration_ms = (perf_counter() - request_started_at) * 1000
+    if total_duration_ms > 2000:
+        current_app.logger.warning(
+            "SLOW API WARNING endpoint=/api/customers/summary role=%s duration_ms=%.2f",
+            current_role,
+            total_duration_ms,
+        )
+    return set_ttl_cached(cache_key, result, ttl_seconds=30)
 
 
 def create_customer(payload: dict, current_user_id: str, current_role: str) -> dict:

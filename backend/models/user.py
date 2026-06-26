@@ -7,8 +7,14 @@ def _serialize_reference_id(value):
     return value
 
 
+def _normalize_role(value):
+    if value is None:
+        return None
+    return str(value).strip().lower() or None
+
+
 def serialize_driver_profile(user_document: dict) -> dict | None:
-    if user_document.get("role") != "driver":
+    if _normalize_role(user_document.get("role")) != "driver":
         return None
 
     driver_profile = user_document.get("driver_profile") or {}
@@ -46,7 +52,7 @@ def serialize_user(user_document: dict) -> dict:
         "full_name": user_document.get("full_name"),
         "email": user_document.get("email"),
         "phone": user_document.get("phone"),
-        "role": user_document.get("role"),
+        "role": _normalize_role(user_document.get("role")),
         "status": user_document.get("status"),
         "last_login": user_document.get("last_login").isoformat() if user_document.get("last_login") else None,
         "created_at": user_document.get("created_at").isoformat() if user_document.get("created_at") else None,

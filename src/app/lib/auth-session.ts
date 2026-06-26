@@ -14,9 +14,26 @@ export interface SessionUser {
   full_name: string;
   email: string;
   phone: string;
-  role: SessionUserRole;
+  role: SessionUserRole | string;
   status: SessionAccountStatus | string;
   driver_profile?: SessionDriverProfile | null;
+}
+
+function normalizeSessionUserRole(role: string | null | undefined): SessionUserRole | null {
+  const normalized = String(role || '').trim().toLowerCase();
+  if (normalized === 'admin' || normalized === 'driver' || normalized === 'owner') {
+    return normalized;
+  }
+  return null;
+}
+
+function normalizeSessionUser(user: SessionUser): SessionUser {
+  const normalizedRole = normalizeSessionUserRole(user.role);
+  return {
+    ...user,
+    role: normalizedRole || user.role,
+    status: String(user.status || '').trim().toLowerCase() || 'inactive',
+  };
 }
 
 interface AuthMeResponse {
@@ -34,14 +51,15 @@ export function getStoredSessionUser(): SessionUser | null {
   }
 
   try {
-    return JSON.parse(storedUser) as SessionUser;
+    const parsedUser = normalizeSessionUser(JSON.parse(storedUser) as SessionUser);
+    return normalizeSessionUserRole(parsedUser.role) ? (parsedUser as SessionUser) : null;
   } catch {
     return null;
   }
 }
 
 export function setStoredSessionUser(user: SessionUser) {
-  localStorage.setItem('flux_user', JSON.stringify(user));
+  localStorage.setItem('flux_user', JSON.stringify(normalizeSessionUser(user)));
 }
 
 export function clearStoredSession() {
@@ -51,9 +69,12 @@ export function clearStoredSession() {
 
 export async function fetchAuthenticatedUser(): Promise<SessionUser> {
   const response = await apiRequest<AuthMeResponse>('/auth/me');
-  const user = response.data.user;
+  const user = normalizeSessionUser(response.data.user);
+  if (!normalizeSessionUserRole(user.role)) {
+    throw new Error('Invalid session role.');
+  }
   setStoredSessionUser(user);
-  return user;
+  return user as SessionUser;
 }
 
 export function getUserInitials(fullName: string) {

@@ -57,6 +57,7 @@ interface ReportsResponse {
       driver_id: string | null;
       vehicle_id: string | null;
       branch: string | null;
+      asset_owner_name?: string | null;
       creator_role?: string | null;
       customer_category_id?: string | null;
       source?: string | null;
@@ -64,6 +65,7 @@ interface ReportsResponse {
     available_filters: {
       drivers: UserSummary[];
       vehicles: VehicleOption[];
+      asset_owners?: string[];
       branches: string[];
       creator_roles?: string[];
       customer_categories?: string[];
@@ -88,15 +90,38 @@ interface ReportsResponse {
       vehicle_economics: {
         validation: ValidationSummary;
         message?: string;
+        total_managed_fleet?: number;
+        total_active_vehicles?: number;
+        total_managed_fleet_value?: number;
         total_fleet_investment?: number;
         total_recovered?: number;
         remaining_recovery_balance?: number;
         net_fleet_profit?: number;
+        portfolio_breakdown?: Array<{
+          asset_owner_name: string;
+          asset_owner_type?: string | null;
+          vehicle_count: number;
+          fleet_value: number;
+          capital_basis_for_recovery: number;
+          capital_recovered: number;
+          outstanding_capital: number;
+          revenue_generated: number;
+          net_profit: number;
+          roi_percent: number;
+        }>;
         vehicles?: Array<{
           id: string;
           registration_number: string;
+          operating_fleet_name?: string;
+          asset_owner_name?: string | null;
+          asset_owner_type?: string | null;
+          status?: string | null;
           economics?: {
-            investment?: { total_vehicle_investment?: number };
+            investment?: {
+              total_vehicle_investment?: number;
+              current_estimated_value?: number;
+              capital_basis_for_recovery?: number;
+            };
             recovery?: {
               amount_recovered?: number;
               remaining_balance?: number;
@@ -244,6 +269,7 @@ export default function Reports() {
   const [selectedDriverId, setSelectedDriverId] = useState('');
   const [selectedVehicleId, setSelectedVehicleId] = useState('');
   const [selectedBranch, setSelectedBranch] = useState('');
+  const [selectedAssetOwnerName, setSelectedAssetOwnerName] = useState('');
   const [selectedCreatorRole, setSelectedCreatorRole] = useState('');
   const [selectedCustomerCategoryId, setSelectedCustomerCategoryId] = useState('');
   const [selectedSource, setSelectedSource] = useState('');
@@ -274,6 +300,7 @@ export default function Reports() {
       if (selectedDriverId) params.set('driver_id', selectedDriverId);
       if (selectedVehicleId) params.set('vehicle_id', selectedVehicleId);
       if (selectedBranch) params.set('branch', selectedBranch);
+      if (selectedAssetOwnerName) params.set('asset_owner_name', selectedAssetOwnerName);
       if (selectedCreatorRole) params.set('creator_role', selectedCreatorRole);
       if (selectedCustomerCategoryId) params.set('customer_category_id', selectedCustomerCategoryId);
       if (selectedSource) params.set('source', selectedSource);
@@ -300,7 +327,7 @@ export default function Reports() {
     };
 
     void loadReportData();
-  }, [activeCategory, currentRole, dateRange, selectedDriverId, selectedVehicleId, selectedBranch, selectedCreatorRole, selectedCustomerCategoryId, selectedSource, refreshKey]);
+  }, [activeCategory, currentRole, dateRange, selectedDriverId, selectedVehicleId, selectedBranch, selectedAssetOwnerName, selectedCreatorRole, selectedCustomerCategoryId, selectedSource, refreshKey]);
 
   const reports = useMemo(() => {
     const source = reportData?.reports;
@@ -369,6 +396,11 @@ export default function Reports() {
           remaining_balance: item.economics?.recovery?.remaining_balance || 0,
           recovery_percentage: item.economics?.recovery?.recovery_percentage || 0,
           recovery_status: item.economics?.recovery?.recovery_status || item.economics?.recovery?.status || 'Restricted',
+          operating_fleet_name: item.operating_fleet_name || 'Flux Fleet Ops',
+          asset_owner_name: item.asset_owner_name || 'Unspecified Owner',
+          asset_owner_type: item.asset_owner_type || 'Unspecified',
+          current_estimated_value: item.economics?.investment?.current_estimated_value || 0,
+          capital_basis_for_recovery: item.economics?.investment?.capital_basis_for_recovery || 0,
           company_vehicle_costs: item.economics?.profitability?.company_vehicle_costs || 0,
           net_profit: item.economics?.profitability?.net_profit || 0,
           break_even_forecast: item.economics?.recovery?.estimated_break_even_date || 'N/A',
@@ -527,6 +559,25 @@ export default function Reports() {
             ))}
           </select>
         </div>
+        {activeCategory === 'vehicles' && (
+          <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+            <select
+              value={selectedAssetOwnerName}
+              onChange={(event) => setSelectedAssetOwnerName(event.target.value)}
+              className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm text-gray-700"
+            >
+              <option value="">All Asset Owners</option>
+              {(reportData?.available_filters.asset_owners || []).map((owner) => (
+                <option key={owner} value={owner}>
+                  {owner}
+                </option>
+              ))}
+            </select>
+            <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
+              Filter the portfolio by asset owner while keeping operational vehicle totals under one managed fleet view.
+            </div>
+          </div>
+        )}
         {activeCategory === 'customers' && (
           <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
             <select
@@ -709,11 +760,30 @@ export default function Reports() {
               />
 
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                <MetricCard label="Managed Fleet" value={(reports.vehicle_economics.total_managed_fleet || 0).toLocaleString()} icon={Truck} />
+                <MetricCard label="Active Vehicles" value={(reports.vehicle_economics.total_active_vehicles || 0).toLocaleString()} icon={Target} />
+                <MetricCard label="Fleet Value" value={formatCurrency(reports.vehicle_economics.total_managed_fleet_value || 0)} icon={RefreshCw} />
                 <MetricCard label="Fleet Investment" value={formatCurrency(reports.vehicle_economics.total_fleet_investment || 0)} icon={DollarSign} />
                 <MetricCard label="Recovered" value={formatCurrency(reports.vehicle_economics.total_recovered || 0)} icon={Target} />
                 <MetricCard label="Remaining Balance" value={formatCurrency(reports.vehicle_economics.remaining_recovery_balance || 0)} icon={RefreshCw} />
                 <MetricCard label="Net Fleet Profit" value={formatCurrency(reports.vehicle_economics.net_fleet_profit || 0)} icon={Truck} />
               </div>
+
+              <SectionHeader title="Fleet Portfolio Breakdown" validation={reports.vehicle_economics.validation} />
+              <ReportTable
+                emptyMessage="No records found for this filter."
+                columns={['Asset Owner', 'Ownership Type', 'Vehicles', 'Fleet Value', 'Capital Basis', 'Capital Recovered', 'Outstanding Capital', 'ROI']}
+                rows={(reports.vehicle_economics.portfolio_breakdown || []).map((entry) => [
+                  entry.asset_owner_name || 'Unspecified Owner',
+                  entry.asset_owner_type || 'Unspecified',
+                  `${entry.vehicle_count || 0}`,
+                  formatCurrency(entry.fleet_value || 0),
+                  formatCurrency(entry.capital_basis_for_recovery || 0),
+                  formatCurrency(entry.capital_recovered || 0),
+                  formatCurrency(entry.outstanding_capital || 0),
+                  `${entry.roi_percent || 0}%`,
+                ])}
+              />
 
               <SectionHeader
                 title="Vehicle Economics Report"
@@ -722,10 +792,14 @@ export default function Reports() {
               />
               <ReportTable
                 emptyMessage="No records found for this filter."
-                columns={['Vehicle', 'Total Investment', 'Amount Recovered', 'Remaining Balance', 'Recovery %', 'Recovery Status', 'Company Vehicle Costs', 'Net Vehicle Profit', 'Break-Even Forecast']}
+                columns={['Vehicle', 'Operating Fleet', 'Asset Owner', 'Ownership Type', 'Fleet Value', 'Capital Basis', 'Amount Recovered', 'Remaining Balance', 'Recovery %', 'Recovery Status', 'Company Vehicle Costs', 'Net Vehicle Profit', 'Break-Even Forecast']}
                 rows={(reports.vehicle_economics.vehicles || []).map((vehicle) => [
                   vehicle.registration_number || 'Unknown Vehicle',
-                  formatCurrency(vehicle.economics?.investment?.total_vehicle_investment || 0),
+                  vehicle.operating_fleet_name || 'Flux Fleet Ops',
+                  vehicle.asset_owner_name || 'Unspecified Owner',
+                  vehicle.asset_owner_type || 'Unspecified',
+                  formatCurrency(vehicle.economics?.investment?.current_estimated_value || 0),
+                  formatCurrency(vehicle.economics?.investment?.capital_basis_for_recovery || 0),
                   formatCurrency(vehicle.economics?.recovery?.amount_recovered || 0),
                   formatCurrency(vehicle.economics?.recovery?.remaining_balance || 0),
                   `${vehicle.economics?.recovery?.recovery_percentage || 0}%`,

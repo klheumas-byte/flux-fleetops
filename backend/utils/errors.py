@@ -28,7 +28,11 @@ def register_error_handlers(app: Flask) -> None:
     @app.errorhandler(PyMongoError)
     def handle_mongo_error(error: PyMongoError):
         current_app.logger.exception("[Flux API] Unhandled MongoDB error: %s", error)
-        return error_response("A database error occurred.", status_code=500)
+        return error_response(
+            "A database error occurred.",
+            status_code=503,
+            public_message="Service is temporarily unavailable. Please try again.",
+        )
 
     @app.errorhandler(Exception)
     def handle_unexpected_error(error: Exception):

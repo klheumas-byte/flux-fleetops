@@ -9,6 +9,7 @@ def _serialize_reference_id(value):
 
 def serialize_vehicle(vehicle_document: dict, *, include_sensitive: bool = True) -> dict:
     insurance_profile = vehicle_document.get("insurance_profile") or {}
+    asset_owner_contact = vehicle_document.get("asset_owner_contact") or {}
     data = {
         "id": str(vehicle_document.get("_id")),
         "registration_number": vehicle_document.get("registration_number"),
@@ -41,6 +42,7 @@ def serialize_vehicle(vehicle_document: dict, *, include_sensitive: bool = True)
         "default_weekly_target": vehicle_document.get("default_weekly_target"),
         "default_daily_target": vehicle_document.get("default_daily_target"),
         "current_odometer": vehicle_document.get("current_odometer"),
+        "operating_fleet_name": vehicle_document.get("operating_fleet_name") or "Flux Fleet Ops",
         "vehicle_cost_items": vehicle_document.get("vehicle_cost_items") or [],
         "economics": vehicle_document.get("economics"),
         "status": vehicle_document.get("status"),
@@ -56,6 +58,23 @@ def serialize_vehicle(vehicle_document: dict, *, include_sensitive: bool = True)
         else None,
     }
     if include_sensitive:
+        data["asset_owner_type"] = vehicle_document.get("asset_owner_type") or "Axelera Owned"
+        data["asset_owner_name"] = vehicle_document.get("asset_owner_name") or "Axelera"
+        data["asset_owner_contact"] = {
+            "phone": asset_owner_contact.get("phone"),
+            "email": asset_owner_contact.get("email"),
+            "address": asset_owner_contact.get("address"),
+        }
+        data["ownership_notes"] = vehicle_document.get("ownership_notes")
+        data["ownership_start_date"] = vehicle_document.get("ownership_start_date")
+        data["recovery_basis_type"] = vehicle_document.get("recovery_basis_type")
+        data["original_purchase_price"] = vehicle_document.get("original_purchase_price")
+        data["original_purchase_date"] = vehicle_document.get("original_purchase_date")
+        data["current_estimated_value"] = vehicle_document.get("current_estimated_value")
+        data["custom_recovery_value"] = vehicle_document.get("custom_recovery_value")
+        data["capital_basis_for_recovery"] = vehicle_document.get("capital_basis_for_recovery")
+        data["capital_recovery_tracking_enabled"] = vehicle_document.get("capital_recovery_tracking_enabled")
+        data["ownership_history"] = vehicle_document.get("ownership_history") or []
         data["purchase_cost"] = vehicle_document.get("purchase_cost")
         data["insurance_cost"] = vehicle_document.get("insurance_cost")
         data["roadworthy_cost"] = vehicle_document.get("roadworthy_cost")

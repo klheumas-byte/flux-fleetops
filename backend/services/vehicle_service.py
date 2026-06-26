@@ -5,6 +5,7 @@ from time import perf_counter
 from bson import ObjectId
 from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import DuplicateKeyError
+from uuid import uuid4
 
 from extensions import get_collection
 from models.user import serialize_user
@@ -22,6 +23,20 @@ ALLOWED_VEHICLE_TYPES = {"saloon", "suv", "pickup", "van", "truck", "motorcycle"
 ALLOWED_TRANSMISSIONS = {"manual", "automatic"}
 ALLOWED_FUEL_TYPES = {"petrol", "diesel", "hybrid", "electric"}
 ALLOWED_INSURANCE_TYPES = {"Third Party", "Comprehensive"}
+ALLOWED_ASSET_OWNER_TYPES = {
+    "Axelera Owned",
+    "Existing Company Asset",
+    "Managed Third-Party Vehicle",
+    "Investor-Funded Vehicle",
+    "Leased Vehicle",
+    "Partner Vehicle",
+}
+ALLOWED_RECOVERY_BASIS_TYPES = {
+    "Original Purchase Cost",
+    "Current Estimated Value",
+    "Custom Recovery Value",
+    "Transfer Value",
+}
 ALLOWED_VEHICLE_STATUSES = {
     "available",
     "assigned",
@@ -72,6 +87,9 @@ INVESTMENT_COST_FIELDS = [
     "registration_cost",
     "other_setup_cost",
 ]
+DEFAULT_OPERATING_FLEET_NAME = "Flux Fleet Ops"
+DEFAULT_ASSET_OWNER_TYPE = "Axelera Owned"
+DEFAULT_ASSET_OWNER_NAME = "Axelera"
 
 
 def now_utc():
@@ -88,6 +106,10 @@ def users_collection():
 
 def vehicle_cost_items_collection():
     return get_collection("vehicle_cost_items")
+
+
+def ownership_history_collection():
+    return get_collection("vehicle_ownership_history")
 
 
 def collections_collection():
@@ -127,12 +149,16 @@ def ensure_vehicle_indexes():
             {"keys": [("engine_number", ASCENDING)], "options": {"unique": True, "sparse": True}},
             {"keys": [("status", ASCENDING)]},
             {"keys": [("assigned_driver_id", ASCENDING)], "options": {"sparse": True}},
+            {"keys": [("asset_owner_name", ASCENDING)], "options": {"sparse": True}},
+            {"keys": [("asset_owner_type", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("created_at", DESCENDING)]},
             {"keys": [("updated_at", DESCENDING)]},
             {"keys": [("assigned_driver_id", ASCENDING), ("created_at", DESCENDING)]},
             {"keys": [("assigned_driver_id", ASCENDING), ("updated_at", DESCENDING)]},
             {"keys": [("status", ASCENDING), ("created_at", DESCENDING)]},
             {"keys": [("status", ASCENDING), ("updated_at", DESCENDING)]},
+            {"keys": [("asset_owner_name", ASCENDING), ("status", ASCENDING)], "options": {"sparse": True}},
+            {"keys": [("asset_owner_type", ASCENDING), ("status", ASCENDING)], "options": {"sparse": True}},
         ],
         collection_name="vehicles",
     )
@@ -144,6 +170,19 @@ def ensure_vehicle_indexes():
             {"keys": [("vehicle_id", ASCENDING), ("created_at", DESCENDING)]},
         ],
         collection_name="vehicle_cost_items",
+    )
+    ensure_indexes_for_collection(
+        ownership_history_collection(),
+        [
+            {"keys": [("vehicle_id", ASCENDING)]},
+            {"keys": [("effective_date", DESCENDING)]},
+            {"keys": [("current_record", ASCENDING)]},
+            {"keys": [("asset_owner_name", ASCENDING)]},
+            {"keys": [("asset_owner_type", ASCENDING)]},
+            {"keys": [("created_at", DESCENDING)]},
+            {"keys": [("vehicle_id", ASCENDING), ("effective_date", DESCENDING)]},
+        ],
+        collection_name="vehicle_ownership_history",
     )
 
 
@@ -176,6 +215,14 @@ def validate_integer(value, field_name: str, *, positive: bool = False):
         raise ApiError(f"{field_name} must be an integer.", status_code=400)
     if positive and value <= 0:
         raise ApiError(f"{field_name} must be a positive integer.", status_code=400)
+    return value
+
+
+def validate_boolean(value, field_name: str):
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise ApiError(f"{field_name} must be true or false.", status_code=400)
     return value
 
 
@@ -299,6 +346,7 @@ def _serialize_cost_item(document: dict) -> dict:
 
 
 def _serialize_vehicle_list_item(vehicle_document: dict, assigned_driver_details: dict | None = None) -> dict:
+    _apply_vehicle_ownership_defaults(vehicle_document)
     return {
         "id": str(vehicle_document.get("_id")),
         "registration_number": vehicle_document.get("registration_number"),
@@ -316,6 +364,9 @@ def _serialize_vehicle_list_item(vehicle_document: dict, assigned_driver_details
         "roadworthy_expiry": vehicle_document.get("roadworthy_expiry"),
         "default_weekly_target": vehicle_document.get("default_weekly_target"),
         "default_daily_target": vehicle_document.get("default_daily_target"),
+        "operating_fleet_name": vehicle_document.get("operating_fleet_name"),
+        "asset_owner_type": vehicle_document.get("asset_owner_type"),
+        "asset_owner_name": vehicle_document.get("asset_owner_name"),
         "status": vehicle_document.get("status"),
         "assigned_driver_id": str(vehicle_document.get("assigned_driver_id")) if vehicle_document.get("assigned_driver_id") else None,
         "assigned_driver_details": assigned_driver_details,
@@ -345,6 +396,19 @@ def _vehicle_detail_projection() -> dict:
         "default_weekly_target": 1,
         "default_daily_target": 1,
         "current_odometer": 1,
+        "operating_fleet_name": 1,
+        "asset_owner_type": 1,
+        "asset_owner_name": 1,
+        "asset_owner_contact": 1,
+        "ownership_notes": 1,
+        "ownership_start_date": 1,
+        "recovery_basis_type": 1,
+        "original_purchase_price": 1,
+        "original_purchase_date": 1,
+        "current_estimated_value": 1,
+        "custom_recovery_value": 1,
+        "capital_basis_for_recovery": 1,
+        "capital_recovery_tracking_enabled": 1,
         "status": 1,
         "assigned_driver_id": 1,
         "created_by": 1,
@@ -428,6 +492,239 @@ def _normalize_risk_list(values):
         if label:
             normalized.append(label)
     return normalized
+
+
+def _normalize_asset_owner_contact(payload: dict, existing_contact: dict | None = None) -> dict:
+    existing = existing_contact or {}
+    return {
+        "phone": normalize_string(payload.get("asset_owner_phone"))
+        if "asset_owner_phone" in payload
+        else existing.get("phone"),
+        "email": normalize_string(payload.get("asset_owner_email"))
+        if "asset_owner_email" in payload
+        else existing.get("email"),
+        "address": normalize_string(payload.get("asset_owner_address"))
+        if "asset_owner_address" in payload
+        else existing.get("address"),
+    }
+
+
+def _ownership_summary_from_vehicle(vehicle_document: dict) -> dict:
+    return {
+        "operating_fleet_name": vehicle_document.get("operating_fleet_name") or DEFAULT_OPERATING_FLEET_NAME,
+        "asset_owner_type": vehicle_document.get("asset_owner_type") or DEFAULT_ASSET_OWNER_TYPE,
+        "asset_owner_name": vehicle_document.get("asset_owner_name") or DEFAULT_ASSET_OWNER_NAME,
+        "ownership_start_date": vehicle_document.get("ownership_start_date"),
+        "recovery_basis_type": vehicle_document.get("recovery_basis_type") or "Original Purchase Cost",
+        "capital_basis_for_recovery": _safe_float(vehicle_document.get("capital_basis_for_recovery")),
+    }
+
+
+def _serialize_ownership_history_entry(document: dict) -> dict:
+    return {
+        "id": str(document.get("_id")) if document.get("_id") else str(document.get("id") or uuid4()),
+        "vehicle_id": str(document.get("vehicle_id")) if document.get("vehicle_id") else None,
+        "previous_owner": document.get("previous_owner"),
+        "new_owner": document.get("new_owner"),
+        "ownership_type": document.get("ownership_type"),
+        "transfer_date": document.get("transfer_date"),
+        "effective_date": document.get("effective_date"),
+        "transfer_value": _safe_float(document.get("transfer_value")),
+        "previous_recovery_balance": _safe_float(document.get("previous_recovery_balance")),
+        "new_capital_basis": _safe_float(document.get("new_capital_basis")),
+        "recovery_basis_type": document.get("recovery_basis_type"),
+        "transfer_reason": document.get("transfer_reason"),
+        "notes": document.get("notes"),
+        "approved_by": str(document.get("approved_by")) if document.get("approved_by") else None,
+        "current_record": bool(document.get("current_record")),
+        "created_at": document.get("created_at").isoformat() if isinstance(document.get("created_at"), datetime) else document.get("created_at"),
+    }
+
+
+def _setup_cost_adjustment_total(vehicle_document: dict, custom_cost_total: float) -> float:
+    purchase_cost = _safe_float(vehicle_document.get("purchase_cost"))
+    setup_total = sum(_safe_float(vehicle_document.get(field)) for field in INVESTMENT_COST_FIELDS if field != "purchase_cost")
+    return round(setup_total + custom_cost_total, 2), purchase_cost
+
+
+def _default_recovery_basis_type(asset_owner_type: str | None, existing_value: str | None = None) -> str:
+    if existing_value in ALLOWED_RECOVERY_BASIS_TYPES:
+        return existing_value
+    if asset_owner_type in {"Existing Company Asset", "Managed Third-Party Vehicle"}:
+        return "Current Estimated Value"
+    if asset_owner_type in {"Partner Vehicle", "Leased Vehicle"}:
+        return "Custom Recovery Value"
+    return "Original Purchase Cost"
+
+
+def _calculate_capital_basis_for_vehicle(vehicle_document: dict, *, custom_cost_total: float) -> float:
+    asset_owner_type = normalize_string(vehicle_document.get("asset_owner_type")) or DEFAULT_ASSET_OWNER_TYPE
+    recovery_basis_type = normalize_string(vehicle_document.get("recovery_basis_type")) or _default_recovery_basis_type(asset_owner_type)
+    capital_recovery_tracking_enabled = bool(vehicle_document.get("capital_recovery_tracking_enabled"))
+
+    total_vehicle_investment = round(sum(_safe_float(vehicle_document.get(field)) for field in INVESTMENT_COST_FIELDS) + custom_cost_total, 2)
+    setup_adjustments_total, purchase_cost = _setup_cost_adjustment_total(vehicle_document, custom_cost_total)
+    original_purchase_price = _safe_float(vehicle_document.get("original_purchase_price"))
+    current_estimated_value = _safe_float(vehicle_document.get("current_estimated_value"))
+    custom_recovery_value = _safe_float(vehicle_document.get("custom_recovery_value"))
+    manual_capital_basis = _safe_float(vehicle_document.get("capital_basis_for_recovery"))
+
+    if asset_owner_type == "Leased Vehicle" and not capital_recovery_tracking_enabled:
+        return 0.0
+
+    if recovery_basis_type == "Current Estimated Value":
+        return current_estimated_value
+    if recovery_basis_type == "Custom Recovery Value":
+        return custom_recovery_value
+    if recovery_basis_type == "Transfer Value":
+        return manual_capital_basis or custom_recovery_value
+
+    if asset_owner_type == "Axelera Owned":
+        return custom_recovery_value if custom_recovery_value > 0 else total_vehicle_investment
+    if asset_owner_type == "Existing Company Asset":
+        return round(current_estimated_value + setup_adjustments_total, 2)
+    if asset_owner_type == "Managed Third-Party Vehicle":
+        return custom_recovery_value if custom_recovery_value > 0 else current_estimated_value
+    if asset_owner_type == "Investor-Funded Vehicle":
+        return custom_recovery_value if custom_recovery_value > 0 else max(total_vehicle_investment, original_purchase_price)
+    if asset_owner_type == "Partner Vehicle":
+        return custom_recovery_value if custom_recovery_value > 0 else current_estimated_value
+    return original_purchase_price if original_purchase_price > 0 else total_vehicle_investment
+
+
+def _apply_vehicle_ownership_defaults(vehicle_document: dict) -> dict:
+    vehicle_document["operating_fleet_name"] = vehicle_document.get("operating_fleet_name") or DEFAULT_OPERATING_FLEET_NAME
+    vehicle_document["asset_owner_type"] = vehicle_document.get("asset_owner_type") or DEFAULT_ASSET_OWNER_TYPE
+    vehicle_document["asset_owner_name"] = vehicle_document.get("asset_owner_name") or DEFAULT_ASSET_OWNER_NAME
+    vehicle_document["asset_owner_contact"] = vehicle_document.get("asset_owner_contact") or {
+        "phone": None,
+        "email": None,
+        "address": None,
+    }
+    vehicle_document["ownership_start_date"] = vehicle_document.get("ownership_start_date") or (
+        vehicle_document.get("created_at").date().isoformat()
+        if isinstance(vehicle_document.get("created_at"), datetime)
+        else now_utc().date().isoformat()
+    )
+    vehicle_document["recovery_basis_type"] = _default_recovery_basis_type(
+        vehicle_document.get("asset_owner_type"),
+        vehicle_document.get("recovery_basis_type"),
+    )
+    vehicle_document["capital_recovery_tracking_enabled"] = bool(
+        vehicle_document.get("capital_recovery_tracking_enabled", vehicle_document.get("asset_owner_type") != "Leased Vehicle")
+    )
+    return vehicle_document
+
+
+def _build_current_ownership_history_record(vehicle_document: dict, *, approved_by: ObjectId | str | None = None, previous_owner: str | None = None, transfer_reason: str | None = None, notes: str | None = None, transfer_value: float | None = None, previous_recovery_balance: float | None = None) -> dict:
+    return {
+        "vehicle_id": vehicle_document["_id"],
+        "previous_owner": previous_owner,
+        "new_owner": vehicle_document.get("asset_owner_name") or DEFAULT_ASSET_OWNER_NAME,
+        "ownership_type": vehicle_document.get("asset_owner_type") or DEFAULT_ASSET_OWNER_TYPE,
+        "transfer_date": vehicle_document.get("ownership_start_date"),
+        "effective_date": vehicle_document.get("ownership_start_date"),
+        "transfer_value": transfer_value,
+        "previous_recovery_balance": previous_recovery_balance,
+        "new_capital_basis": _safe_float(vehicle_document.get("capital_basis_for_recovery")),
+        "recovery_basis_type": vehicle_document.get("recovery_basis_type"),
+        "transfer_reason": transfer_reason or "Initial ownership record",
+        "notes": notes or vehicle_document.get("ownership_notes"),
+        "approved_by": approved_by,
+        "current_record": True,
+        "created_at": now_utc(),
+    }
+
+
+def _ensure_vehicle_ownership_history(vehicle_document: dict, *, approved_by: ObjectId | str | None = None):
+    existing = ownership_history_collection().find_one({"vehicle_id": vehicle_document["_id"], "current_record": True})
+    if existing:
+        return
+    ownership_history_collection().insert_one(
+        _build_current_ownership_history_record(vehicle_document, approved_by=approved_by)
+    )
+
+
+def list_vehicle_ownership_history(vehicle_id: str) -> list[dict]:
+    vehicle = get_vehicle_document_by_id(vehicle_id)
+    _apply_vehicle_ownership_defaults(vehicle)
+    _ensure_vehicle_ownership_history(vehicle)
+    documents = list(
+        ownership_history_collection()
+        .find({"vehicle_id": vehicle["_id"]})
+        .sort([("effective_date", DESCENDING), ("created_at", DESCENDING)])
+    )
+    return [_serialize_ownership_history_entry(document) for document in documents]
+
+
+def transfer_vehicle_ownership(vehicle_id: str, payload: dict, *, current_user_id: str, current_role: str) -> dict:
+    if current_role not in {"owner", "admin"}:
+        raise ApiError("You do not have permission to transfer vehicle ownership.", status_code=403)
+
+    vehicle = get_vehicle_document_by_id(vehicle_id)
+    _apply_vehicle_ownership_defaults(vehicle)
+    existing_economics = _calculate_vehicle_economics(vehicle)
+    previous_owner = vehicle.get("asset_owner_name") or DEFAULT_ASSET_OWNER_NAME
+    previous_recovery_balance = _safe_float((existing_economics.get("recovery") or {}).get("remaining_balance"))
+
+    new_owner_name = normalize_string(payload.get("asset_owner_name"))
+    new_owner_type = normalize_string(payload.get("asset_owner_type"))
+    if new_owner_type not in ALLOWED_ASSET_OWNER_TYPES:
+        raise ApiError("Please choose a valid ownership type.", status_code=400)
+    if not new_owner_name:
+        raise ApiError("Please provide the new asset owner name.", status_code=400)
+
+    transfer_date = normalize_string(payload.get("transfer_date"))
+    effective_date = normalize_string(payload.get("effective_date"))
+    if not transfer_date or not effective_date:
+        raise ApiError("Please provide transfer date and effective date.", status_code=400)
+
+    transfer_payload = {
+        "asset_owner_type": new_owner_type,
+        "asset_owner_name": new_owner_name,
+        "asset_owner_phone": payload.get("asset_owner_phone"),
+        "asset_owner_email": payload.get("asset_owner_email"),
+        "asset_owner_address": payload.get("asset_owner_address"),
+        "ownership_notes": normalize_string(payload.get("notes")),
+        "ownership_start_date": effective_date,
+        "recovery_basis_type": payload.get("recovery_basis_type"),
+        "current_estimated_value": payload.get("current_estimated_value"),
+        "custom_recovery_value": payload.get("custom_recovery_value"),
+        "capital_recovery_tracking_enabled": payload.get("capital_recovery_tracking_enabled"),
+    }
+    normalized_transfer = normalize_vehicle_payload(
+        transfer_payload,
+        partial=True,
+        vehicle_id=vehicle["_id"],
+        existing_insurance_profile=vehicle.get("insurance_profile") or {},
+        existing_asset_owner_contact=vehicle.get("asset_owner_contact") or {},
+    )
+    timestamp = now_utc()
+    normalized_transfer["updated_at"] = timestamp
+    normalized_transfer["updated_by"] = ObjectId(current_user_id) if ObjectId.is_valid(current_user_id) else current_user_id
+    vehicles_collection().update_one({"_id": vehicle["_id"]}, {"$set": normalized_transfer})
+    vehicle.update(normalized_transfer)
+    vehicle["economics"] = _calculate_vehicle_economics(vehicle)
+    vehicle["vehicle_cost_items"] = vehicle["economics"].get("vehicle_cost_items", [])
+
+    ownership_history_collection().update_many(
+        {"vehicle_id": vehicle["_id"], "current_record": True},
+        {"$set": {"current_record": False}},
+    )
+    transfer_value = _safe_float(payload.get("transfer_value"))
+    history_entry = _build_current_ownership_history_record(
+        vehicle,
+        approved_by=ObjectId(current_user_id) if ObjectId.is_valid(current_user_id) else current_user_id,
+        previous_owner=previous_owner,
+        transfer_reason=normalize_string(payload.get("reason")) or "Ownership transfer",
+        notes=normalize_string(payload.get("notes")),
+        transfer_value=transfer_value,
+        previous_recovery_balance=previous_recovery_balance,
+    )
+    history_entry["transfer_date"] = transfer_date
+    history_entry["effective_date"] = effective_date
+    ownership_history_collection().insert_one(history_entry)
+    return _filter_vehicle_for_role(vehicle, current_role=current_role)
 
 
 def _build_insurance_profile(payload: dict, existing_profile: dict | None = None) -> dict | None:
@@ -587,6 +884,7 @@ def _restrict_admin_sensitive_payload(payload: dict, *, current_role: str):
 
 
 def _calculate_vehicle_economics(vehicle_document: dict) -> dict:
+    _apply_vehicle_ownership_defaults(vehicle_document)
     vehicle_id = vehicle_document["_id"]
     today = now_utc().date()
     month_start = date(today.year, today.month, 1)
@@ -598,12 +896,17 @@ def _calculate_vehicle_economics(vehicle_document: dict) -> dict:
     setup_investment = sum(_safe_float(vehicle_document.get(field)) for field in INVESTMENT_COST_FIELDS)
     custom_cost_total = sum(_safe_float(item.get("amount")) for item in custom_cost_items)
     total_vehicle_investment = round(setup_investment + custom_cost_total, 2)
+    capital_basis_for_recovery = round(
+        _calculate_capital_basis_for_vehicle(vehicle_document, custom_cost_total=custom_cost_total),
+        2,
+    )
+    vehicle_document["capital_basis_for_recovery"] = capital_basis_for_recovery
 
     approved_collections = list(collections_collection().find({"vehicle_id": vehicle_id, "status": "approved"}))
     gross_revenue = round(sum(_safe_float(item.get("amount")) for item in approved_collections), 2)
     amount_recovered = gross_revenue
-    remaining_balance = round(max(total_vehicle_investment - amount_recovered, 0), 2)
-    recovery_percentage = round((amount_recovered / total_vehicle_investment) * 100, 2) if total_vehicle_investment > 0 else 0.0
+    remaining_balance = round(max(capital_basis_for_recovery - amount_recovered, 0), 2)
+    recovery_percentage = round((amount_recovered / capital_basis_for_recovery) * 100, 2) if capital_basis_for_recovery > 0 else 0.0
 
     collection_week_count = _count_distinct_collection_weeks(approved_collections)
     weekly_target = _safe_float(vehicle_document.get("default_weekly_target"))
@@ -629,7 +932,7 @@ def _calculate_vehicle_economics(vehicle_document: dict) -> dict:
     )
     if amount_recovered <= 0:
         recovery_status = "Not Started"
-    elif amount_recovered < total_vehicle_investment:
+    elif amount_recovered < capital_basis_for_recovery:
         recovery_status = "Recovering"
     else:
         recovery_status = "Profit Generating"
@@ -673,7 +976,7 @@ def _calculate_vehicle_economics(vehicle_document: dict) -> dict:
     )
     net_profit = round(gross_revenue - profitability_operating_costs, 2)
     profit_margin = round((net_profit / gross_revenue) * 100, 2) if gross_revenue > 0 else 0.0
-    roi = round((net_profit / total_vehicle_investment) * 100, 2) if total_vehicle_investment > 0 else 0.0
+    roi = round((net_profit / capital_basis_for_recovery) * 100, 2) if capital_basis_for_recovery > 0 else 0.0
 
     rides = list(rides_collection().find({"vehicle_id": vehicle_id}))
     trips_today = len([item for item in rides if item.get("trip_date") == today.isoformat()])
@@ -754,8 +1057,16 @@ def _calculate_vehicle_economics(vehicle_document: dict) -> dict:
             "other_setup_cost": _safe_float(vehicle_document.get("other_setup_cost")),
             "custom_cost_total": custom_cost_total,
             "total_vehicle_investment": total_vehicle_investment,
+            "original_purchase_price": _safe_float(vehicle_document.get("original_purchase_price")),
+            "original_purchase_date": vehicle_document.get("original_purchase_date"),
+            "current_estimated_value": _safe_float(vehicle_document.get("current_estimated_value")),
+            "custom_recovery_value": _safe_float(vehicle_document.get("custom_recovery_value")),
+            "recovery_basis_type": vehicle_document.get("recovery_basis_type"),
+            "capital_basis_for_recovery": capital_basis_for_recovery,
         },
         "recovery": {
+            "recovery_basis_type": vehicle_document.get("recovery_basis_type"),
+            "capital_basis_for_recovery": capital_basis_for_recovery,
             "amount_recovered": amount_recovered,
             "remaining_balance": remaining_balance,
             "recovery_percentage": recovery_percentage,
@@ -786,6 +1097,7 @@ def _calculate_vehicle_economics(vehicle_document: dict) -> dict:
             "net_profit": net_profit,
             "profit_margin": profit_margin,
             "roi": roi,
+            "capital_basis_for_recovery": capital_basis_for_recovery,
         },
         "fuel_analytics": {
             "fuel_by_vehicle": fuel_cost,
@@ -866,10 +1178,12 @@ def _calculate_vehicle_economics(vehicle_document: dict) -> dict:
 
 def _filter_vehicle_for_role(vehicle_document: dict, *, current_role: str) -> dict:
     economics = vehicle_document.get("economics") or {}
+    _apply_vehicle_ownership_defaults(vehicle_document)
     include_sensitive = current_role == "owner"
     serialized = serialize_vehicle(vehicle_document, include_sensitive=include_sensitive)
     serialized["assigned_driver_details"] = vehicle_document.get("assigned_driver_details")
     if current_role == "owner":
+        serialized["ownership_summary"] = _ownership_summary_from_vehicle(vehicle_document)
         return serialized
     if current_role == "admin":
         permissions = get_admin_role_permissions()
@@ -890,6 +1204,7 @@ def _filter_vehicle_for_role(vehicle_document: dict, *, current_role: str) -> di
         if permissions.get("view_profitability"):
             filtered_economics["profitability"] = economics.get("profitability", {})
         serialized["economics"] = filtered_economics
+        serialized["ownership_summary"] = _ownership_summary_from_vehicle(vehicle_document)
         if not permissions.get("manage_vehicle_cost_items"):
             serialized["vehicle_cost_items"] = []
         return serialized
@@ -904,9 +1219,11 @@ def normalize_vehicle_payload(
     partial: bool = False,
     vehicle_id: ObjectId | None = None,
     existing_insurance_profile: dict | None = None,
+    existing_asset_owner_contact: dict | None = None,
 ) -> dict:
     normalized_data = {}
     insurance_profile = _build_insurance_profile(payload, existing_profile=existing_insurance_profile)
+    asset_owner_contact = _normalize_asset_owner_contact(payload, existing_asset_owner_contact)
 
     string_fields = {
         "registration_number": normalize_registration_number,
@@ -921,6 +1238,13 @@ def normalize_vehicle_payload(
         "insurance_expiry": normalize_string,
         "roadworthy_expiry": normalize_string,
         "status": normalize_string,
+        "operating_fleet_name": normalize_string,
+        "asset_owner_type": normalize_string,
+        "asset_owner_name": normalize_string,
+        "ownership_notes": normalize_string,
+        "ownership_start_date": normalize_string,
+        "recovery_basis_type": normalize_string,
+        "original_purchase_date": normalize_string,
     }
 
     for field_name, normalizer in string_fields.items():
@@ -972,6 +1296,19 @@ def normalize_vehicle_payload(
         normalized_data["registration_cost"] = validate_numeric(payload.get("registration_cost"), "registration_cost")
     if "other_setup_cost" in payload:
         normalized_data["other_setup_cost"] = validate_numeric(payload.get("other_setup_cost"), "other_setup_cost")
+    if "original_purchase_price" in payload:
+        normalized_data["original_purchase_price"] = validate_numeric(payload.get("original_purchase_price"), "original_purchase_price")
+    if "current_estimated_value" in payload:
+        normalized_data["current_estimated_value"] = validate_numeric(payload.get("current_estimated_value"), "current_estimated_value")
+    if "custom_recovery_value" in payload:
+        normalized_data["custom_recovery_value"] = validate_numeric(payload.get("custom_recovery_value"), "custom_recovery_value")
+    if "capital_basis_for_recovery" in payload:
+        normalized_data["capital_basis_for_recovery"] = validate_numeric(payload.get("capital_basis_for_recovery"), "capital_basis_for_recovery")
+    if "capital_recovery_tracking_enabled" in payload:
+        normalized_data["capital_recovery_tracking_enabled"] = validate_boolean(
+            payload.get("capital_recovery_tracking_enabled"),
+            "capital_recovery_tracking_enabled",
+        )
 
     if "assigned_driver_id" in payload:
         assigned_driver_id = validate_reference_id(payload.get("assigned_driver_id"), "assigned_driver_id")
@@ -1012,9 +1349,40 @@ def normalize_vehicle_payload(
     if vehicle_status is not None and vehicle_status not in ALLOWED_VEHICLE_STATUSES:
         raise ApiError("Invalid vehicle status.", status_code=400)
 
+    asset_owner_type = normalized_data.get("asset_owner_type")
+    if asset_owner_type is not None and asset_owner_type not in ALLOWED_ASSET_OWNER_TYPES:
+        raise ApiError("Please choose a valid asset owner type.", status_code=400)
+
+    recovery_basis_type = normalized_data.get("recovery_basis_type")
+    if recovery_basis_type is not None and recovery_basis_type not in ALLOWED_RECOVERY_BASIS_TYPES:
+        raise ApiError("Please choose a valid recovery basis type.", status_code=400)
+
+    if any(value is not None for value in asset_owner_contact.values()):
+        normalized_data["asset_owner_contact"] = asset_owner_contact
+
     if insurance_profile is not None:
         normalized_data["insurance_profile"] = insurance_profile
         normalized_data["insurance_expiry"] = insurance_profile.get("expiry_date") or normalized_data.get("insurance_expiry")
+
+    if not partial:
+        normalized_data["operating_fleet_name"] = normalized_data.get("operating_fleet_name") or DEFAULT_OPERATING_FLEET_NAME
+        normalized_data["asset_owner_type"] = normalized_data.get("asset_owner_type") or DEFAULT_ASSET_OWNER_TYPE
+        normalized_data["asset_owner_name"] = normalized_data.get("asset_owner_name") or DEFAULT_ASSET_OWNER_NAME
+        normalized_data["ownership_start_date"] = normalized_data.get("ownership_start_date") or now_utc().date().isoformat()
+        normalized_data["recovery_basis_type"] = _default_recovery_basis_type(normalized_data.get("asset_owner_type"))
+        normalized_data["capital_recovery_tracking_enabled"] = (
+            normalized_data.get("capital_recovery_tracking_enabled")
+            if normalized_data.get("capital_recovery_tracking_enabled") is not None
+            else normalized_data.get("asset_owner_type") != "Leased Vehicle"
+        )
+
+    basis_type_to_validate = normalized_data.get("recovery_basis_type")
+    if basis_type_to_validate == "Current Estimated Value" and "current_estimated_value" in payload:
+        if normalized_data.get("current_estimated_value") in (None, 0.0):
+            raise ApiError("Current estimated value is required when using Current Estimated Value.", status_code=400)
+    if basis_type_to_validate == "Custom Recovery Value" and "custom_recovery_value" in payload:
+        if normalized_data.get("custom_recovery_value") in (None, 0.0):
+            raise ApiError("Custom recovery value is required when using Custom Recovery Value.", status_code=400)
 
     if not partial and "status" not in normalized_data:
         normalized_data["status"] = "available"
@@ -1097,6 +1465,7 @@ def list_vehicles(*, current_role: str) -> list[dict]:
     assigned_driver_map = _build_assigned_driver_map(vehicle_documents)
     serialized = []
     for vehicle_document in vehicle_documents:
+        _apply_vehicle_ownership_defaults(vehicle_document)
         assigned_driver_object_id = _driver_object_id_from_reference(vehicle_document.get("assigned_driver_id"))
         serialized.append(
             _serialize_vehicle_list_item(
@@ -1118,6 +1487,8 @@ def get_vehicle_by_id(vehicle_id: str, *, current_role: str, include_economics: 
         f"include_economics={include_economics}"
     )
     vehicle = get_vehicle_document_by_id_with_projection(vehicle_id, _vehicle_detail_projection())
+    _apply_vehicle_ownership_defaults(vehicle)
+    _ensure_vehicle_ownership_history(vehicle)
     if vehicle.get("current_odometer") is None:
         vehicle["current_odometer"] = _extract_vehicle_current_odometer(vehicle["_id"])
     assigned_driver_object_id = _driver_object_id_from_reference(vehicle.get("assigned_driver_id"))
@@ -1136,6 +1507,8 @@ def get_vehicle_by_id(vehicle_id: str, *, current_role: str, include_economics: 
     else:
         vehicle["economics"] = {}
         vehicle["vehicle_cost_items"] = []
+    if current_role == "owner":
+        vehicle["ownership_history"] = list_vehicle_ownership_history(vehicle_id)
     print(
         f"[Flux Performance] get_vehicle_by_id include_economics={include_economics} completed in "
         f"{round((perf_counter() - query_started_at) * 1000, 2)}ms for vehicle {vehicle_id}"
@@ -1147,6 +1520,8 @@ def get_vehicle_economics_by_id(vehicle_id: str, *, current_role: str) -> dict:
     query_started_at = perf_counter()
     print(f"[Flux Performance] vehicle economics database query start vehicle_id={vehicle_id}")
     vehicle = get_vehicle_document_by_id_with_projection(vehicle_id, _vehicle_detail_projection())
+    _apply_vehicle_ownership_defaults(vehicle)
+    _ensure_vehicle_ownership_history(vehicle)
     if vehicle.get("current_odometer") is None:
         vehicle["current_odometer"] = _extract_vehicle_current_odometer(vehicle["_id"])
     print(
@@ -1163,6 +1538,10 @@ def get_vehicle_economics_by_id(vehicle_id: str, *, current_role: str) -> dict:
     return {
         "economics": filtered_vehicle.get("economics") or {},
         "vehicle_cost_items": filtered_vehicle.get("vehicle_cost_items") or [],
+        "operating_fleet_name": filtered_vehicle.get("operating_fleet_name"),
+        "asset_owner_type": filtered_vehicle.get("asset_owner_type"),
+        "asset_owner_name": filtered_vehicle.get("asset_owner_name"),
+        "ownership_summary": filtered_vehicle.get("ownership_summary"),
         "purchase_cost": filtered_vehicle.get("purchase_cost"),
         "shipping_cost": filtered_vehicle.get("shipping_cost"),
         "clearing_cost": filtered_vehicle.get("clearing_cost"),
@@ -1175,6 +1554,12 @@ def get_vehicle_economics_by_id(vehicle_id: str, *, current_role: str) -> dict:
         "initial_repairs_cost": filtered_vehicle.get("initial_repairs_cost"),
         "registration_cost": filtered_vehicle.get("registration_cost"),
         "other_setup_cost": filtered_vehicle.get("other_setup_cost"),
+        "original_purchase_price": filtered_vehicle.get("original_purchase_price"),
+        "original_purchase_date": filtered_vehicle.get("original_purchase_date"),
+        "current_estimated_value": filtered_vehicle.get("current_estimated_value"),
+        "custom_recovery_value": filtered_vehicle.get("custom_recovery_value"),
+        "capital_basis_for_recovery": filtered_vehicle.get("capital_basis_for_recovery"),
+        "recovery_basis_type": filtered_vehicle.get("recovery_basis_type"),
     }
 
 
@@ -1194,6 +1579,7 @@ def create_vehicle(payload: dict, current_user_id: str, *, current_role: str) ->
         "created_at": timestamp,
         "updated_at": timestamp,
     }
+    _apply_vehicle_ownership_defaults(vehicle_document)
 
     try:
         insert_result = vehicles_collection().insert_one(vehicle_document)
@@ -1206,6 +1592,7 @@ def create_vehicle(payload: dict, current_user_id: str, *, current_role: str) ->
         previous_driver_id=None,
         new_driver_id=vehicle_document.get("assigned_driver_id"),
     )
+    _ensure_vehicle_ownership_history(vehicle_document, approved_by=ObjectId(current_user_id))
     generate_default_preventive_schedules_for_vehicle(insert_result.inserted_id, ObjectId(current_user_id))
     vehicle_document["economics"] = _calculate_vehicle_economics(vehicle_document)
     vehicle_document["vehicle_cost_items"] = vehicle_document["economics"].get("vehicle_cost_items", [])
@@ -1220,6 +1607,7 @@ def update_vehicle(vehicle_id: str, payload: dict, *, current_user_id: str, curr
         partial=True,
         vehicle_id=vehicle["_id"],
         existing_insurance_profile=vehicle.get("insurance_profile") or {},
+        existing_asset_owner_contact=vehicle.get("asset_owner_contact") or {},
     )
     if not normalized_data:
         raise ApiError("No vehicle fields provided for update.", status_code=400)
@@ -1237,6 +1625,7 @@ def update_vehicle(vehicle_id: str, payload: dict, *, current_user_id: str, curr
         raise ApiError("A vehicle with one of the unique fields already exists.", status_code=409) from None
 
     vehicle.update(normalized_data)
+    _apply_vehicle_ownership_defaults(vehicle)
     sync_vehicle_assignment(
         vehicle_id=vehicle["_id"],
         previous_driver_id=previous_driver_id,
@@ -1314,6 +1703,7 @@ def get_vehicle_economics_dashboard(*, current_role: str) -> dict:
     vehicles = list(vehicles_collection().find({}))
     serialized_vehicles = []
     for vehicle in vehicles:
+        _apply_vehicle_ownership_defaults(vehicle)
         vehicle["economics"] = _calculate_vehicle_economics(vehicle)
         vehicle["vehicle_cost_items"] = vehicle["economics"].get("vehicle_cost_items", [])
         serialized_vehicles.append(_filter_vehicle_for_role(vehicle, current_role=current_role))
@@ -1335,16 +1725,69 @@ def get_vehicle_economics_dashboard(*, current_role: str) -> dict:
         key=lambda item: _safe_float((item.get("economics") or {}).get("profitability", {}).get("net_profit")),
         reverse=True,
     )
+    total_managed_fleet_value = round(
+        sum(_safe_float((vehicle.get("economics") or {}).get("investment", {}).get("current_estimated_value")) for vehicle in serialized_vehicles),
+        2,
+    )
+    owner_breakdown: dict[str, dict] = {}
+    for vehicle in serialized_vehicles:
+        owner_name = vehicle.get("asset_owner_name") or DEFAULT_ASSET_OWNER_NAME
+        ownership_type = vehicle.get("asset_owner_type") or DEFAULT_ASSET_OWNER_TYPE
+        entry = owner_breakdown.setdefault(
+            owner_name,
+            {
+                "asset_owner_name": owner_name,
+                "asset_owner_type": ownership_type,
+                "vehicle_count": 0,
+                "fleet_value": 0.0,
+                "fleet_investment": 0.0,
+                "capital_basis_for_recovery": 0.0,
+                "revenue_generated": 0.0,
+                "net_profit": 0.0,
+                "capital_recovered": 0.0,
+                "outstanding_capital": 0.0,
+            },
+        )
+        entry["vehicle_count"] += 1
+        entry["fleet_value"] += _safe_float((vehicle.get("economics") or {}).get("investment", {}).get("current_estimated_value"))
+        entry["fleet_investment"] += _safe_float((vehicle.get("economics") or {}).get("investment", {}).get("total_vehicle_investment"))
+        entry["capital_basis_for_recovery"] += _safe_float((vehicle.get("economics") or {}).get("investment", {}).get("capital_basis_for_recovery"))
+        entry["revenue_generated"] += _safe_float((vehicle.get("economics") or {}).get("profitability", {}).get("gross_revenue"))
+        entry["net_profit"] += _safe_float((vehicle.get("economics") or {}).get("profitability", {}).get("net_profit"))
+        entry["capital_recovered"] += _safe_float((vehicle.get("economics") or {}).get("recovery", {}).get("amount_recovered"))
+        entry["outstanding_capital"] += _safe_float((vehicle.get("economics") or {}).get("recovery", {}).get("remaining_balance"))
+    grouped_portfolio = []
+    for entry in owner_breakdown.values():
+        capital_basis = round(entry["capital_basis_for_recovery"], 2)
+        net_profit = round(entry["net_profit"], 2)
+        entry["fleet_value"] = round(entry["fleet_value"], 2)
+        entry["fleet_investment"] = round(entry["fleet_investment"], 2)
+        entry["capital_basis_for_recovery"] = capital_basis
+        entry["revenue_generated"] = round(entry["revenue_generated"], 2)
+        entry["net_profit"] = net_profit
+        entry["capital_recovered"] = round(entry["capital_recovered"], 2)
+        entry["outstanding_capital"] = round(entry["outstanding_capital"], 2)
+        entry["roi_percent"] = round((net_profit / capital_basis) * 100, 2) if capital_basis > 0 else 0.0
+        grouped_portfolio.append(entry)
+    grouped_portfolio.sort(key=lambda item: item["asset_owner_name"])
 
     return {
+        "operating_fleet_name": DEFAULT_OPERATING_FLEET_NAME,
+        "total_managed_fleet": len(serialized_vehicles),
+        "total_active_vehicles": len(
+            [vehicle for vehicle in serialized_vehicles if vehicle.get("status") in {"available", "assigned", "active"}]
+        ),
+        "total_managed_fleet_value": total_managed_fleet_value,
         "total_fleet_investment": total_fleet_investment,
         "total_recovered": total_recovered,
         "remaining_recovery_balance": remaining_recovery_balance,
         "net_fleet_profit": net_fleet_profit,
+        "fleet_roi_percent": round((net_fleet_profit / total_fleet_investment) * 100, 2) if total_fleet_investment > 0 else 0.0,
         "vehicles_recovering": len(recovering),
         "vehicles_fully_recovered": len(recovered),
         "vehicles_profit_generating": len(with_profit),
         "most_profitable_vehicle": profitability_ranked[0] if profitability_ranked else None,
         "least_profitable_vehicle": profitability_ranked[-1] if profitability_ranked else None,
+        "portfolio_breakdown": grouped_portfolio,
         "vehicles": serialized_vehicles,
     }

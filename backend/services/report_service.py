@@ -168,6 +168,7 @@ def _active_filters_payload(filters: dict):
         "driver_id": filters["driver_id"],
         "vehicle_id": filters["vehicle_id"],
         "branch": filters["branch"],
+        "asset_owner_name": filters["asset_owner_name"],
         "creator_role": filters["creator_role"],
         "customer_category_id": filters["customer_category_id"],
         "source": filters["source"],
@@ -190,6 +191,8 @@ def _active_filters_labels(filters: dict, *, drivers_by_id: dict, vehicles_by_id
         )
     if filters["branch"]:
         labels.append(f"Branch: {filters['branch']}")
+    if filters["asset_owner_name"]:
+        labels.append(f"Asset Owner: {filters['asset_owner_name']}")
     if filters["creator_role"]:
         labels.append(f"Creator Role: {filters['creator_role']}")
     if filters["customer_category_id"]:
@@ -206,6 +209,7 @@ def _normalize_filters(
     driver_id: str | None,
     vehicle_id: str | None,
     branch: str | None,
+    asset_owner_name: str | None = None,
     creator_role: str | None = None,
     customer_category_id: str | None = None,
     source: str | None = None,
@@ -216,6 +220,7 @@ def _normalize_filters(
         "driver_id": _normalize_string(driver_id),
         "vehicle_id": _normalize_string(vehicle_id),
         "branch": _normalize_string(branch),
+        "asset_owner_name": _normalize_string(asset_owner_name),
         "creator_role": _normalize_string(creator_role),
         "customer_category_id": _normalize_string(customer_category_id),
         "source": _normalize_string(source),
@@ -650,7 +655,10 @@ def _build_vehicle_performance_report(ride_documents: list[dict], vehicle_docume
     total_days = max((end_date - start_date).days + 1, 1)
 
     selected_vehicles = [
-        vehicle for vehicle in vehicle_documents if _matches_selected_id(vehicle.get("_id"), filters["vehicle_id"])
+        vehicle
+        for vehicle in vehicle_documents
+        if _matches_selected_id(vehicle.get("_id"), filters["vehicle_id"])
+        and (not filters["asset_owner_name"] or _normalize_string(vehicle.get("asset_owner_name")) == filters["asset_owner_name"])
     ]
     records = []
     for vehicle in selected_vehicles:
@@ -664,6 +672,9 @@ def _build_vehicle_performance_report(ride_documents: list[dict], vehicle_docume
                 "id": vehicle_id,
                 "registration_number": vehicle.get("registration_number"),
                 "status": vehicle.get("status"),
+                "operating_fleet_name": vehicle.get("operating_fleet_name"),
+                "asset_owner_name": vehicle.get("asset_owner_name"),
+                "asset_owner_type": vehicle.get("asset_owner_type"),
                 "trip_count": trip_count,
                 "active_days": active_days,
                 "idle_days": idle_days,
@@ -682,10 +693,12 @@ def _build_vehicle_performance_report(ride_documents: list[dict], vehicle_docume
     }
 
 
-def _filter_economics_dashboard(dashboard: dict, *, vehicle_id: str | None):
+def _filter_economics_dashboard(dashboard: dict, *, vehicle_id: str | None, asset_owner_name: str | None):
     vehicles = dashboard.get("vehicles") or []
     if vehicle_id:
         vehicles = [vehicle for vehicle in vehicles if vehicle.get("id") == vehicle_id]
+    if asset_owner_name:
+        vehicles = [vehicle for vehicle in vehicles if _normalize_string(vehicle.get("asset_owner_name")) == asset_owner_name]
 
     filtered_dashboard = {**dashboard, "vehicles": vehicles}
     filtered_dashboard["total_fleet_investment"] = round(
@@ -720,6 +733,53 @@ def _filter_economics_dashboard(dashboard: dict, *, vehicle_id: str | None):
     )
     filtered_dashboard["most_profitable_vehicle"] = ranked[0] if ranked else None
     filtered_dashboard["least_profitable_vehicle"] = ranked[-1] if ranked else None
+    filtered_dashboard["total_managed_fleet"] = len(vehicles)
+    filtered_dashboard["total_active_vehicles"] = len(
+        [vehicle for vehicle in vehicles if (vehicle.get("status") or "").lower() in {"available", "assigned", "active"}]
+    )
+    filtered_dashboard["total_managed_fleet_value"] = round(
+        sum(_safe_float((vehicle.get("economics") or {}).get("investment", {}).get("current_estimated_value")) for vehicle in vehicles),
+        2,
+    )
+    portfolio_breakdown: dict[str, dict] = {}
+    for vehicle in vehicles:
+        owner_name = _normalize_string(vehicle.get("asset_owner_name")) or "Unspecified Owner"
+        owner_entry = portfolio_breakdown.setdefault(
+            owner_name,
+            {
+                "asset_owner_name": owner_name,
+                "asset_owner_type": vehicle.get("asset_owner_type"),
+                "vehicle_count": 0,
+                "fleet_value": 0.0,
+                "capital_basis_for_recovery": 0.0,
+                "capital_recovered": 0.0,
+                "outstanding_capital": 0.0,
+                "revenue_generated": 0.0,
+                "net_profit": 0.0,
+            },
+        )
+        owner_entry["vehicle_count"] += 1
+        owner_entry["fleet_value"] += _safe_float((vehicle.get("economics") or {}).get("investment", {}).get("current_estimated_value"))
+        owner_entry["capital_basis_for_recovery"] += _safe_float((vehicle.get("economics") or {}).get("investment", {}).get("capital_basis_for_recovery"))
+        owner_entry["capital_recovered"] += _safe_float((vehicle.get("economics") or {}).get("recovery", {}).get("amount_recovered"))
+        owner_entry["outstanding_capital"] += _safe_float((vehicle.get("economics") or {}).get("recovery", {}).get("remaining_balance"))
+        owner_entry["revenue_generated"] += _safe_float((vehicle.get("economics") or {}).get("profitability", {}).get("gross_revenue"))
+        owner_entry["net_profit"] += _safe_float((vehicle.get("economics") or {}).get("profitability", {}).get("net_profit"))
+    filtered_dashboard["portfolio_breakdown"] = [
+        {
+            **entry,
+            "fleet_value": round(entry["fleet_value"], 2),
+            "capital_basis_for_recovery": round(entry["capital_basis_for_recovery"], 2),
+            "capital_recovered": round(entry["capital_recovered"], 2),
+            "outstanding_capital": round(entry["outstanding_capital"], 2),
+            "revenue_generated": round(entry["revenue_generated"], 2),
+            "net_profit": round(entry["net_profit"], 2),
+            "roi_percent": round((entry["net_profit"] / entry["capital_basis_for_recovery"]) * 100, 2)
+            if entry["capital_basis_for_recovery"] > 0
+            else 0.0,
+        }
+        for entry in sorted(portfolio_breakdown.values(), key=lambda item: item["asset_owner_name"])
+    ]
     return filtered_dashboard
 
 
@@ -765,6 +825,7 @@ def get_finance_reports(
     vehicle_id: str | None = None,
     branch: str | None = None,
     category: str | None = None,
+    asset_owner_name: str | None = None,
     creator_role: str | None = None,
     customer_category_id: str | None = None,
     source: str | None = None,
@@ -775,6 +836,7 @@ def get_finance_reports(
         driver_id=driver_id,
         vehicle_id=vehicle_id,
         branch=branch,
+        asset_owner_name=asset_owner_name,
         creator_role=creator_role,
         customer_category_id=customer_category_id,
         source=source,
@@ -789,6 +851,7 @@ def get_finance_reports(
         vehicle_id=vehicle_id,
         branch=branch,
         category=category or "all",
+        asset_owner_name=asset_owner_name or "",
         creator_role=creator_role or "",
         customer_category_id=customer_category_id or "",
         source=source or "",
@@ -812,6 +875,9 @@ def get_finance_reports(
             "id": str(document["_id"]),
             "registration_number": document.get("registration_number"),
             "status": document.get("status"),
+            "asset_owner_name": document.get("asset_owner_name"),
+            "asset_owner_type": document.get("asset_owner_type"),
+            "operating_fleet_name": document.get("operating_fleet_name"),
         }
         for document in vehicle_documents
     }
@@ -990,6 +1056,7 @@ def get_finance_reports(
         vehicle_economics_dashboard = _filter_economics_dashboard(
             get_vehicle_economics_dashboard(current_role=current_role),
             vehicle_id=filters["vehicle_id"],
+            asset_owner_name=filters["asset_owner_name"],
         )
         if current_role == "admin" and not get_admin_role_permissions().get("view_reports"):
             vehicle_economics_dashboard["message"] = (
@@ -1010,6 +1077,13 @@ def get_finance_reports(
         "available_filters": {
             "drivers": list(drivers_by_id.values()),
             "vehicles": list(vehicles_by_id.values()),
+            "asset_owners": sorted(
+                {
+                    owner_name
+                    for document in vehicle_documents
+                    if (owner_name := _normalize_string(document.get("asset_owner_name")))
+                }
+            ),
             "branches": branches,
             "creator_roles": sorted(
                 {

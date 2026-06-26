@@ -10,8 +10,10 @@ from services.vehicle_service import (
     get_vehicle_by_id,
     get_vehicle_economics_by_id,
     get_vehicle_economics_dashboard,
+    list_vehicle_ownership_history,
     list_vehicle_cost_items,
     list_vehicles,
+    transfer_vehicle_ownership,
     update_vehicle,
     update_vehicle_status,
 )
@@ -75,6 +77,29 @@ def get_vehicle_economics_route(vehicle_id: str):
         (perf_counter() - started_at) * 1000,
     )
     return success_response(data=payload)
+
+
+@vehicles_bp.get("/<vehicle_id>/ownership-history")
+@role_required("owner", "admin")
+def get_vehicle_ownership_history_route(vehicle_id: str):
+    return success_response(
+        data={"ownership_history": list_vehicle_ownership_history(vehicle_id)}
+    )
+
+
+@vehicles_bp.post("/<vehicle_id>/transfer-ownership")
+@role_required("owner", "admin")
+def transfer_vehicle_ownership_route(vehicle_id: str):
+    vehicle = transfer_vehicle_ownership(
+        vehicle_id,
+        request.get_json(silent=True) or {},
+        current_user_id=get_jwt_identity(),
+        current_role=get_jwt().get("role"),
+    )
+    return success_response(
+        data={"vehicle": vehicle},
+        message="Vehicle ownership transferred successfully.",
+    )
 
 
 @vehicles_bp.post("")

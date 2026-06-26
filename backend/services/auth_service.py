@@ -2,8 +2,9 @@ from datetime import datetime, timezone
 
 from bson import ObjectId
 from flask_jwt_extended import create_access_token
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DuplicateKeyError, PyMongoError
 from pymongo import ASCENDING
+from pymongo.read_preferences import ReadPreference
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from extensions import get_collection
@@ -33,6 +34,17 @@ def users_collection():
 
 def token_blocklist_collection():
     return get_collection("token_blocklist")
+
+
+def users_read_collection():
+    return users_collection().with_options(read_preference=ReadPreference.SECONDARY_PREFERRED)
+
+
+def normalize_role_value(value) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    return normalized or None
 
 
 def ensure_indexes():
@@ -73,13 +85,14 @@ def get_user_document_by_id(user_id: str) -> dict:
     if not ObjectId.is_valid(user_id):
         raise ApiError("User not found.", status_code=404)
 
-    user = users_collection().find_one({"_id": ObjectId(user_id)})
+    user = users_read_collection().find_one({"_id": ObjectId(user_id)})
     if not user:
         raise ApiError("User not found.", status_code=404)
     return user
 
 
 def create_user(payload: dict, role: str) -> dict:
+    role = normalize_role_value(role)
     if role not in ALLOWED_ROLES:
         raise ApiError("Invalid user role.", status_code=400)
 
@@ -87,7 +100,7 @@ def create_user(payload: dict, role: str) -> dict:
     email = normalize_email(payload.get("email"))
     phone = normalize_phone(payload.get("phone"))
     password = payload.get("password")
-    status = payload.get("status", "active" if role in {"owner", "admin"} else "inactive")
+    status = str(payload.get("status", "active" if role in {"owner", "admin"} else "inactive")).strip().lower()
 
     if not full_name:
         raise ApiError("Full name is required.", status_code=400)
@@ -104,7 +117,7 @@ def create_user(payload: dict, role: str) -> dict:
     if status not in ALLOWED_STATUSES:
         raise ApiError("Invalid user status.", status_code=400)
 
-    existing_user = users_collection().find_one({"$or": [{"email": email}, {"phone": phone}]})
+    existing_user = users_read_collection().find_one({"$or": [{"email": email}, {"phone": phone}]})
     if existing_user:
         raise ApiError("A user with this email or phone already exists.", status_code=409)
 
@@ -144,18 +157,22 @@ def authenticate_user(identifier: str, password: str) -> dict:
     if not filters:
         raise ApiError("A valid email or phone number is required.", status_code=400)
 
-    user = users_collection().find_one({"$or": filters})
+    user = users_read_collection().find_one({"$or": filters})
     if not user or not check_password_hash(user["password_hash"], password):
         raise ApiError("Invalid login credentials.", status_code=401)
 
-    if user["status"] != "active":
+    if str(user["status"]).strip().lower() != "active":
         raise ApiError("This account is not active.", status_code=403)
 
     timestamp = now_utc()
-    users_collection().update_one(
-        {"_id": user["_id"]},
-        {"$set": {"last_login": timestamp, "updated_at": timestamp}},
-    )
+    try:
+        users_collection().update_one(
+            {"_id": user["_id"]},
+            {"$set": {"last_login": timestamp, "updated_at": timestamp}},
+        )
+    except PyMongoError:
+        # Authentication should not fail just because telemetry fields could not be updated.
+        pass
     user["last_login"] = timestamp
     user["updated_at"] = timestamp
 
@@ -163,7 +180,7 @@ def authenticate_user(identifier: str, password: str) -> dict:
     access_token = create_access_token(
         identity=serialized_user["id"],
         additional_claims={
-            "role": serialized_user["role"],
+            "role": normalize_role_value(serialized_user["role"]),
             "email": serialized_user["email"],
             "full_name": serialized_user["full_name"],
         },
@@ -176,24 +193,27 @@ def get_user_by_id(user_id: str) -> dict:
 
 
 def list_users_for_role(current_role: str) -> list[dict]:
+    current_role = normalize_role_value(current_role) or current_role
     query = {} if current_role == "owner" else {"role": "driver"}
     users = users_collection().find(query).sort("created_at", ASCENDING)
     return [serialize_user(user) for user in users]
 
 
 def get_viewable_user(current_user_id: str, current_role: str, target_user_id: str) -> dict:
+    current_role = normalize_role_value(current_role) or current_role
     if current_role == "driver" and current_user_id != target_user_id:
         raise ApiError("You do not have permission to access this resource.", status_code=403)
 
     user = get_user_document_by_id(target_user_id)
-    if current_role == "admin" and user.get("role") != "driver":
+    if current_role == "admin" and normalize_role_value(user.get("role")) != "driver":
         raise ApiError("You do not have permission to access this resource.", status_code=403)
 
     return serialize_user(user)
 
 
 def create_user_as(current_role: str, payload: dict) -> dict:
-    requested_role = payload.get("role")
+    current_role = normalize_role_value(current_role) or current_role
+    requested_role = normalize_role_value(payload.get("role"))
     if requested_role not in ALLOWED_ROLES:
         raise ApiError("Invalid user role.", status_code=400)
 
@@ -206,11 +226,13 @@ def create_user_as(current_role: str, payload: dict) -> dict:
 
 
 def update_user_status_as(current_role: str, target_user_id: str, status: str) -> dict:
+    current_role = normalize_role_value(current_role) or current_role
+    status = str(status).strip().lower()
     if status not in ALLOWED_STATUSES:
         raise ApiError("Invalid user status.", status_code=400)
 
     user = get_user_document_by_id(target_user_id)
-    if current_role == "admin" and user.get("role") != "driver":
+    if current_role == "admin" and normalize_role_value(user.get("role")) != "driver":
         raise ApiError("Admin can update driver status only.", status_code=403)
 
     timestamp = now_utc()
@@ -224,6 +246,7 @@ def update_user_status_as(current_role: str, target_user_id: str, status: str) -
 
 
 def update_user_role_as(current_user_id: str, target_user_id: str, role: str) -> dict:
+    role = normalize_role_value(role)
     if role not in ALLOWED_ROLES:
         raise ApiError("Invalid user role.", status_code=400)
     if current_user_id == target_user_id:

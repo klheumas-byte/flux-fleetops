@@ -32,6 +32,19 @@ type VehicleStatus =
   | 'suspended'
   | 'retired';
 
+type AssetOwnerType =
+  | 'Axelera Owned'
+  | 'Existing Company Asset'
+  | 'Managed Third-Party Vehicle'
+  | 'Investor-Funded Vehicle'
+  | 'Leased Vehicle'
+  | 'Partner Vehicle';
+
+type RecoveryBasisType =
+  | 'Original Purchase Cost'
+  | 'Current Estimated Value'
+  | 'Custom Recovery Value';
+
 interface Vehicle {
   id: string;
   registration_number: string;
@@ -63,6 +76,31 @@ interface Vehicle {
   roadworthy_expiry: string | null;
   default_weekly_target: number;
   default_daily_target: number;
+  operating_fleet_name?: string;
+  asset_owner_type?: AssetOwnerType | string | null;
+  asset_owner_name?: string | null;
+  asset_owner_contact?: {
+    phone?: string | null;
+    email?: string | null;
+    address?: string | null;
+  };
+  ownership_notes?: string | null;
+  ownership_start_date?: string | null;
+  recovery_basis_type?: RecoveryBasisType | string | null;
+  original_purchase_price?: number | null;
+  original_purchase_date?: string | null;
+  current_estimated_value?: number | null;
+  custom_recovery_value?: number | null;
+  capital_basis_for_recovery?: number | null;
+  capital_recovery_tracking_enabled?: boolean;
+  ownership_summary?: {
+    operating_fleet_name?: string;
+    asset_owner_type?: string;
+    asset_owner_name?: string;
+    ownership_start_date?: string | null;
+    recovery_basis_type?: string | null;
+    capital_basis_for_recovery?: number | null;
+  };
   purchase_cost: number | null;
   shipping_cost?: number | null;
   clearing_cost?: number | null;
@@ -77,8 +115,24 @@ interface Vehicle {
   other_setup_cost?: number | null;
   vehicle_cost_items?: Array<{ id: string; item_name: string; amount: number; date: string; notes?: string | null }>;
   economics?: {
-    investment?: { total_vehicle_investment?: number; custom_cost_total?: number };
-    recovery?: { amount_recovered?: number; remaining_balance?: number; recovery_percentage?: number; status?: string };
+    investment?: {
+      total_vehicle_investment?: number;
+      custom_cost_total?: number;
+      original_purchase_price?: number;
+      original_purchase_date?: string | null;
+      current_estimated_value?: number;
+      custom_recovery_value?: number;
+      recovery_basis_type?: string | null;
+      capital_basis_for_recovery?: number;
+    };
+    recovery?: {
+      amount_recovered?: number;
+      remaining_balance?: number;
+      recovery_percentage?: number;
+      status?: string;
+      capital_basis_for_recovery?: number;
+      recovery_basis_type?: string | null;
+    };
     operating_costs?: { monthly?: number; quarterly?: number; annual?: number; lifetime?: number; fuel_cost?: number; maintenance_cost?: number; repair_cost?: number; expense_cost?: number; compliance_renewal_cost?: number };
     profitability?: { gross_revenue?: number; net_profit?: number; profit_margin?: number; roi?: number };
     performance?: { trips_today?: number; trips_this_month?: number; utilization_percentage?: number; active_days?: number; idle_days?: number; downtime_days?: number };
@@ -127,6 +181,20 @@ interface VehicleFormState {
   chassis_number: string;
   engine_number: string;
   insurance_expiry: string;
+  operating_fleet_name: string;
+  asset_owner_type: AssetOwnerType;
+  asset_owner_name: string;
+  asset_owner_phone: string;
+  asset_owner_email: string;
+  asset_owner_address: string;
+  ownership_notes: string;
+  ownership_start_date: string;
+  recovery_basis_type: RecoveryBasisType;
+  original_purchase_price: string;
+  original_purchase_date: string;
+  current_estimated_value: string;
+  custom_recovery_value: string;
+  capital_recovery_tracking_enabled: string;
   insurance_company: string;
   policy_number: string;
   insurance_type: 'Third Party' | 'Comprehensive';
@@ -169,6 +237,20 @@ const initialVehicleForm: VehicleFormState = {
   chassis_number: '',
   engine_number: '',
   insurance_expiry: '',
+  operating_fleet_name: 'Flux Fleet Ops',
+  asset_owner_type: 'Axelera Owned',
+  asset_owner_name: 'Axelera',
+  asset_owner_phone: '',
+  asset_owner_email: '',
+  asset_owner_address: '',
+  ownership_notes: '',
+  ownership_start_date: '',
+  recovery_basis_type: 'Original Purchase Cost',
+  original_purchase_price: '',
+  original_purchase_date: '',
+  current_estimated_value: '',
+  custom_recovery_value: '',
+  capital_recovery_tracking_enabled: 'true',
   insurance_company: '',
   policy_number: '',
   insurance_type: 'Third Party',
@@ -258,6 +340,55 @@ function formatDriverLabel(vehicle: Vehicle) {
   return vehicle.assigned_driver_details?.full_name || 'Assigned driver details unavailable';
 }
 
+function safeNumber(value: string) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function calculateCapitalBasisPreview(form: VehicleFormState) {
+  const purchaseCost = safeNumber(form.purchase_cost);
+  const setupCosts =
+    safeNumber(form.shipping_cost) +
+    safeNumber(form.clearing_cost) +
+    safeNumber(form.insurance_cost) +
+    safeNumber(form.roadworthy_cost) +
+    safeNumber(form.ama_permit_cost) +
+    safeNumber(form.vehicle_license_cost) +
+    safeNumber(form.tracker_cost) +
+    safeNumber(form.branding_cost) +
+    safeNumber(form.initial_repairs_cost) +
+    safeNumber(form.registration_cost) +
+    safeNumber(form.other_setup_cost);
+  const totalVehicleInvestment = purchaseCost + setupCosts;
+  const originalPurchasePrice = safeNumber(form.original_purchase_price);
+  const currentEstimatedValue = safeNumber(form.current_estimated_value);
+  const customRecoveryValue = safeNumber(form.custom_recovery_value);
+  const trackingEnabled = form.capital_recovery_tracking_enabled === 'true';
+
+  if (form.asset_owner_type === 'Leased Vehicle' && !trackingEnabled) {
+    return 0;
+  }
+  if (form.recovery_basis_type === 'Current Estimated Value') {
+    return currentEstimatedValue;
+  }
+  if (form.recovery_basis_type === 'Custom Recovery Value') {
+    return customRecoveryValue;
+  }
+  if (form.asset_owner_type === 'Existing Company Asset') {
+    return currentEstimatedValue + setupCosts;
+  }
+  if (form.asset_owner_type === 'Managed Third-Party Vehicle') {
+    return currentEstimatedValue || customRecoveryValue;
+  }
+  if (form.asset_owner_type === 'Investor-Funded Vehicle') {
+    return customRecoveryValue || Math.max(totalVehicleInvestment, originalPurchasePrice);
+  }
+  if (form.asset_owner_type === 'Partner Vehicle') {
+    return customRecoveryValue || currentEstimatedValue;
+  }
+  return customRecoveryValue || totalVehicleInvestment || originalPurchasePrice;
+}
+
 function getDaysUntilExpiry(expiryDate: string | null) {
   if (!expiryDate) {
     return null;
@@ -313,6 +444,21 @@ function buildVehiclePayload(form: VehicleFormState) {
     chassis_number: parseOptionalString(form.chassis_number),
     engine_number: parseOptionalString(form.engine_number),
     insurance_expiry: parseOptionalString(form.insurance_expiry_date || form.insurance_expiry),
+    operating_fleet_name: parseOptionalString(form.operating_fleet_name) || 'Flux Fleet Ops',
+    asset_owner_type: parseOptionalString(form.asset_owner_type),
+    asset_owner_name: parseOptionalString(form.asset_owner_name),
+    asset_owner_phone: parseOptionalString(form.asset_owner_phone),
+    asset_owner_email: parseOptionalString(form.asset_owner_email),
+    asset_owner_address: parseOptionalString(form.asset_owner_address),
+    ownership_notes: parseOptionalString(form.ownership_notes),
+    ownership_start_date: parseOptionalString(form.ownership_start_date),
+    recovery_basis_type: parseOptionalString(form.recovery_basis_type),
+    original_purchase_price: parseOptionalNumber(form.original_purchase_price),
+    original_purchase_date: parseOptionalString(form.original_purchase_date),
+    current_estimated_value: parseOptionalNumber(form.current_estimated_value),
+    custom_recovery_value: parseOptionalNumber(form.custom_recovery_value),
+    capital_recovery_tracking_enabled: form.capital_recovery_tracking_enabled === 'true',
+    capital_basis_for_recovery: calculateCapitalBasisPreview(form),
     insurance_company: parseOptionalString(form.insurance_company),
     policy_number: parseOptionalString(form.policy_number),
     insurance_type: parseOptionalString(form.insurance_type),
@@ -532,6 +678,7 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
     currentRole === 'owner' || Boolean(systemSettings?.role_permissions?.admin?.view_vehicle_recovery);
   const canViewProfitabilityFields =
     currentRole === 'owner' || Boolean(systemSettings?.role_permissions?.admin?.view_profitability);
+  const capitalBasisPreview = useMemo(() => calculateCapitalBasisPreview(formState), [formState]);
 
   const handleFieldChange = (
     field: keyof VehicleFormState,
@@ -572,6 +719,20 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
       chassis_number: vehicle.chassis_number || '',
       engine_number: vehicle.engine_number || '',
       insurance_expiry: vehicle.insurance_expiry || '',
+      operating_fleet_name: vehicle.operating_fleet_name || 'Flux Fleet Ops',
+      asset_owner_type: (vehicle.asset_owner_type as AssetOwnerType) || 'Axelera Owned',
+      asset_owner_name: vehicle.asset_owner_name || 'Axelera',
+      asset_owner_phone: vehicle.asset_owner_contact?.phone || '',
+      asset_owner_email: vehicle.asset_owner_contact?.email || '',
+      asset_owner_address: vehicle.asset_owner_contact?.address || '',
+      ownership_notes: vehicle.ownership_notes || '',
+      ownership_start_date: vehicle.ownership_start_date || '',
+      recovery_basis_type: (vehicle.recovery_basis_type as RecoveryBasisType) || 'Original Purchase Cost',
+      original_purchase_price: vehicle.original_purchase_price != null ? String(vehicle.original_purchase_price) : '',
+      original_purchase_date: vehicle.original_purchase_date || '',
+      current_estimated_value: vehicle.current_estimated_value != null ? String(vehicle.current_estimated_value) : '',
+      custom_recovery_value: vehicle.custom_recovery_value != null ? String(vehicle.custom_recovery_value) : '',
+      capital_recovery_tracking_enabled: vehicle.capital_recovery_tracking_enabled === false ? 'false' : 'true',
       insurance_company: vehicle.insurance_profile?.insurance_company || '',
       policy_number: vehicle.insurance_profile?.policy_number || '',
       insurance_type: (vehicle.insurance_profile?.insurance_type as 'Third Party' | 'Comprehensive') || 'Third Party',
@@ -619,6 +780,17 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
     event.preventDefault();
     setFormError('');
     setIsSubmitting(true);
+
+    if (formState.recovery_basis_type === 'Current Estimated Value' && formState.current_estimated_value.trim() === '') {
+      setFormError('Please provide the current estimated value when using Current Estimated Value.');
+      setIsSubmitting(false);
+      return;
+    }
+    if (formState.recovery_basis_type === 'Custom Recovery Value' && formState.custom_recovery_value.trim() === '') {
+      setFormError('Please provide the custom recovery value when using Custom Recovery Value.');
+      setIsSubmitting(false);
+      return;
+    }
 
     try {
       await apiRequest<CreateVehicleResponse>(editingVehicle ? `/vehicles/${editingVehicle.id}` : '/vehicles', {
@@ -676,22 +848,22 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
   }
 
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="space-y-5 p-4 sm:p-6">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-gray-900">Vehicle Management</h1>
           <p className="text-gray-500 mt-1">Manage your fleet vehicles and assignments</p>
         </div>
         <button
           onClick={openCreateModal}
-          className="px-4 py-2.5 bg-[#2563EB] text-white rounded-lg hover:bg-[#1d4ed8] flex items-center gap-2 font-medium"
+          className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-[#2563EB] px-4 py-2.5 font-medium text-white hover:bg-[#1d4ed8] sm:w-auto"
         >
           <Plus className="w-5 h-5" />
           Add Vehicle
         </button>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-3 xl:grid-cols-6">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
         {stats.map((stat, index) => {
           const Icon = stat.icon;
           return (
@@ -708,9 +880,9 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
         })}
       </div>
 
-      <div className="bg-white rounded-lg border border-gray-200 p-4">
-        <div className="flex flex-col lg:flex-row gap-4">
-          <div className="flex-1">
+      <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-col gap-3 xl:flex-row xl:items-center">
+          <div className="min-w-0 flex-1">
             <div className="relative">
               <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
               <input
@@ -718,16 +890,16 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
                 placeholder="Search by vehicle number, type, or driver..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full pl-10 pr-4 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent"
+                className="w-full rounded-lg border border-gray-300 py-2.5 pl-10 pr-4 focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent"
               />
             </div>
           </div>
 
-          <div className="flex gap-2">
+          <div className="flex flex-col gap-2 sm:flex-row xl:flex-none">
             <select
               value={selectedStatus}
               onChange={(e) => setSelectedStatus(e.target.value)}
-              className="px-4 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent bg-white"
+              className="min-w-[160px] rounded-lg border border-gray-300 bg-white px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent"
             >
               <option value="all">All Status</option>
               <option value="available">Available</option>
@@ -738,7 +910,7 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
               <option value="retired">Retired</option>
             </select>
 
-            <button className="px-4 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 flex items-center gap-2">
+            <button className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-300 px-4 py-2.5 hover:bg-gray-50">
               <Filter className="w-4 h-4" />
               More Filters
             </button>
@@ -758,7 +930,7 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
         </div>
       )}
 
-      <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+      <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
         {isLoading ? (
           <div className="px-6 py-16 flex items-center justify-center gap-3 text-gray-500">
             <Loader2 className="w-5 h-5 animate-spin" />
@@ -767,37 +939,37 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
         ) : (
           <>
             <div className="overflow-x-auto">
-              <table className="w-full">
+              <table className="min-w-[1280px] w-full table-auto">
                 <thead className="bg-gray-50 border-b border-gray-200">
                   <tr>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                    <th className="px-4 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-600 sm:px-6">
                       Vehicle Number
                     </th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                    <th className="w-[120px] px-4 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-600 sm:px-6">
                       Type
                     </th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                    <th className="w-[180px] px-4 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-600 sm:px-6">
                       Assigned Driver
                     </th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                    <th className="w-[140px] px-4 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-600 sm:px-6">
                       Weekly Target
                     </th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                    <th className="min-w-[220px] px-4 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-600 sm:px-6">
                       Economics
                     </th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                    <th className="w-[120px] px-4 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-600 sm:px-6">
                       Fuel Type
                     </th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                    <th className="w-[170px] px-4 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-600 sm:px-6">
                       Insurance Expiry
                     </th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                    <th className="w-[170px] px-4 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-600 sm:px-6">
                       Roadworthy Expiry
                     </th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                    <th className="w-[130px] px-4 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-600 sm:px-6">
                       Status
                     </th>
-                    <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                    <th className="sticky right-0 z-20 min-w-[260px] bg-gray-50 px-4 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-600 shadow-[-12px_0_20px_-16px_rgba(15,23,42,0.32)] sm:px-6">
                       Actions
                     </th>
                   </tr>
@@ -822,7 +994,7 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
                           onOpenVehicleDetails(vehicle.id);
                         }}
                       >
-                        <td className="px-6 py-4">
+                        <td className="px-4 py-4 sm:px-6">
                           <div className="flex items-center gap-3">
                             <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
                               <Truck className="w-5 h-5 text-blue-600" />
@@ -837,12 +1009,12 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
                             </div>
                           </div>
                         </td>
-                        <td className="px-6 py-4">
+                        <td className="px-4 py-4 sm:px-6">
                           <span className="text-sm text-gray-900">
                             {formatVehicleType(vehicle.vehicle_type)}
                           </span>
                         </td>
-                        <td className="px-6 py-4">
+                        <td className="px-4 py-4 sm:px-6">
                           {assignedDriverLabel ? (
                             <div>
                               <div className="text-sm font-medium text-gray-900">{assignedDriverLabel}</div>
@@ -852,13 +1024,13 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
                             <span className="text-sm text-gray-400 italic">Unassigned</span>
                           )}
                         </td>
-                        <td className="px-6 py-4">
+                        <td className="px-4 py-4 sm:px-6">
                           <div className="text-sm font-medium text-gray-900">
                             {formatCurrency(vehicle.default_weekly_target)}
                           </div>
                           <div className="text-xs text-gray-500">per week</div>
                         </td>
-                        <td className="px-6 py-4">
+                        <td className="px-4 py-4 sm:px-6">
                           <div className="text-sm font-medium text-gray-900">
                             {canViewInvestmentFields && vehicle.economics?.investment?.total_vehicle_investment != null
                               ? formatCurrency(vehicle.economics.investment.total_vehicle_investment)
@@ -877,7 +1049,7 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
                             Health {vehicle.economics?.health?.score != null ? `${vehicle.economics.health.score}/100` : '-'}
                           </div>
                         </td>
-                        <td className="px-6 py-4">
+                        <td className="px-4 py-4 sm:px-6">
                           <span
                             className={`px-2.5 py-1 rounded-full text-xs font-medium ${
                               vehicle.fuel_type === 'petrol'
@@ -890,7 +1062,7 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
                             {formatVehicleType(vehicle.fuel_type)}
                           </span>
                         </td>
-                        <td className="px-6 py-4">
+                        <td className="px-4 py-4 sm:px-6">
                           <div className="flex items-center gap-2">
                             <Calendar
                               className={`w-4 h-4 ${insuranceDays !== null && insuranceDays <= 30 ? 'text-red-500' : 'text-gray-400'}`}
@@ -905,7 +1077,7 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
                             </div>
                           </div>
                         </td>
-                        <td className="px-6 py-4">
+                        <td className="px-4 py-4 sm:px-6">
                           <div className="flex items-center gap-2">
                             <Calendar
                               className={`w-4 h-4 ${roadworthyDays !== null && roadworthyDays <= 30 ? 'text-red-500' : 'text-gray-400'}`}
@@ -920,7 +1092,7 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
                             </div>
                           </div>
                         </td>
-                        <td className="px-6 py-4">
+                        <td className="px-4 py-4 sm:px-6">
                           <span
                             className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${statusConfig[vehicle.status].color}`}
                           >
@@ -928,8 +1100,8 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
                             {statusConfig[vehicle.status].label}
                           </span>
                         </td>
-                        <td className="px-6 py-4">
-                          <div className="flex flex-wrap items-center gap-2">
+                        <td className="sticky right-0 z-10 bg-white px-4 py-4 shadow-[-12px_0_20px_-16px_rgba(15,23,42,0.2)] sm:px-6">
+                          <div className="flex min-w-[228px] flex-wrap items-center gap-2">
                             {canManageCostItems && (
                               <button
                                 onClick={(event) => {
@@ -1008,12 +1180,12 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
               </table>
             </div>
 
-            <div className="px-6 py-4 border-t border-gray-200 flex items-center justify-between bg-gray-50">
+            <div className="flex flex-col gap-3 border-t border-gray-200 bg-gray-50 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
               <div className="text-sm text-gray-600">
                 Showing <span className="font-medium">{paginatedVehicles.length}</span> of{' '}
                 <span className="font-medium">{vehicles.length}</span> vehicles
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   onClick={() => setCurrentPage((page) => Math.max(page - 1, 1))}
@@ -1209,6 +1381,164 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
                       className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent"
                       required
                     />
+                  </div>
+                  <div className="md:col-span-2 xl:col-span-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                    <div className="flex flex-col gap-1">
+                      <div className="text-sm font-semibold text-[#0F172A]">Ownership &amp; Investment Setup</div>
+                      <p className="text-xs text-gray-600">
+                        This vehicle will operate under Flux Fleet Ops, but ownership is tracked separately for reporting.
+                      </p>
+                    </div>
+                    <div className="mt-3 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Operating Fleet</label>
+                        <input
+                          value={formState.operating_fleet_name}
+                          onChange={(e) => handleFieldChange('operating_fleet_name', e.target.value)}
+                          className="w-full px-3 py-2.5 border border-gray-300 rounded-lg bg-gray-100 text-gray-600 focus:outline-none"
+                          readOnly
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Asset Owner Type</label>
+                        <select
+                          value={formState.asset_owner_type}
+                          onChange={(e) => handleFieldChange('asset_owner_type', e.target.value as AssetOwnerType)}
+                          className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent bg-white"
+                        >
+                          <option value="Axelera Owned">Axelera Owned</option>
+                          <option value="Existing Company Asset">Existing Company Asset</option>
+                          <option value="Managed Third-Party Vehicle">Managed Third-Party Vehicle</option>
+                          <option value="Investor-Funded Vehicle">Investor-Funded Vehicle</option>
+                          <option value="Leased Vehicle">Leased Vehicle</option>
+                          <option value="Partner Vehicle">Partner Vehicle</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Asset Owner Name</label>
+                        <input
+                          value={formState.asset_owner_name}
+                          onChange={(e) => handleFieldChange('asset_owner_name', e.target.value)}
+                          className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Owner Phone</label>
+                        <input
+                          value={formState.asset_owner_phone}
+                          onChange={(e) => handleFieldChange('asset_owner_phone', e.target.value)}
+                          className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Owner Email</label>
+                        <input
+                          type="email"
+                          value={formState.asset_owner_email}
+                          onChange={(e) => handleFieldChange('asset_owner_email', e.target.value)}
+                          className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Ownership Start Date</label>
+                        <input
+                          type="date"
+                          value={formState.ownership_start_date}
+                          onChange={(e) => handleFieldChange('ownership_start_date', e.target.value)}
+                          className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent"
+                        />
+                      </div>
+                      <div className="md:col-span-2 xl:col-span-3">
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Owner Address</label>
+                        <input
+                          value={formState.asset_owner_address}
+                          onChange={(e) => handleFieldChange('asset_owner_address', e.target.value)}
+                          className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Recovery Basis</label>
+                        <select
+                          value={formState.recovery_basis_type}
+                          onChange={(e) => handleFieldChange('recovery_basis_type', e.target.value as RecoveryBasisType)}
+                          className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent bg-white"
+                        >
+                          <option value="Original Purchase Cost">Original Purchase Cost</option>
+                          <option value="Current Estimated Value">Current Estimated Value</option>
+                          <option value="Custom Recovery Value">Custom Recovery Value</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Original Purchase Price</label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={formState.original_purchase_price}
+                          onChange={(e) => handleFieldChange('original_purchase_price', e.target.value)}
+                          className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Original Purchase Date</label>
+                        <input
+                          type="date"
+                          value={formState.original_purchase_date}
+                          onChange={(e) => handleFieldChange('original_purchase_date', e.target.value)}
+                          className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Current Estimated Value</label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={formState.current_estimated_value}
+                          onChange={(e) => handleFieldChange('current_estimated_value', e.target.value)}
+                          className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Custom Recovery Value</label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={formState.custom_recovery_value}
+                          onChange={(e) => handleFieldChange('custom_recovery_value', e.target.value)}
+                          className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Capital Recovery Tracking</label>
+                        <select
+                          value={formState.capital_recovery_tracking_enabled}
+                          onChange={(e) => handleFieldChange('capital_recovery_tracking_enabled', e.target.value)}
+                          className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent bg-white"
+                        >
+                          <option value="true">Enabled</option>
+                          <option value="false">Disabled</option>
+                        </select>
+                      </div>
+                      <div className="md:col-span-2 xl:col-span-3 rounded-lg border border-white/80 bg-white px-4 py-3">
+                        <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Capital Basis Preview</div>
+                        <div className="mt-1 text-lg font-semibold text-[#0F172A]">{formatCurrency(capitalBasisPreview)}</div>
+                        <div className="mt-1 text-xs text-gray-500">
+                          Recovery will use this value for capital recovery, outstanding capital, and ROI.
+                        </div>
+                      </div>
+                      <div className="md:col-span-2 xl:col-span-3">
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Ownership Notes</label>
+                        <textarea
+                          value={formState.ownership_notes}
+                          onChange={(e) => handleFieldChange('ownership_notes', e.target.value)}
+                          rows={3}
+                          className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#2563EB] focus:border-transparent"
+                          placeholder="Add context about owner agreements, investor structure, lease terms, or transition notes."
+                        />
+                      </div>
+                    </div>
                   </div>
                   <div className="md:col-span-2 xl:col-span-3 rounded-xl border border-blue-100 bg-blue-50/60 p-4">
                     <div className="text-sm font-semibold text-[#0F172A]">Insurance Profile</div>

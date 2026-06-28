@@ -27,12 +27,14 @@ from services.system_settings_service import ensure_system_settings_indexes
 from services.vehicle_service import ensure_vehicle_indexes
 from services.wallet_service import ensure_wallet_indexes
 from utils.errors import register_error_handlers
+from utils.logging_setup import configure_backend_logging
 
 
 def create_app(config_name: str | None = None) -> Flask:
     startup_started_at = perf_counter()
     app = Flask(__name__)
     app.config.from_object(get_config(config_name))
+    configure_backend_logging(app)
 
     init_extensions(app)
     route_registration_started_at = perf_counter()
@@ -113,6 +115,7 @@ def create_app(config_name: str | None = None) -> Flask:
             "data": {
                 "service": "flux-fleet-backend",
                 "environment": app.config["ENV_NAME"],
+                "debug": bool(app.config["DEBUG"]),
                 "database": database,
             },
         }, (200 if backend_ok else 503)
@@ -189,4 +192,7 @@ flask_app = create_app()
 
 
 if __name__ == "__main__":
-    flask_app.run(use_reloader=False)
+    flask_app.run(
+        debug=flask_app.config["DEBUG"],
+        use_reloader=flask_app.config["DEBUG"],
+    )

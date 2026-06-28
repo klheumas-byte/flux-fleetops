@@ -13,6 +13,7 @@ from models.vehicle import serialize_vehicle
 from services.assignment_service import get_active_assignment_for_driver
 from services.notification_service import notify_roles
 from utils.api_error import ApiError
+from utils.file_validation import validate_file_reference_list
 from utils.mongo_indexes import ensure_indexes_for_collection
 from utils.performance import build_cache_key, get_ttl_cached, log_db_duration, set_ttl_cached
 
@@ -412,17 +413,7 @@ def _validate_driver_fault_scope(current_user_id: str, vehicle_id: str | None, d
 
 
 def _validate_photos(photos):
-    if photos is None:
-        return []
-    if not isinstance(photos, list):
-        raise ApiError("photos must be an array of image strings.", status_code=400)
-    normalized_photos = []
-    for photo in photos:
-        if not isinstance(photo, str):
-            raise ApiError("photos must only contain strings.", status_code=400)
-        if photo.strip():
-            normalized_photos.append(photo.strip())
-    return normalized_photos
+    return validate_file_reference_list(photos, field_name="photos", max_files=8)
 
 
 def _serialize_category_and_component(category_document: dict, component_document: dict):

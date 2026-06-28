@@ -17,6 +17,7 @@ from services.assignment_service import get_active_assignment_for_driver
 from services.maintenance_service import create_maintenance_job
 from services.notification_service import create_notification, notify_roles
 from utils.api_error import ApiError
+from utils.file_validation import validate_document_upload
 from utils.mongo_indexes import ensure_indexes_for_collection
 
 
@@ -1529,7 +1530,7 @@ def _validate_compliance_record_payload(payload: dict, partial: bool = False, ex
     if "warning_days_before" in payload or not partial:
         update_fields["warning_days_before"] = _validate_positive_int(payload.get("warning_days_before"), "warning_days_before") or 30
     if "document_upload" in payload or not partial:
-        update_fields["document_upload"] = payload.get("document_upload")
+        update_fields["document_upload"] = validate_document_upload(payload.get("document_upload"))
     if "notes" in payload or not partial:
         update_fields["notes"] = _normalize_text(payload.get("notes"))
     if "status" in payload:
@@ -1643,7 +1644,9 @@ def renew_compliance_record(record_id: str, payload: dict, current_user_id: str,
         "provider_or_authority_name": _normalize_text(payload.get("provider_or_authority_name")) or document.get("provider_or_authority_name"),
         "policy_or_reference_number": _normalize_text(payload.get("policy_or_reference_number")) or document.get("policy_or_reference_number"),
         "warning_days_before": _validate_positive_int(payload.get("warning_days_before", document.get("warning_days_before")), "warning_days_before") or 30,
-        "document_upload": payload.get("document_upload", document.get("document_upload")),
+        "document_upload": validate_document_upload(payload.get("document_upload"))
+        if "document_upload" in payload
+        else document.get("document_upload"),
         "notes": _normalize_text(payload.get("notes")) if "notes" in payload else document.get("notes"),
         "status": "renewed",
         "last_notification_marker": None,

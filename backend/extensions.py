@@ -112,11 +112,14 @@ def get_database_connection_status() -> dict:
     try:
         get_mongo_client().admin.command("ping")
         return {
+            "status": "connected",
             "connected": True,
             "message": "MongoDB connection is healthy.",
         }
     except (ServerSelectionTimeoutError, ConnectionFailure, PyMongoError) as error:
+        current_app.logger.warning("[Flux Health] Database connectivity check failed: %s", error)
         return {
+            "status": "disconnected",
             "connected": False,
-            "message": str(error),
+            "message": "MongoDB connection is unavailable.",
         }

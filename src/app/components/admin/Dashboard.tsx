@@ -44,6 +44,14 @@ interface FaultsResponse {
 interface DashboardSummaryResponse {
   success: boolean;
   data: {
+    fleetInvestmentSummary?: Record<string, unknown>;
+    operationsSummary?: Record<string, unknown>;
+    revenueSummary?: Record<string, unknown>;
+    incidentsClaimsSummary?: Record<string, unknown>;
+    complianceSummary?: Record<string, unknown>;
+    maintenanceSummary?: Record<string, unknown>;
+    supportingLookups?: Record<string, unknown>;
+    warnings?: string[];
     dashboard: {
       summary: {
         total_vehicles: number;
@@ -159,15 +167,20 @@ export default function Dashboard({ onNavigate, userRole }: DashboardProps) {
       setBookingSummary(bookingResponse.data?.data?.summary || null);
       setCustomerSummary(customerResponse.data?.data?.summary || null);
       setDashboardData(dashboardResponse.data?.data?.dashboard || null);
-      const dashboardWarnings = Array.isArray(dashboardResponse.data?.data?.dashboard?.warnings)
+      const dashboardWarnings = Array.isArray(dashboardResponse.data?.data?.warnings)
+        ? dashboardResponse.data.data.warnings
+        : Array.isArray(dashboardResponse.data?.data?.dashboard?.warnings)
         ? dashboardResponse.data.data.dashboard.warnings
         : [];
+      const dashboardRequestFailed = !dashboardResponse.ok;
 
       const coreFailures = [queueResponse, criticalResponse].filter((result) => !result.ok);
       if (coreFailures.length === 2) {
         setFaultError(coreFailures[0].error || 'Unable to load dashboard insights right now.');
       } else {
-        if (dashboardWarnings.length > 0) {
+        if (dashboardRequestFailed) {
+          setFaultNotice(dashboardResponse.error || 'Some dashboard sections are temporarily unavailable.');
+        } else if (dashboardWarnings.length > 0) {
           setFaultNotice(`Some sections are temporarily unavailable: ${dashboardWarnings.join(', ')}.`);
         }
       }

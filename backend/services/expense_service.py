@@ -14,6 +14,7 @@ from services.finance_account_service import (
     get_finance_account_document,
 )
 from utils.api_error import ApiError
+from utils.file_validation import validate_file_reference
 from utils.mongo_indexes import ensure_indexes_for_collection
 
 
@@ -252,9 +253,11 @@ def create_expense(payload: dict, current_user_id: str, current_role: str) -> di
     if vehicle_object_id is not None:
         _get_vehicle_document(vehicle_object_id)
 
-    receipt_image = payload.get("receipt_image")
-    if receipt_image is not None and not isinstance(receipt_image, str):
-        raise ApiError("receipt_image must be a string.", status_code=400)
+    receipt_image = validate_file_reference(
+        payload.get("receipt_image"),
+        field_name="receipt_image",
+        file_name="expense-receipt",
+    )
 
     timestamp = now_utc()
     document = {
@@ -268,7 +271,7 @@ def create_expense(payload: dict, current_user_id: str, current_role: str) -> di
         "finance_account_snapshot": serialize_finance_account_snapshot(finance_account_document),
         "payment_method": payment_method,
         "reference_number": (payload.get("reference_number") or "").strip() or None,
-        "receipt_image": receipt_image or None,
+        "receipt_image": receipt_image,
         "notes": (payload.get("notes") or "").strip() or None,
         "status": "pending",
         "requested_by": _to_object_id(current_user_id, "requested_by"),

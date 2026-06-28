@@ -87,6 +87,6 @@ flask --app app.py seed-demo
 
 Seeded accounts:
 
-- `owner@fluxfleet.com` / `owner123`
-- `admin@fluxfleet.com` / `admin123`
-- `driver@fluxfleet.com` / `driver123`
+- `owner@fluxfleet.com` / `Owner@12345`
+- `admin@fluxfleet.com` / `Admin@12345`
+- `driver@fluxfleet.com` / `Driver12345`

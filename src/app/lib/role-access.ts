@@ -108,6 +108,9 @@ export const MODULE_ACCESS_MATRIX: Record<AppModule, RoleMatrix> = {
   fuel: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
   incidents: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: DRIVER_ACCESS },
   'fault-approvals': { owner: FULL_ACCESS, admin: { ...OPERATIONAL_ADMIN, can_approve: true }, driver: NO_ACCESS },
+  // Drivers have no access to the admin maintenance module itself.
+  // Assigned-vehicle maintenance visibility is exposed only inside the driver "my-vehicle"
+  // experience through driver-scoped backend endpoints.
   maintenance: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
   'preventive-maintenance': { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
   'driver-performance': { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },

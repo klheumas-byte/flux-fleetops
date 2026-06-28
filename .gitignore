@@ -1,19 +1,22 @@
 node_modules/
-backend/.env
-backend/.venv/
-backend/__pycache__/
-backend/**/*.pyc
-# Build output
 dist/
+coverage/
+.pytest_cache/
 
-# Python virtual environment
 venv/
+backend/.venv/
 __pycache__/
+backend/__pycache__/
 *.pyc
+*.pyo
 
-# Log files
 *.log
+backend/logs/
+!backend/logs/.gitkeep
+backend/flask.log
 backend/flask-error.log
 
-# Environment variables
 .env
+backend/.env
+!.env.example
+!backend/.env.example

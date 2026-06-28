@@ -3,8 +3,6 @@ from datetime import date, datetime, timedelta, timezone
 from time import perf_counter
 
 from flask import current_app
-from pymongo import timeout as mongo_timeout
-
 from extensions import get_collection
 from services.payment_cycle_service import APPROVED_PAYMENT_STATUSES, get_weekly_cycle_window
 from services.system_settings_service import get_admin_role_permissions, should_include_fuel_in_profitability
@@ -192,6 +190,40 @@ def _empty_owner_fleet_risk_summary(*, vehicles_due_service: int = 0) -> dict:
     }
 
 
+def _empty_dashboard_section_payloads() -> dict:
+    return {
+        "fleetInvestmentSummary": {},
+        "operationsSummary": {},
+        "revenueSummary": {},
+        "incidentsClaimsSummary": {},
+        "complianceSummary": {},
+        "maintenanceSummary": {},
+        "supportingLookups": {},
+    }
+
+
+def _load_dashboard_settings(*, current_role: str) -> tuple[bool, dict[str, bool]]:
+    include_fuel_in_profitability = False
+    admin_permissions: dict[str, bool] = {}
+
+    try:
+        include_fuel_in_profitability = should_include_fuel_in_profitability()
+    except Exception:
+        current_app.logger.exception(
+            "[Flux Dashboard] Failed to load system settings for profitability. Using safe defaults."
+        )
+
+    if current_role == "admin":
+        try:
+            admin_permissions = get_admin_role_permissions() or {}
+        except Exception:
+            current_app.logger.exception(
+                "[Flux Dashboard] Failed to load admin role permissions. Using safe defaults."
+            )
+
+    return include_fuel_in_profitability, admin_permissions
+
+
 def _build_owner_fleet_summaries(*, vehicles_due_service: int, net_revenue: float, today: date) -> tuple[dict, dict]:
     fleet_economics_summary = _empty_owner_fleet_economics_summary()
     fleet_risk_summary = _empty_owner_fleet_risk_summary(vehicles_due_service=vehicles_due_service)
@@ -278,8 +310,7 @@ def get_dashboard_summary(*, current_role: str) -> dict:
     week_start = week_window["week_start_dt"]
     today = now_utc().date()
     today_iso = today.isoformat()
-    include_fuel_in_profitability = should_include_fuel_in_profitability()
-    admin_permissions = get_admin_role_permissions() if current_role == "admin" else {}
+    include_fuel_in_profitability, admin_permissions = _load_dashboard_settings(current_role=current_role)
     warnings: list[str] = []
 
     vehicle_lookup = _load_vehicle_lookup()
@@ -750,13 +781,10 @@ def get_dashboard_summary_fast(*, current_role: str) -> dict:
     week_start = week_window["week_start_dt"]
     today = now_utc().date()
     today_iso = today.isoformat()
-    include_fuel_in_profitability = should_include_fuel_in_profitability()
-    admin_permissions = get_admin_role_permissions() if current_role == "admin" else {}
+    include_fuel_in_profitability, admin_permissions = _load_dashboard_settings(current_role=current_role)
     profitability_allowed = current_role == "owner" or bool(admin_permissions.get("view_profitability"))
     warnings: list[str] = []
-
-    section_timeout_seconds = 0.2
-    total_budget_seconds = 1.8
+    section_payloads = _empty_dashboard_section_payloads()
 
     result = {
         "summary": {
@@ -794,6 +822,7 @@ def get_dashboard_summary_fast(*, current_role: str) -> dict:
             "expiries": [],
             "activity_feed": [],
         },
+        "section_payloads": section_payloads,
         "warnings": warnings,
     }
 
@@ -821,10 +850,6 @@ def get_dashboard_summary_fast(*, current_role: str) -> dict:
     vehicle_lookup: dict[str, str] = {}
     driver_lookup: dict[str, str] = {}
 
-    def remaining_budget_seconds() -> float:
-        elapsed = perf_counter() - request_started_at
-        return max(0.01, total_budget_seconds - elapsed)
-
     def log_section(section_name: str, started_at: float, *, success: bool, records_count: int = 0):
         current_app.logger.info(
             "[Flux Section] section=%s endpoint=/api/dashboard/summary duration_ms=%.2f success=%s records_count=%s",
@@ -836,14 +861,8 @@ def get_dashboard_summary_fast(*, current_role: str) -> dict:
 
     def run_section(section_name: str, callback):
         started_at = perf_counter()
-        budget = min(section_timeout_seconds, remaining_budget_seconds())
-        if budget <= 0.01:
-            warnings.append(section_name)
-            log_section(section_name, started_at, success=False)
-            return None
         try:
-            with mongo_timeout(budget):
-                value = callback()
+            value = callback()
             records_count = len(value) if isinstance(value, (list, dict)) else 1
             log_section(section_name, started_at, success=True, records_count=records_count)
             return value
@@ -944,6 +963,16 @@ def get_dashboard_summary_fast(*, current_role: str) -> dict:
         }
         for row in asset_owner_breakdown
     ]
+    section_payloads["fleetInvestmentSummary"] = {
+        "totalManagedFleet": result["fleet_economics_summary"]["total_managed_fleet"],
+        "totalActiveVehicles": result["fleet_economics_summary"]["total_active_vehicles"],
+        "totalManagedFleetValue": result["fleet_economics_summary"]["total_managed_fleet_value"],
+        "totalFleetInvestment": result["fleet_economics_summary"]["total_fleet_investment"],
+        "totalCapitalRecovered": result["fleet_economics_summary"]["total_capital_recovered"],
+        "outstandingCapital": result["fleet_economics_summary"]["outstanding_capital"],
+        "portfolioBreakdown": result["fleet_economics_summary"]["portfolio_breakdown"],
+        "topVehicleProfitability": result["fleet_economics_summary"]["top_vehicle_profitability"],
+    }
 
     operations_payload = run_section(
         "operations summary",
@@ -982,6 +1011,12 @@ def get_dashboard_summary_fast(*, current_role: str) -> dict:
         2,
     )
     result["summary"]["weekly_revenue_target"] = revenue_context["weekly_revenue_target"]
+    section_payloads["operationsSummary"] = {
+        "activeDrivers": result["summary"]["active_drivers"],
+        "activeAssignments": len(active_assignments),
+        "vehiclesDueService": result["summary"]["vehicles_due_service"],
+        "activeTrips": result["summary"]["active_trips"],
+    }
 
     revenue_payload = run_section(
         "revenue summary",
@@ -1102,6 +1137,10 @@ def get_dashboard_summary_fast(*, current_role: str) -> dict:
     result["fleet_risk_summary"]["vehicles_due_service"] = result["summary"]["vehicles_due_service"]
     result["fleet_risk_summary"]["open_incidents"] = int(incidents_payload.get("open_incidents") or 0)
     result["fleet_risk_summary"]["open_claims"] = int(incidents_payload.get("open_claims") or 0)
+    section_payloads["incidentsClaimsSummary"] = {
+        "openIncidents": result["fleet_risk_summary"]["open_incidents"],
+        "openClaims": result["fleet_risk_summary"]["open_claims"],
+    }
 
     compliance_payload = run_section(
         "compliance summary",
@@ -1122,6 +1161,10 @@ def get_dashboard_summary_fast(*, current_role: str) -> dict:
     ) or {}
     result["fleet_risk_summary"]["expired_compliance_count"] = int(compliance_payload.get("expired_compliance_count") or 0)
     compliance_records = compliance_payload.get("records") or []
+    section_payloads["complianceSummary"] = {
+        "expiredComplianceCount": result["fleet_risk_summary"]["expired_compliance_count"],
+        "recordsCount": len(compliance_records),
+    }
     for record in compliance_records:
         if record.get("vehicle_id"):
             vehicle_ids.add(record.get("vehicle_id"))
@@ -1163,6 +1206,10 @@ def get_dashboard_summary_fast(*, current_role: str) -> dict:
             maintenance_cost_by_vehicle[str(job.get("vehicle_id"))] += _safe_float(
                 job.get("actual_cost") or job.get("estimated_cost")
             )
+    section_payloads["maintenanceSummary"] = {
+        "recordsCount": len(maintenance_jobs),
+        "weeklyMaintenanceCost": revenue_context["weekly_maintenance_cost"],
+    }
 
     lookup_payload = run_section(
         "supporting lookups",
@@ -1188,6 +1235,10 @@ def get_dashboard_summary_fast(*, current_role: str) -> dict:
     driver_lookup = {
         str(driver["_id"]): driver.get("full_name") or "Driver"
         for driver in lookup_payload.get("drivers") or []
+    }
+    section_payloads["supportingLookups"] = {
+        "vehicleCount": len(vehicle_lookup),
+        "driverCount": len(driver_lookup),
     }
 
     result["summary"]["outstanding_balance"] = round(
@@ -1215,6 +1266,14 @@ def get_dashboard_summary_fast(*, current_role: str) -> dict:
         if total_fleet_investment > 0
         else 0.0
     )
+    section_payloads["revenueSummary"] = {
+        "weeklyRevenueTarget": result["summary"]["weekly_revenue_target"],
+        "revenueCollected": result["summary"]["revenue_collected"],
+        "outstandingBalance": result["summary"]["outstanding_balance"],
+        "fuelSpend": result["summary"]["fuel_spend"],
+        "netRevenue": result["summary"]["net_revenue"],
+        "capitalRecovered": result["fleet_economics_summary"]["total_capital_recovered"],
+    }
 
     result["charts"]["weekly_revenue"] = [
         {

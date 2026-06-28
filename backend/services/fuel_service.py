@@ -11,6 +11,7 @@ from models.vehicle import serialize_vehicle
 from services.assignment_service import get_active_assignment_for_driver
 from services.notification_service import create_notification, notify_roles
 from utils.api_error import ApiError
+from utils.file_validation import validate_file_reference
 from utils.mongo_indexes import ensure_indexes_for_collection
 
 
@@ -467,7 +468,11 @@ def _build_fuel_log_payload(payload: dict, current_user_id: str, current_role: s
         "amount": amount,
         "price_per_litre": price_per_litre,
         "odometer_reading": odometer_reading,
-        "receipt_image": payload.get("receipt_image"),
+        "receipt_image": validate_file_reference(
+            payload.get("receipt_image"),
+            field_name="receipt_image",
+            file_name="fuel-receipt",
+        ),
         "notes": (payload.get("notes") or "").strip() or None,
         "status": "submitted",
         "submitted_by": _to_object_id(current_user_id, "current_user_id"),

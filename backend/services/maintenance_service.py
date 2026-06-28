@@ -425,6 +425,76 @@ def _serialize_progress_timeline_entry(document: dict):
     return progress_log
 
 
+def _get_driver_accessible_maintenance_document(maintenance_id: str, current_user_id: str) -> dict:
+    document = _get_maintenance_document(maintenance_id)
+    assigned_vehicle_id = _resolve_driver_vehicle_for_driver(current_user_id)
+    if assigned_vehicle_id is None or document.get("vehicle_id") != assigned_vehicle_id:
+        raise ApiError("You do not have permission to view this maintenance job.", status_code=403)
+    return document
+
+
+def _get_latest_driver_progress_log(maintenance_id: ObjectId, driver_user_id: str):
+    if not ObjectId.is_valid(driver_user_id):
+        return None
+    return maintenance_progress_collection().find_one(
+        {
+            "maintenance_job_id": maintenance_id,
+            "updated_by": ObjectId(driver_user_id),
+        },
+        sort=[("updated_at", DESCENDING)],
+    )
+
+
+def _derive_driver_confirmation_status(document: dict, current_user_id: str) -> str | None:
+    if document.get("current_stage") == "driver_confirmed":
+        return "confirmed"
+    if document.get("current_stage") == "ready_for_driver_test":
+        return "pending"
+
+    latest_driver_log = _get_latest_driver_progress_log(document["_id"], current_user_id)
+    if not latest_driver_log:
+        return None
+    if latest_driver_log.get("current_stage") == "driver_confirmed":
+        return "confirmed"
+    if latest_driver_log.get("current_stage") == "delayed":
+        return "rejected"
+    return None
+
+
+def _serialize_driver_maintenance_job(document: dict, current_user_id: str) -> dict:
+    vehicle_document = vehicles_collection().find_one({"_id": document.get("vehicle_id")})
+    return {
+        "id": str(document.get("_id")),
+        "maintenance_type": document.get("maintenance_type"),
+        "title": document.get("title"),
+        "status": document.get("status"),
+        "current_stage": document.get("current_stage"),
+        "start_date": document.get("start_date"),
+        "target_completion_date": document.get("target_completion_date"),
+        "completion_date": document.get("completion_date"),
+        "next_follow_up_date": document.get("next_follow_up_date"),
+        "service_note": document.get("description"),
+        "next_action": document.get("next_action"),
+        "driver_confirmation_status": _derive_driver_confirmation_status(document, current_user_id),
+        "vehicle": {
+            "id": str(vehicle_document.get("_id")),
+            "registration_number": vehicle_document.get("registration_number"),
+        } if vehicle_document else None,
+    }
+
+
+def _serialize_driver_progress_timeline_entry(document: dict) -> dict:
+    return {
+        "id": str(document.get("_id")),
+        "update_type": document.get("update_type"),
+        "progress_note": document.get("progress_note"),
+        "current_stage": document.get("current_stage"),
+        "next_action": document.get("next_action"),
+        "next_follow_up_date": document.get("next_follow_up_date"),
+        "updated_at": document.get("updated_at").isoformat() if document.get("updated_at") else None,
+    }
+
+
 def _derive_status_from_stage(current_stage: str | None, fallback_status: str):
     if current_stage == "waiting_parts":
         return "waiting_parts"
@@ -607,11 +677,6 @@ def _enrich_maintenance_job(document: dict) -> dict:
 
 def list_maintenance_jobs(current_user_id: str, current_role: str) -> list[dict]:
     query = {}
-    if current_role == "driver":
-        assigned_vehicle_id = _resolve_driver_vehicle_for_driver(current_user_id)
-        if assigned_vehicle_id is None:
-            return []
-        query["vehicle_id"] = assigned_vehicle_id
 
     documents = list(
         maintenance_jobs_collection()
@@ -624,10 +689,6 @@ def list_maintenance_jobs(current_user_id: str, current_role: str) -> list[dict]
 
 def get_maintenance_job_by_id(maintenance_id: str, current_user_id: str, current_role: str) -> dict:
     document = _get_maintenance_document(maintenance_id)
-    if current_role == "driver":
-        assigned_vehicle_id = _resolve_driver_vehicle_for_driver(current_user_id)
-        if assigned_vehicle_id is None or document.get("vehicle_id") != assigned_vehicle_id:
-            raise ApiError("You do not have permission to view this maintenance job.", status_code=403)
     _process_maintenance_reminders([document])
     return _enrich_maintenance_job(document)
 
@@ -682,6 +743,37 @@ def list_overdue_follow_ups(current_user_id: str, current_role: str) -> list[dic
     )
     _process_maintenance_reminders(documents)
     return [_enrich_maintenance_job(document) for document in documents]
+
+
+def list_driver_maintenance_jobs(current_user_id: str) -> list[dict]:
+    assigned_vehicle_id = _resolve_driver_vehicle_for_driver(current_user_id)
+    if assigned_vehicle_id is None:
+        return []
+
+    documents = list(
+        maintenance_jobs_collection()
+        .find({"vehicle_id": assigned_vehicle_id})
+        .sort([("start_date", DESCENDING), ("created_at", DESCENDING)])
+    )
+    _process_maintenance_reminders(documents)
+    return [_serialize_driver_maintenance_job(document, current_user_id) for document in documents]
+
+
+def get_driver_maintenance_job_by_id(maintenance_id: str, current_user_id: str) -> dict:
+    document = _get_driver_accessible_maintenance_document(maintenance_id, current_user_id)
+    _process_maintenance_reminders([document])
+    return _serialize_driver_maintenance_job(document, current_user_id)
+
+
+def list_driver_maintenance_progress_logs(maintenance_id: str, current_user_id: str) -> list[dict]:
+    document = _get_driver_accessible_maintenance_document(maintenance_id, current_user_id)
+    _process_maintenance_reminders([document])
+    logs = (
+        maintenance_progress_collection()
+        .find({"maintenance_job_id": document["_id"]})
+        .sort([("updated_at", DESCENDING)])
+    )
+    return [_serialize_driver_progress_timeline_entry(log) for log in logs]
 
 
 def create_maintenance_job(payload: dict, current_user_id: str, current_role: str) -> dict:
@@ -1093,14 +1185,7 @@ def add_maintenance_progress_update(
     current_role: str,
 ) -> dict:
     document = _get_maintenance_document(maintenance_id)
-
-    if current_role == "driver":
-        assigned_vehicle_id = _resolve_driver_vehicle_for_driver(current_user_id)
-        if assigned_vehicle_id is None or document.get("vehicle_id") != assigned_vehicle_id:
-            raise ApiError("You do not have permission to update this maintenance job.", status_code=403)
-        if document.get("current_stage") != "ready_for_driver_test":
-            raise ApiError("Driver confirmation is only available when the vehicle is ready for driver test.", status_code=400)
-    elif current_role not in {"owner", "admin"}:
+    if current_role not in {"owner", "admin"}:
         raise ApiError("You do not have permission to add maintenance progress updates.", status_code=403)
 
     update_type = _validate_progress_update_type(payload.get("update_type") or "general")
@@ -1124,34 +1209,19 @@ def add_maintenance_progress_update(
         "follow_up_overdue": False,
     }
 
-    if current_role == "driver":
-        driver_confirmation = (payload.get("driver_confirmation") or "").strip().lower()
-        if driver_confirmation not in {"confirmed", "rejected"}:
-            raise ApiError("driver_confirmation must be either confirmed or rejected.", status_code=400)
-        if driver_confirmation == "confirmed":
-            update_fields["current_stage"] = "driver_confirmed"
-            update_fields["next_action"] = "Admin or owner to close the maintenance job after confirmation."
-        else:
-            update_fields["current_stage"] = "delayed"
-            update_fields["status"] = "in_progress"
-            update_fields["next_action"] = next_action or "Coordinator to reopen diagnosis after failed driver test."
-        update_type = "general"
-        next_follow_up_date = next_follow_up_date or date.today().isoformat()
-        update_fields["next_follow_up_date"] = next_follow_up_date
-    else:
-        update_fields["status"] = _derive_status_from_stage(next_stage, document.get("status"))
-        if next_stage == "waiting_parts":
-            update_fields["waiting_parts_since"] = timestamp
-        elif next_stage != "waiting_parts":
-            update_fields["waiting_parts_since"] = None
+    update_fields["status"] = _derive_status_from_stage(next_stage, document.get("status"))
+    if next_stage == "waiting_parts":
+        update_fields["waiting_parts_since"] = timestamp
+    elif next_stage != "waiting_parts":
+        update_fields["waiting_parts_since"] = None
 
-        if next_stage == "ready_for_driver_test":
-            update_fields["ready_for_driver_test_since"] = timestamp
-            update_fields["ready_for_driver_test_notified_at"] = None
-            update_fields["driver_test_reminder_sent_for"] = None
-            update_type = "ready_for_test" if update_type == "general" else update_type
-        elif next_stage != "ready_for_driver_test":
-            update_fields["ready_for_driver_test_since"] = None
+    if next_stage == "ready_for_driver_test":
+        update_fields["ready_for_driver_test_since"] = timestamp
+        update_fields["ready_for_driver_test_notified_at"] = None
+        update_fields["driver_test_reminder_sent_for"] = None
+        update_type = "ready_for_test" if update_type == "general" else update_type
+    elif next_stage != "ready_for_driver_test":
+        update_fields["ready_for_driver_test_since"] = None
 
     if "actual_cost" in payload:
         update_fields["actual_cost"] = _validate_non_negative_amount(payload.get("actual_cost"), "actual_cost")
@@ -1192,6 +1262,67 @@ def add_maintenance_progress_update(
 
     _process_maintenance_reminders([document])
     return _serialize_progress_timeline_entry(progress_document)
+
+
+def submit_driver_maintenance_confirmation(
+    maintenance_id: str,
+    payload: dict,
+    current_user_id: str,
+) -> dict:
+    document = _get_driver_accessible_maintenance_document(maintenance_id, current_user_id)
+    if document.get("current_stage") != "ready_for_driver_test":
+        raise ApiError("Driver confirmation is only available when the vehicle is ready for driver test.", status_code=403)
+    allowed_fields = {"driver_confirmation", "driver_note"}
+    if set(payload.keys()) - allowed_fields:
+        raise ApiError("You do not have permission to submit that type of maintenance update.", status_code=403)
+
+    driver_confirmation = (payload.get("driver_confirmation") or "").strip().lower()
+    if driver_confirmation not in {"confirmed", "rejected"}:
+        raise ApiError("driver_confirmation must be either confirmed or rejected.", status_code=400)
+
+    driver_note = (payload.get("driver_note") or "").strip()
+    progress_note = driver_note
+    if not progress_note:
+        progress_note = (
+            "Driver confirmed that the vehicle repair was successful."
+            if driver_confirmation == "confirmed"
+            else "Driver reported that the vehicle still needs more work."
+        )
+
+    timestamp = now_utc()
+    next_follow_up_date = date.today().isoformat()
+    update_fields = {
+        "last_progress_updated_at": timestamp,
+        "updated_at": timestamp,
+        "follow_up_overdue": False,
+        "next_follow_up_date": next_follow_up_date,
+    }
+    if driver_confirmation == "confirmed":
+        update_fields["current_stage"] = "driver_confirmed"
+        update_fields["next_action"] = "Admin or owner to close the maintenance job after confirmation."
+    else:
+        update_fields["current_stage"] = "delayed"
+        update_fields["status"] = "in_progress"
+        update_fields["next_action"] = "Coordinator to reopen diagnosis after failed driver test."
+
+    maintenance_jobs_collection().update_one({"_id": document["_id"]}, {"$set": update_fields})
+    document.update(update_fields)
+
+    progress_document = {
+        "maintenance_job_id": document["_id"],
+        "update_type": "general",
+        "progress_note": progress_note,
+        "current_stage": document.get("current_stage"),
+        "next_action": document.get("next_action"),
+        "next_follow_up_date": document.get("next_follow_up_date"),
+        "updated_by": _to_object_id(current_user_id, "updated_by"),
+        "updated_at": timestamp,
+    }
+    result = maintenance_progress_collection().insert_one(progress_document)
+    progress_document["_id"] = result.inserted_id
+
+    _process_maintenance_reminders([document])
+    return _serialize_driver_progress_timeline_entry(progress_document)
 
 
 def convert_fault_to_maintenance_job(fault_id: str, current_user_id: str, current_role: str) -> dict:

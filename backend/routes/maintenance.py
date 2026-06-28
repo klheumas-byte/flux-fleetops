@@ -21,7 +21,7 @@ maintenance_bp = Blueprint("maintenance", __name__)
 
 
 @maintenance_bp.get("")
-@role_required("owner", "admin", "driver")
+@role_required("owner", "admin")
 def get_maintenance_jobs():
     return success_response(
         data={
@@ -75,7 +75,7 @@ def create_maintenance_job_route():
 
 
 @maintenance_bp.get("/<maintenance_id>/progress")
-@role_required("owner", "admin", "driver")
+@role_required("owner", "admin")
 def get_maintenance_progress_route(maintenance_id: str):
     return success_response(
         data={
@@ -89,7 +89,7 @@ def get_maintenance_progress_route(maintenance_id: str):
 
 
 @maintenance_bp.post("/<maintenance_id>/progress")
-@role_required("owner", "admin", "driver")
+@role_required("owner", "admin")
 def add_maintenance_progress_route(maintenance_id: str):
     progress_log = add_maintenance_progress_update(
         maintenance_id=maintenance_id,
@@ -105,7 +105,7 @@ def add_maintenance_progress_route(maintenance_id: str):
 
 
 @maintenance_bp.get("/<maintenance_id>")
-@role_required("owner", "admin", "driver")
+@role_required("owner", "admin")
 def get_maintenance_job_route(maintenance_id: str):
     job = get_maintenance_job_by_id(
         maintenance_id=maintenance_id,

@@ -11,6 +11,7 @@ from models.finance_account import serialize_finance_account_snapshot
 from models.user import serialize_user
 from services.finance_account_service import get_finance_account_document, increment_finance_account_balance
 from utils.api_error import ApiError
+from utils.file_validation import validate_file_reference
 from utils.mongo_indexes import ensure_indexes_for_collection
 from utils.performance import log_db_duration
 
@@ -298,9 +299,11 @@ def create_deposit(payload: dict, current_user_id: str, current_role: str) -> di
     if not destination_name:
         destination_name = finance_account_document.get("account_name") or "Finance Account"
 
-    receipt_image = payload.get("receipt_image")
-    if receipt_image is not None and not isinstance(receipt_image, str):
-        raise ApiError("receipt_image must be a string.", status_code=400)
+    receipt_image = validate_file_reference(
+        payload.get("receipt_image"),
+        field_name="receipt_image",
+        file_name="deposit-receipt",
+    )
 
     timestamp = now_utc()
     document = {
@@ -312,7 +315,7 @@ def create_deposit(payload: dict, current_user_id: str, current_role: str) -> di
         "destination_name": destination_name,
         "finance_account_snapshot": serialize_finance_account_snapshot(finance_account_document),
         "reference_number": (payload.get("reference_number") or "").strip() or None,
-        "receipt_image": receipt_image or None,
+        "receipt_image": receipt_image,
         "notes": (payload.get("notes") or "").strip() or None,
         "status": "submitted",
         "submitted_by": _to_object_id(current_user_id, "submitted_by"),

@@ -6,6 +6,12 @@ from flask import request
 
 from services.collection_service import get_driver_dashboard_summary, submit_driver_payment
 from services.fuel_service import list_fuel_logs
+from services.maintenance_service import (
+    get_driver_maintenance_job_by_id,
+    list_driver_maintenance_jobs,
+    list_driver_maintenance_progress_logs,
+    submit_driver_maintenance_confirmation,
+)
 from services.preventive_maintenance_service import list_compliance_records, list_preventive_maintenance
 from services.wallet_service import get_logged_in_driver_wallet
 from utils.decorators import role_required
@@ -61,6 +67,57 @@ def get_driver_fuel_logs():
             current_user_id=get_jwt_identity(),
             current_role="driver",
         )
+    )
+
+
+@driver_portal_bp.get("/maintenance")
+@role_required("driver")
+def get_driver_maintenance():
+    return success_response(
+        data={
+            "jobs": list_driver_maintenance_jobs(get_jwt_identity())
+        }
+    )
+
+
+@driver_portal_bp.get("/maintenance/<maintenance_id>")
+@role_required("driver")
+def get_driver_maintenance_job(maintenance_id: str):
+    return success_response(
+        data={
+            "job": get_driver_maintenance_job_by_id(
+                maintenance_id=maintenance_id,
+                current_user_id=get_jwt_identity(),
+            )
+        }
+    )
+
+
+@driver_portal_bp.get("/maintenance/<maintenance_id>/progress")
+@role_required("driver")
+def get_driver_maintenance_progress(maintenance_id: str):
+    return success_response(
+        data={
+            "progress_logs": list_driver_maintenance_progress_logs(
+                maintenance_id=maintenance_id,
+                current_user_id=get_jwt_identity(),
+            )
+        }
+    )
+
+
+@driver_portal_bp.post("/maintenance/<maintenance_id>/progress")
+@role_required("driver")
+def post_driver_maintenance_progress(maintenance_id: str):
+    progress_log = submit_driver_maintenance_confirmation(
+        maintenance_id=maintenance_id,
+        payload=request.get_json(silent=True) or {},
+        current_user_id=get_jwt_identity(),
+    )
+    return success_response(
+        data={"progress_log": progress_log},
+        message="Driver maintenance confirmation submitted successfully.",
+        status_code=201,
     )
 
 

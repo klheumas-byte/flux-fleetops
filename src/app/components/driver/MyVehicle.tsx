@@ -32,20 +32,19 @@ interface MaintenanceJob {
   id: string;
   title: string;
   maintenance_type: string;
-  priority: MaintenancePriority;
   status: MaintenanceStatus;
-  vendor_name: string | null;
-  estimated_cost: number | null;
-  actual_cost: number | null;
   start_date: string | null;
   target_completion_date: string | null;
   completion_date: string | null;
-  notes: string | null;
-  description: string;
+  service_note: string | null;
   current_stage: MaintenanceStage | null;
   next_action: string | null;
   next_follow_up_date: string | null;
-  assigned_admin_name: string | null;
+  driver_confirmation_status: 'pending' | 'confirmed' | 'rejected' | null;
+  vehicle: {
+    id: string;
+    registration_number: string;
+  } | null;
 }
 
 interface MaintenanceJobsResponse {
@@ -111,14 +110,6 @@ function formatDate(value: string | null | undefined) {
   return parsed.toLocaleDateString();
 }
 
-function formatCurrency(value: number | null | undefined) {
-  if (value === null || value === undefined) {
-    return 'Not provided';
-  }
-
-  return `GHS ${value.toLocaleString()}`;
-}
-
 function formatLabel(value: string) {
   return value
     .split('_')
@@ -140,19 +131,6 @@ function statusBadgeClass(status: MaintenanceStatus) {
       return 'border-indigo-200 bg-indigo-100 text-indigo-700';
     default:
       return 'border-slate-200 bg-slate-100 text-slate-700';
-  }
-}
-
-function priorityBadgeClass(priority: MaintenancePriority) {
-  switch (priority) {
-    case 'critical':
-      return 'border-rose-200 bg-rose-100 text-rose-700';
-    case 'high':
-      return 'border-orange-200 bg-orange-100 text-orange-700';
-    case 'medium':
-      return 'border-amber-200 bg-amber-100 text-amber-700';
-    default:
-      return 'border-emerald-200 bg-emerald-100 text-emerald-700';
   }
 }
 
@@ -211,7 +189,7 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
 
       try {
         const [maintenanceResponse, preventiveResponse] = await Promise.all([
-          apiRequest<MaintenanceJobsResponse>('/maintenance'),
+          apiRequest<MaintenanceJobsResponse>('/driver/maintenance'),
           apiRequest<PreventiveSchedulesResponse>('/driver/preventive-maintenance'),
         ]);
         if (!isMounted) {
@@ -273,20 +251,15 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
     setDriverActionError('');
     setDriverUpdateJobId(jobId);
     try {
-      await apiRequest<MaintenanceProgressMutationResponse>(`/maintenance/${jobId}/progress`, {
+      await apiRequest<MaintenanceProgressMutationResponse>(`/driver/maintenance/${jobId}/progress`, {
         method: 'POST',
         body: JSON.stringify({
-          update_type: 'general',
-          progress_note:
-            driverConfirmation === 'confirmed'
-              ? driverUpdateNote || 'Driver confirmed that the vehicle repair was successful.'
-              : driverUpdateNote || 'Driver reported that the vehicle still needs more work.',
           driver_confirmation: driverConfirmation,
-          next_follow_up_date: new Date().toISOString().slice(0, 10),
+          driver_note: driverUpdateNote || undefined,
         }),
       });
       setDriverUpdateNote('');
-      const response = await apiRequest<MaintenanceJobsResponse>('/maintenance');
+      const response = await apiRequest<MaintenanceJobsResponse>('/driver/maintenance');
       setMaintenanceJobs(Array.isArray(response.data?.jobs) ? response.data.jobs : []);
     } catch (error) {
       if (error instanceof ApiRequestError) {
@@ -598,14 +571,12 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
                   {activeMaintenanceJobs.map((job) => (
                     <div
                       key={job.id}
-                      className={`rounded-xl border px-4 py-4 ${
-                        job.priority === 'critical' ? 'border-rose-200 bg-rose-50' : 'border-gray-200 bg-gray-50'
-                      }`}
+                      className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-4"
                     >
                       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                         <div className="min-w-0">
                           <h4 className="text-sm font-semibold text-[#0F172A]">{job.title}</h4>
-                          <p className="mt-1 text-sm text-gray-600">{job.description || 'No description provided.'}</p>
+                          <p className="mt-1 text-sm text-gray-600">{job.service_note || 'No service note shared yet.'}</p>
                         </div>
                         <div className="flex flex-wrap gap-2">
                           <span
@@ -613,11 +584,11 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
                           >
                             {formatLabel(job.status)}
                           </span>
-                          <span
-                            className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${priorityBadgeClass(job.priority)}`}
-                          >
-                            {formatLabel(job.priority)}
-                          </span>
+                          {job.driver_confirmation_status ? (
+                            <span className="inline-flex rounded-full border border-cyan-200 bg-cyan-100 px-2.5 py-1 text-xs font-medium text-cyan-800">
+                              Driver {formatLabel(job.driver_confirmation_status)}
+                            </span>
+                          ) : null}
                         </div>
                       </div>
 
@@ -626,7 +597,7 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
                           <span className="font-medium text-[#0F172A]">Type:</span> {formatLabel(job.maintenance_type)}
                         </div>
                         <div>
-                          <span className="font-medium text-[#0F172A]">Vendor:</span> {formatValue(job.vendor_name)}
+                          <span className="font-medium text-[#0F172A]">Vehicle:</span> {job.vehicle?.registration_number || 'Assigned vehicle'}
                         </div>
                         <div>
                           <span className="font-medium text-[#0F172A]">Start Date:</span> {formatDate(job.start_date)}
@@ -634,18 +605,6 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
                         <div>
                           <span className="font-medium text-[#0F172A]">Target Completion:</span>{' '}
                           {formatDate(job.target_completion_date)}
-                        </div>
-                        <div>
-                          <span className="font-medium text-[#0F172A]">Estimated Cost:</span>{' '}
-                          {formatCurrency(job.estimated_cost)}
-                        </div>
-                        <div>
-                          <span className="font-medium text-[#0F172A]">Actual Cost:</span>{' '}
-                          {formatCurrency(job.actual_cost)}
-                        </div>
-                        <div>
-                          <span className="font-medium text-[#0F172A]">Coordinator:</span>{' '}
-                          {formatValue(job.assigned_admin_name)}
                         </div>
                         <div>
                           <span className="font-medium text-[#0F172A]">Current Stage:</span>{' '}
@@ -733,7 +692,7 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
                         <div>
                           <h4 className="text-sm font-semibold text-[#0F172A]">{job.title}</h4>
                           <p className="mt-1 text-sm text-gray-600">
-                            {job.notes || job.description || 'No resolution notes provided.'}
+                            {job.service_note || 'No service note shared yet.'}
                           </p>
                         </div>
                         <span
@@ -752,11 +711,7 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
                           <span className="font-medium text-[#0F172A]">Type:</span> {formatLabel(job.maintenance_type)}
                         </div>
                         <div>
-                          <span className="font-medium text-[#0F172A]">Vendor:</span> {formatValue(job.vendor_name)}
-                        </div>
-                        <div>
-                          <span className="font-medium text-[#0F172A]">Actual Cost:</span>{' '}
-                          {formatCurrency(job.actual_cost)}
+                          <span className="font-medium text-[#0F172A]">Vehicle:</span> {job.vehicle?.registration_number || 'Assigned vehicle'}
                         </div>
                       </div>
                     </div>

@@ -11,6 +11,7 @@ from models.vehicle import serialize_vehicle
 from services.maintenance_service import create_maintenance_job
 from services.notification_service import notify_roles
 from utils.api_error import ApiError
+from utils.file_validation import validate_attachment_list
 from utils.mongo_indexes import ensure_indexes_for_collection
 
 
@@ -294,42 +295,17 @@ def _validate_driver_incident_scope(current_user_id: str, vehicle_id: str | None
 
 
 def _validate_attachments(attachments) -> list[dict]:
-    if attachments in (None, ""):
-        return []
-    if not isinstance(attachments, list):
-        raise ApiError("Please upload attachments as a list of files.", status_code=400)
+    validated_attachments = validate_attachment_list(attachments, field_name="attachments", max_files=10)
     normalized: list[dict] = []
-    for item in attachments:
-        if isinstance(item, str):
-            data_url = item.strip()
-            if not data_url:
-                continue
-            normalized.append(
-                {
-                    "id": str(uuid4()),
-                    "name": "Attachment",
-                    "file_name": "attachment",
-                    "file_kind": "document",
-                    "content_type": None,
-                    "data_url": data_url,
-                    "size_bytes": None,
-                    "uploaded_at": now_utc(),
-                }
-            )
-            continue
-        if not isinstance(item, dict):
-            raise ApiError("Each attachment must include file details.", status_code=400)
-        data_url = _normalize_string(item.get("data_url"))
-        if not data_url:
-            raise ApiError("Each attachment must include file data.", status_code=400)
+    for item in validated_attachments:
         normalized.append(
             {
                 "id": _normalize_string(item.get("id")) or str(uuid4()),
-                "name": _normalize_string(item.get("name")) or _normalize_string(item.get("file_name")) or "Attachment",
+                "name": _normalize_string(item.get("name")) or "Attachment",
                 "file_name": _normalize_string(item.get("file_name")) or "attachment",
                 "file_kind": _normalize_slug(item.get("file_kind")) or "document",
                 "content_type": _normalize_string(item.get("content_type")),
-                "data_url": data_url,
+                "data_url": item.get("data_url"),
                 "size_bytes": item.get("size_bytes") if isinstance(item.get("size_bytes"), int) else None,
                 "uploaded_at": now_utc(),
             }

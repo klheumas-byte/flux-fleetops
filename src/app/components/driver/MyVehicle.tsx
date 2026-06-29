@@ -182,39 +182,61 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
     let isMounted = true;
 
     const loadMaintenance = async () => {
-      setIsLoadingMaintenance(true);
-      setMaintenanceError('');
-      setIsLoadingPreventive(true);
-      setPreventiveError('');
+      const loadMaintenanceJobs = async () => {
+        setIsLoadingMaintenance(true);
+        setMaintenanceError('');
+        try {
+          const maintenanceResponse = await apiRequest<MaintenanceJobsResponse>('/driver/maintenance');
+          if (!isMounted) {
+            return;
+          }
+          setMaintenanceJobs(Array.isArray(maintenanceResponse.data?.jobs) ? maintenanceResponse.data.jobs : []);
+        } catch (error) {
+          if (!isMounted) {
+            return;
+          }
+          setMaintenanceJobs([]);
+          if (error instanceof ApiRequestError) {
+            setMaintenanceError(error.message);
+          } else {
+            setMaintenanceError('Unable to load maintenance status right now.');
+          }
+        } finally {
+          if (isMounted) {
+            setIsLoadingMaintenance(false);
+          }
+        }
+      };
 
-      try {
-        const [maintenanceResponse, preventiveResponse] = await Promise.all([
-          apiRequest<MaintenanceJobsResponse>('/driver/maintenance'),
-          apiRequest<PreventiveSchedulesResponse>('/driver/preventive-maintenance'),
-        ]);
-        if (!isMounted) {
-          return;
+      const loadPreventiveData = async () => {
+        setIsLoadingPreventive(true);
+        setPreventiveError('');
+        try {
+          const preventiveResponse = await apiRequest<PreventiveSchedulesResponse>('/driver/preventive-maintenance');
+          if (!isMounted) {
+            return;
+          }
+          setPreventiveSchedules(Array.isArray(preventiveResponse.data?.schedules) ? preventiveResponse.data.schedules : []);
+          setComplianceRecords(Array.isArray(preventiveResponse.data?.compliance_records) ? preventiveResponse.data.compliance_records : []);
+        } catch (error) {
+          if (!isMounted) {
+            return;
+          }
+          setPreventiveSchedules([]);
+          setComplianceRecords([]);
+          if (error instanceof ApiRequestError) {
+            setPreventiveError(error.message);
+          } else {
+            setPreventiveError('Unable to load preventive maintenance reminders right now.');
+          }
+        } finally {
+          if (isMounted) {
+            setIsLoadingPreventive(false);
+          }
         }
-        setMaintenanceJobs(Array.isArray(maintenanceResponse.data?.jobs) ? maintenanceResponse.data.jobs : []);
-        setPreventiveSchedules(Array.isArray(preventiveResponse.data?.schedules) ? preventiveResponse.data.schedules : []);
-        setComplianceRecords(Array.isArray(preventiveResponse.data?.compliance_records) ? preventiveResponse.data.compliance_records : []);
-      } catch (error) {
-        if (!isMounted) {
-          return;
-        }
-        if (error instanceof ApiRequestError) {
-          setMaintenanceError(error.message);
-          setPreventiveError(error.message);
-        } else {
-          setMaintenanceError('Unable to load maintenance status right now.');
-          setPreventiveError('Unable to load preventive maintenance reminders right now.');
-        }
-      } finally {
-        if (isMounted) {
-          setIsLoadingMaintenance(false);
-          setIsLoadingPreventive(false);
-        }
-      }
+      };
+
+      await Promise.allSettled([loadMaintenanceJobs(), loadPreventiveData()]);
     };
 
     void loadMaintenance();

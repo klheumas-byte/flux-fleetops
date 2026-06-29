@@ -1427,6 +1427,58 @@ def _serialize_compliance_record_with_relations(document: dict):
     return record
 
 
+def _serialize_driver_preventive_schedule(
+    document: dict,
+    *,
+    vehicle_document: dict | None,
+    current_odometer: float | None,
+):
+    schedule = serialize_preventive_schedule(document)
+    return {
+        "id": schedule["id"],
+        "vehicle_id": schedule["vehicle_id"],
+        "maintenance_type": schedule["maintenance_type"],
+        "maintenance_item": schedule["maintenance_item"],
+        "title": schedule["title"],
+        "description": schedule["description"],
+        "status": _determine_status(document),
+        "next_due_date": schedule["next_due_date"],
+        "next_due_odometer": schedule["next_due_odometer"],
+        "current_odometer": current_odometer,
+        "completed_date": schedule["completed_date"],
+        "vehicle": {
+            "id": str(vehicle_document.get("_id")),
+            "registration_number": vehicle_document.get("registration_number"),
+        } if vehicle_document else None,
+    }
+
+
+def _serialize_driver_compliance_record(
+    document: dict,
+    *,
+    vehicle_document: dict | None,
+    compliance_type_document: dict | None,
+):
+    record = serialize_compliance_record(document)
+    return {
+        "id": record["id"],
+        "vehicle_id": record["vehicle_id"],
+        "compliance_type_id": record["compliance_type_id"],
+        "compliance_item_name": record["compliance_item_name"],
+        "provider_or_authority_name": record["provider_or_authority_name"],
+        "issue_date": record["issue_date"],
+        "expiry_date": record["expiry_date"],
+        "renewal_frequency": record["renewal_frequency"],
+        "warning_days_before": record["warning_days_before"],
+        "status": _calculate_compliance_status(document),
+        "vehicle": {
+            "id": str(vehicle_document.get("_id")),
+            "registration_number": vehicle_document.get("registration_number"),
+        } if vehicle_document else None,
+        "compliance_type": serialize_compliance_type(compliance_type_document) if compliance_type_document else None,
+    }
+
+
 def list_compliance_item_types(current_role: str, active_only: bool = False):
     seed_default_compliance_item_types()
     query = {}
@@ -1587,6 +1639,68 @@ def list_compliance_records(current_user_id: str, current_role: str, vehicle_id:
         _notify_compliance_status(document)
         records.append(_serialize_compliance_record_with_relations(document))
     return records
+
+
+def get_driver_preventive_maintenance_snapshot(current_user_id: str) -> dict:
+    assigned_vehicle_id = _resolve_driver_vehicle_for_driver(current_user_id)
+    if assigned_vehicle_id is None:
+        return {"schedules": [], "compliance_records": []}
+
+    vehicle_id_candidates = _vehicle_id_query_candidates(str(assigned_vehicle_id))
+    vehicle_query = {"vehicle_id": {"$in": vehicle_id_candidates}}
+
+    # Driver portal reads stay side-effect-free so My Vehicle can render quickly.
+    schedule_documents = list(
+        preventive_maintenance_collection()
+        .find(vehicle_query)
+        .sort([("status", ASCENDING), ("next_due_date", ASCENDING), ("created_at", DESCENDING)])
+    )
+    compliance_documents = list(
+        compliance_records_collection()
+        .find(vehicle_query)
+        .sort([("status", ASCENDING), ("expiry_date", ASCENDING), ("created_at", DESCENDING)])
+    )
+
+    vehicle_document = vehicles_collection().find_one({"_id": assigned_vehicle_id})
+    current_odometer = _extract_vehicle_current_odometer(
+        assigned_vehicle_id,
+        fallback_odometer=vehicle_document.get("current_odometer") if vehicle_document else None,
+    )
+
+    compliance_type_ids = [
+        document.get("compliance_type_id")
+        for document in compliance_documents
+        if isinstance(document.get("compliance_type_id"), ObjectId)
+    ]
+    compliance_type_map = (
+        {
+            type_document["_id"]: type_document
+            for type_document in compliance_item_types_collection().find({"_id": {"$in": compliance_type_ids}})
+        }
+        if compliance_type_ids
+        else {}
+    )
+
+    schedules = [
+        _serialize_driver_preventive_schedule(
+            document,
+            vehicle_document=vehicle_document,
+            current_odometer=current_odometer,
+        )
+        for document in schedule_documents
+    ]
+    compliance_records = [
+        _serialize_driver_compliance_record(
+            document,
+            vehicle_document=vehicle_document,
+            compliance_type_document=compliance_type_map.get(document.get("compliance_type_id")),
+        )
+        for document in compliance_documents
+    ]
+    return {
+        "schedules": schedules,
+        "compliance_records": compliance_records,
+    }
 
 
 def update_compliance_record(record_id: str, payload: dict, current_user_id: str, current_role: str):

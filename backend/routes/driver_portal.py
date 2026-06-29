@@ -12,7 +12,7 @@ from services.maintenance_service import (
     list_driver_maintenance_progress_logs,
     submit_driver_maintenance_confirmation,
 )
-from services.preventive_maintenance_service import list_compliance_records, list_preventive_maintenance
+from services.preventive_maintenance_service import get_driver_preventive_maintenance_snapshot
 from services.wallet_service import get_logged_in_driver_wallet
 from utils.decorators import role_required
 from utils.responses import success_response
@@ -45,18 +45,7 @@ def get_driver_wallet():
 @driver_portal_bp.get("/preventive-maintenance")
 @role_required("driver")
 def get_driver_preventive_maintenance():
-    return success_response(
-        data={
-            "schedules": list_preventive_maintenance(
-                current_user_id=get_jwt_identity(),
-                current_role="driver",
-            ),
-            "compliance_records": list_compliance_records(
-                current_user_id=get_jwt_identity(),
-                current_role="driver",
-            ),
-        }
-    )
+    return success_response(data=get_driver_preventive_maintenance_snapshot(get_jwt_identity()))
 
 
 @driver_portal_bp.get("/fuel-logs")

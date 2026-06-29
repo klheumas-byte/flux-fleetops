@@ -5,12 +5,22 @@ function resolveApiBaseUrl() {
   }
 
   if (typeof window !== 'undefined') {
+    const { origin, hostname } = window.location;
+    const normalizedHostname = hostname.toLowerCase();
+    const isLocalhost =
+      normalizedHostname === 'localhost' ||
+      normalizedHostname === '127.0.0.1' ||
+      normalizedHostname === '0.0.0.0';
+
+    if (!isLocalhost) {
+      return `${origin}/api`;
+    }
+
     const protocol = window.location.protocol || 'http:';
-    const hostname = window.location.hostname || '127.0.0.1';
     return `${protocol}//${hostname}:5000/api`;
   }
 
-  return 'http://127.0.0.1:5000/api';
+  return '/api';
 }
 
 const API_BASE_URL = resolveApiBaseUrl();

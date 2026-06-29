@@ -71,10 +71,52 @@ pip install -r requirements.txt
 
 3. Copy `.env.example` to `.env`.
 4. Start MongoDB locally or update `MONGO_URI`.
-5. Run the API:
+5. For local development, explicitly enable development mode:
+
+```env
+FLASK_ENV=development
+FLASK_DEBUG=1
+DEBUG=true
+```
+
+6. Run the API:
 
 ```bash
-flask --app app.py --debug run
+flask --app app.py run
+```
+
+## Production deployment
+
+Set these environment variables in Render or Railway:
+
+```env
+FLASK_ENV=production
+FLASK_DEBUG=0
+DEBUG=false
+```
+
+Also set:
+
+```env
+SECRET_KEY=<long-random-secret>
+JWT_SECRET_KEY=<long-random-jwt-secret>
+MONGO_URI=<production-mongodb-uri>
+CORS_ORIGINS=https://your-frontend-domain.com
+SEED_DEMO_ON_STARTUP=false
+```
+
+Do not use `flask --debug run` or `app.run(debug=True)` in production.
+
+For the frontend, set `VITE_API_BASE_URL=https://your-backend-domain.com/api` before running `npm run build`.
+
+If Render is using the repo root as the service root, use the top-level `Procfile`.
+
+If Render is using `backend/` as the service root, use `backend/Procfile`.
+
+Both start the app with:
+
+```bash
+gunicorn app:flask_app --bind 0.0.0.0:$PORT
 ```
 
 ## Demo accounts

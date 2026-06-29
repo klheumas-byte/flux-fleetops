@@ -21,9 +21,35 @@ DEVELOPMENT_DEFAULT_MONGO_URI = "mongodb://localhost:27017"
 LOCALHOST_TOKENS = ("localhost", "127.0.0.1")
 
 
+def _get_bool_env(name: str, default: bool = False) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return str(raw_value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _get_env_name() -> str:
+    raw_env = str(os.getenv("FLASK_ENV", "production")).strip().lower()
+    if raw_env in {"dev", "development"}:
+        return "development"
+    if raw_env in {"prod", "production"}:
+        return "production"
+    return "production"
+
+
+def _is_debug_enabled(env_name: str) -> bool:
+    explicit_debug = os.getenv("DEBUG")
+    explicit_flask_debug = os.getenv("FLASK_DEBUG")
+    if explicit_debug is not None:
+        return _get_bool_env("DEBUG", default=False)
+    if explicit_flask_debug is not None:
+        return _get_bool_env("FLASK_DEBUG", default=False)
+    return env_name == "development"
+
+
 class BaseConfig:
-    ENV_NAME = os.getenv("FLASK_ENV", "development")
-    DEBUG = ENV_NAME == "development"
+    ENV_NAME = _get_env_name()
+    DEBUG = _is_debug_enabled(ENV_NAME)
     TESTING = False
     SECRET_KEY = os.getenv("SECRET_KEY", "change-me")
     JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "change-me-too")
@@ -33,6 +59,7 @@ class BaseConfig:
     MONGO_URI = os.getenv("MONGO_URI", DEVELOPMENT_DEFAULT_MONGO_URI)
     MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "flux_fleet")
     MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "5"))
+    ENABLE_PROFILE_EXPLAINS = _get_bool_env("ENABLE_PROFILE_EXPLAINS", default=False)
     MONGO_SERVER_SELECTION_TIMEOUT_MS = int(os.getenv("MONGO_SERVER_SELECTION_TIMEOUT_MS", "5000"))
     MONGO_CONNECT_TIMEOUT_MS = int(os.getenv("MONGO_CONNECT_TIMEOUT_MS", "5000"))
     MONGO_SOCKET_TIMEOUT_MS = int(os.getenv("MONGO_SOCKET_TIMEOUT_MS", "5000"))
@@ -88,6 +115,9 @@ class BaseConfig:
         ):
             insecure_fields.append("MONGO_URI")
 
+        if cls.SEED_DEMO_ON_STARTUP:
+            insecure_fields.append("SEED_DEMO_ON_STARTUP")
+
         if missing_fields or insecure_fields:
             problem_parts: list[str] = []
             if missing_fields:
@@ -98,11 +128,13 @@ class BaseConfig:
 
 
 class DevelopmentConfig(BaseConfig):
-    DEBUG = True
+    ENV_NAME = "development"
+    DEBUG = _is_debug_enabled(ENV_NAME)
 
 
 class ProductionConfig(BaseConfig):
-    DEBUG = False
+    ENV_NAME = "production"
+    DEBUG = _is_debug_enabled(ENV_NAME)
 
 
 CONFIG_MAP = {
@@ -112,7 +144,7 @@ CONFIG_MAP = {
 
 
 def get_config(config_name: str | None = None):
-    selected_name = config_name or os.getenv("FLASK_ENV", "development")
-    config_class = CONFIG_MAP.get(selected_name, DevelopmentConfig)
+    selected_name = str(config_name or _get_env_name()).strip().lower()
+    config_class = CONFIG_MAP.get(selected_name, ProductionConfig)
     config_class.validate()
     return config_class

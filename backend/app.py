@@ -22,6 +22,7 @@ from services.maintenance_service import ensure_maintenance_indexes
 from services.master_data_service import ensure_master_data_indexes
 from services.notification_service import ensure_notification_indexes
 from services.preventive_maintenance_service import ensure_preventive_maintenance_indexes, seed_preventive_schedules_for_existing_vehicles
+from services.report_service import ensure_report_indexes
 from services.ride_service import ensure_ride_indexes
 from services.system_settings_service import ensure_system_settings_indexes
 from services.vehicle_service import ensure_vehicle_indexes
@@ -75,6 +76,7 @@ def create_app(config_name: str | None = None) -> Flask:
                 ensure_master_data_indexes()
                 ensure_notification_indexes()
                 ensure_preventive_maintenance_indexes()
+                ensure_report_indexes()
                 ensure_ride_indexes()
                 ensure_system_settings_indexes()
                 ensure_vehicle_indexes()

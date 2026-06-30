@@ -1,7 +1,10 @@
 from collections import Counter, defaultdict
 from datetime import date, datetime, time, timedelta, timezone
+from time import perf_counter
 
 from bson import ObjectId
+from flask import current_app
+from pymongo import ASCENDING, DESCENDING
 
 from extensions import get_collection
 from models.user import serialize_user
@@ -9,6 +12,7 @@ from services.driver_analytics_service import list_driver_analytics
 from services.system_settings_service import get_admin_role_permissions
 from services.vehicle_service import get_vehicle_economics_dashboard
 from utils.api_error import ApiError
+from utils.mongo_indexes import ensure_indexes_for_collection
 from utils.performance import build_cache_key, get_ttl_cached, set_ttl_cached
 
 
@@ -64,8 +68,205 @@ def finance_accounts_collection():
     return get_collection("finance_accounts")
 
 
+REPORT_DRIVER_PROJECTION = {
+    "full_name": 1,
+    "email": 1,
+    "phone": 1,
+    "role": 1,
+    "status": 1,
+    "last_login": 1,
+    "created_at": 1,
+    "updated_at": 1,
+    "driver_profile": 1,
+}
+
+REPORT_VEHICLE_PROJECTION = {
+    "registration_number": 1,
+    "status": 1,
+    "asset_owner_name": 1,
+    "asset_owner_type": 1,
+    "operating_fleet_name": 1,
+}
+
+REPORT_COLLECTION_PROJECTION = {
+    "collection_date": 1,
+    "amount": 1,
+    "status": 1,
+    "payment_method": 1,
+    "driver_id": 1,
+    "vehicle_id": 1,
+    "created_at": 1,
+    "updated_at": 1,
+    "approved_at": 1,
+}
+
+REPORT_DEPOSIT_PROJECTION = {
+    "deposit_date": 1,
+    "amount": 1,
+    "status": 1,
+    "deposit_method": 1,
+    "destination_name": 1,
+    "finance_account_snapshot.branch": 1,
+    "created_at": 1,
+    "updated_at": 1,
+    "verified_at": 1,
+}
+
+REPORT_EXPENSE_PROJECTION = {
+    "expense_date": 1,
+    "amount": 1,
+    "status": 1,
+    "expense_category": 1,
+    "expense_title": 1,
+    "driver_id": 1,
+    "vehicle_id": 1,
+    "finance_account_snapshot.branch": 1,
+    "created_at": 1,
+    "updated_at": 1,
+    "approved_at": 1,
+    "paid_at": 1,
+}
+
+REPORT_FUEL_PROJECTION = {
+    "fuel_date": 1,
+    "amount": 1,
+    "litres": 1,
+    "fuel_type": 1,
+    "status": 1,
+    "driver_id": 1,
+    "vehicle_id": 1,
+    "created_at": 1,
+    "updated_at": 1,
+}
+
+REPORT_MAINTENANCE_PROJECTION = {
+    "maintenance_type": 1,
+    "title": 1,
+    "status": 1,
+    "actual_cost": 1,
+    "estimated_cost": 1,
+    "driver_id": 1,
+    "vehicle_id": 1,
+    "completion_date": 1,
+    "start_date": 1,
+    "target_completion_date": 1,
+    "created_at": 1,
+    "updated_at": 1,
+}
+
+REPORT_FAULT_PROJECTION = {
+    "severity": 1,
+    "status": 1,
+    "description": 1,
+    "driver_id": 1,
+    "vehicle_id": 1,
+    "reported_at": 1,
+    "created_at": 1,
+    "updated_at": 1,
+}
+
+REPORT_CUSTOMER_PROJECTION = {
+    "full_name": 1,
+    "phone_number": 1,
+    "customer_category": 1,
+    "customer_category_id": 1,
+    "relationship_category": 1,
+    "lead_status": 1,
+    "lead_value_estimate": 1,
+    "status": 1,
+    "created_by_name": 1,
+    "created_by_role": 1,
+    "created_by_driver_id": 1,
+    "preferred_driver_id": 1,
+    "source": 1,
+    "created_at": 1,
+    "updated_at": 1,
+}
+
+REPORT_BOOKING_PROJECTION = {
+    "booking_id": 1,
+    "pickup_at": 1,
+    "pickup_date": 1,
+    "booking_type": 1,
+    "status": 1,
+    "expected_fare": 1,
+    "driver_id": 1,
+    "vehicle_id": 1,
+    "customer_id": 1,
+    "pickup_location": 1,
+    "destination": 1,
+    "is_recurring_template": 1,
+    "created_at": 1,
+    "updated_at": 1,
+}
+
+REPORT_RIDE_PROJECTION = {
+    "trip_id": 1,
+    "ride_id": 1,
+    "trip_date": 1,
+    "trip_source": 1,
+    "trip_purpose": 1,
+    "status": 1,
+    "driver_id": 1,
+    "vehicle_id": 1,
+    "customer_id": 1,
+    "pickup_area": 1,
+    "destination_area": 1,
+    "created_at": 1,
+    "updated_at": 1,
+}
+
+
 def now_utc():
     return datetime.now(timezone.utc)
+
+
+def ensure_report_indexes():
+    ensure_indexes_for_collection(
+        deposits_collection(),
+        [
+            {"keys": [("finance_account_snapshot.branch", ASCENDING), ("deposit_date", DESCENDING)]},
+        ],
+        collection_name="deposits_reports",
+    )
+    ensure_indexes_for_collection(
+        expenses_collection(),
+        [
+            {"keys": [("finance_account_snapshot.branch", ASCENDING), ("expense_date", DESCENDING)]},
+        ],
+        collection_name="expenses_reports",
+    )
+    ensure_indexes_for_collection(
+        fuel_logs_collection(),
+        [
+            {"keys": [("driver_id", ASCENDING), ("fuel_date", DESCENDING)]},
+        ],
+        collection_name="fuel_logs_reports",
+    )
+    ensure_indexes_for_collection(
+        faults_collection(),
+        [
+            {"keys": [("driver_id", ASCENDING), ("reported_at", DESCENDING)]},
+            {"keys": [("vehicle_id", ASCENDING), ("reported_at", DESCENDING)]},
+        ],
+        collection_name="faults_reports",
+    )
+    ensure_indexes_for_collection(
+        rides_collection(),
+        [
+            {"keys": [("driver_id", ASCENDING), ("trip_date", DESCENDING), ("created_at", DESCENDING)]},
+        ],
+        collection_name="rides_reports",
+    )
+    ensure_indexes_for_collection(
+        customers_collection(),
+        [
+            {"keys": [("created_by_role", ASCENDING), ("created_at", DESCENDING)]},
+            {"keys": [("customer_category_id", ASCENDING), ("created_at", DESCENDING)]},
+            {"keys": [("source", ASCENDING), ("created_at", DESCENDING)]},
+        ],
+        collection_name="customers_reports",
+    )
 
 
 def _normalize_string(value):
@@ -463,21 +664,14 @@ def _build_fault_report(fault_documents: list[dict], *, filters: dict, drivers_b
     )
 
 
-def _build_booking_customer_scope(booking_documents: list[dict], ride_documents: list[dict], *, filters: dict):
-    customer_ids = set()
-    for document in booking_documents:
-        if _matches_selected_id(document.get("driver_id"), filters["driver_id"]) and _matches_selected_id(document.get("vehicle_id"), filters["vehicle_id"]) and _date_in_range(document.get("pickup_at") or document.get("pickup_date"), filters["date_from"], filters["date_to"]):
-            if document.get("customer_id"):
-                customer_ids.add(_id_string(document.get("customer_id")))
-    for document in ride_documents:
-        if _matches_selected_id(document.get("driver_id"), filters["driver_id"]) and _matches_selected_id(document.get("vehicle_id"), filters["vehicle_id"]) and _date_in_range(document.get("trip_date"), filters["date_from"], filters["date_to"]):
-            if document.get("customer_id"):
-                customer_ids.add(_id_string(document.get("customer_id")))
-    return customer_ids
-
-
-def _build_customer_report(customer_documents: list[dict], booking_documents: list[dict], ride_documents: list[dict], *, filters: dict, active_filters: list[str]):
-    scoped_customer_ids = _build_booking_customer_scope(booking_documents, ride_documents, filters=filters)
+def _build_customer_report(
+    customer_documents: list[dict],
+    *,
+    filters: dict,
+    active_filters: list[str],
+    scoped_customer_ids: set[str] | None = None,
+):
+    scoped_customer_ids = scoped_customer_ids or set()
     filtered = []
     for document in customer_documents:
         if filters["driver_id"]:
@@ -815,6 +1009,120 @@ def _apply_common_filters(query: dict, *, filters: dict, driver_field: str | Non
     return query
 
 
+def _fetch_documents(collection, query: dict, projection: dict | None = None, *, sort_fields: list[tuple[str, int]] | None = None) -> list[dict]:
+    cursor = collection.find(query, projection)
+    if sort_fields:
+        cursor = cursor.sort(sort_fields)
+    return list(cursor)
+
+
+def _sorted_distinct_strings(collection, field_name: str) -> list[str]:
+    values = {
+        normalized
+        for raw in collection.distinct(field_name)
+        if (normalized := _normalize_string(raw))
+    }
+    return sorted(values)
+
+
+def _build_booking_datetime_or_string_query(filters: dict) -> dict:
+    clauses = []
+    datetime_query = _build_date_query("pickup_at", filters)
+    string_query = _build_string_date_query("pickup_date", filters)
+    if datetime_query:
+        clauses.append(datetime_query)
+    if string_query:
+        clauses.append(string_query)
+    if not clauses:
+        return {}
+    if len(clauses) == 1:
+        return clauses[0]
+    return {"$or": clauses}
+
+
+def _load_scoped_customer_ids(filters: dict) -> set[str]:
+    booking_query = _apply_common_filters(
+        _build_booking_datetime_or_string_query(filters),
+        filters=filters,
+        driver_field="driver_id",
+        vehicle_field="vehicle_id",
+    )
+    ride_query = _apply_common_filters(
+        _build_string_date_query("trip_date", filters),
+        filters=filters,
+        driver_field="driver_id",
+        vehicle_field="vehicle_id",
+    )
+    customer_ids = {
+        _id_string(customer_id)
+        for customer_id in bookings_collection().distinct("customer_id", booking_query)
+        if customer_id
+    }
+    customer_ids.update(
+        _id_string(customer_id)
+        for customer_id in rides_collection().distinct("customer_id", ride_query)
+        if customer_id
+    )
+    return customer_ids
+
+
+def _build_customer_query(filters: dict, scoped_customer_ids: set[str] | None = None) -> dict:
+    query: dict = {}
+    created_at_query = _build_date_query("created_at", filters)
+    if created_at_query:
+        query.update(created_at_query)
+
+    if filters["creator_role"]:
+        query["created_by_role"] = filters["creator_role"]
+    if filters["customer_category_id"]:
+        category_object_id = _optional_object_id(filters["customer_category_id"])
+        query["customer_category_id"] = category_object_id or filters["customer_category_id"]
+    if filters["source"]:
+        query["source"] = filters["source"]
+
+    if filters["driver_id"]:
+        driver_object_id = _optional_object_id(filters["driver_id"])
+        or_conditions = []
+        if driver_object_id:
+            or_conditions.extend(
+                [
+                    {"preferred_driver_id": driver_object_id},
+                    {"created_by_driver_id": driver_object_id},
+                ]
+            )
+        if scoped_customer_ids:
+            scoped_object_ids = [ObjectId(customer_id) for customer_id in scoped_customer_ids if ObjectId.is_valid(customer_id)]
+            if scoped_object_ids:
+                or_conditions.append({"_id": {"$in": scoped_object_ids}})
+        if not or_conditions:
+            return {"_id": {"$in": []}}
+        query["$or"] = or_conditions
+    elif filters["vehicle_id"]:
+        if not scoped_customer_ids:
+            return {"_id": {"$in": []}}
+        scoped_object_ids = [ObjectId(customer_id) for customer_id in scoped_customer_ids if ObjectId.is_valid(customer_id)]
+        if not scoped_object_ids:
+            return {"_id": {"$in": []}}
+        query["_id"] = {"$in": scoped_object_ids}
+
+    return query
+
+
+def _log_finance_report_duration(*, started_at: float, category: str | None, filters: dict, selected_categories: set[str]) -> None:
+    duration_ms = (perf_counter() - started_at) * 1000
+    if duration_ms < 1500:
+        return
+    current_app.logger.warning(
+        "[Flux Reports] SLOW finance report category=%s duration_ms=%.2f selected=%s driver_id=%s vehicle_id=%s branch=%s",
+        category or "all",
+        duration_ms,
+        ",".join(sorted(selected_categories)),
+        filters["driver_id"],
+        filters["vehicle_id"],
+        filters["branch"],
+    )
+
+
 def get_finance_reports(
     *,
     current_role: str,
@@ -830,6 +1138,7 @@ def get_finance_reports(
     customer_category_id: str | None = None,
     source: str | None = None,
 ) -> dict:
+    request_started_at = perf_counter()
     filters = _normalize_filters(
         date_from=date_from,
         date_to=date_to,
@@ -860,9 +1169,18 @@ def get_finance_reports(
     if cached is not None:
         return cached
 
-    driver_documents = list(users_collection().find({"role": "driver"}).sort("full_name", 1))
-    vehicle_documents = list(vehicles_collection().find({}).sort("registration_number", 1))
-    finance_accounts = list(finance_accounts_collection().find({}).sort("account_name", 1))
+    driver_documents = _fetch_documents(
+        users_collection(),
+        {"role": "driver"},
+        REPORT_DRIVER_PROJECTION,
+        sort_fields=[("full_name", ASCENDING)],
+    )
+    vehicle_documents = _fetch_documents(
+        vehicles_collection(),
+        {},
+        REPORT_VEHICLE_PROJECTION,
+        sort_fields=[("registration_number", ASCENDING)],
+    )
     current_user = (
         users_collection().find_one({"_id": ObjectId(current_user_id)})
         if current_user_id and ObjectId.is_valid(current_user_id)
@@ -881,14 +1199,7 @@ def get_finance_reports(
         }
         for document in vehicle_documents
     }
-    branches = sorted(
-        {
-            branch_name
-            for account in finance_accounts
-            if (branch_name := _normalize_string(account.get("branch")))
-        }
-    )
-    customer_documents = list(customers_collection().find({}))
+    branches = _sorted_distinct_strings(finance_accounts_collection(), "branch")
     active_filters = _active_filters_labels(filters, drivers_by_id=drivers_by_id, vehicles_by_id=vehicles_by_id)
 
     selected_categories = (
@@ -916,27 +1227,50 @@ def get_finance_reports(
     }
 
     if "revenue" in selected_categories:
-        collections_query = _apply_common_filters(
-            {"status": "approved", **_build_string_date_query("collection_date", filters)},
-            filters=filters,
-            driver_field="driver_id",
-            vehicle_field="vehicle_id",
+        if not filters["branch"]:
+            collections_query = _apply_common_filters(
+                {"status": "approved", **_build_string_date_query("collection_date", filters)},
+                filters=filters,
+                driver_field="driver_id",
+                vehicle_field="vehicle_id",
+            )
+            collection_documents = _fetch_documents(
+                collections_collection(),
+                collections_query,
+                REPORT_COLLECTION_PROJECTION,
+                sort_fields=[("collection_date", DESCENDING), ("created_at", DESCENDING)],
+            )
+            reports["collections"] = _build_collections_report(
+                collection_documents,
+                filters=filters,
+                drivers_by_id=drivers_by_id,
+                vehicles_by_id=vehicles_by_id,
+                active_filters=active_filters,
+            )
+
+        deposit_documents = _fetch_documents(
+            deposits_collection(),
+            {
+                **_build_string_date_query("deposit_date", filters),
+                **({"finance_account_snapshot.branch": filters["branch"]} if filters["branch"] else {}),
+            },
+            REPORT_DEPOSIT_PROJECTION,
+            sort_fields=[("deposit_date", DESCENDING), ("created_at", DESCENDING)],
         )
         expenses_query = _apply_common_filters(
-            _build_string_date_query("expense_date", filters),
+            {
+                **_build_string_date_query("expense_date", filters),
+                **({"finance_account_snapshot.branch": filters["branch"]} if filters["branch"] else {}),
+            },
             filters=filters,
             driver_field="driver_id",
             vehicle_field="vehicle_id",
         )
-        collection_documents = list(collections_collection().find(collections_query))
-        deposit_documents = list(deposits_collection().find(_build_string_date_query("deposit_date", filters)))
-        expense_documents = list(expenses_collection().find(expenses_query))
-        reports["collections"] = _build_collections_report(
-            collection_documents,
-            filters=filters,
-            drivers_by_id=drivers_by_id,
-            vehicles_by_id=vehicles_by_id,
-            active_filters=active_filters,
+        expense_documents = _fetch_documents(
+            expenses_collection(),
+            expenses_query,
+            REPORT_EXPENSE_PROJECTION,
+            sort_fields=[("expense_date", DESCENDING), ("created_at", DESCENDING)],
         )
         reports["deposits"] = _build_deposits_report(
             deposit_documents,
@@ -951,14 +1285,19 @@ def get_finance_reports(
             active_filters=active_filters,
         )
 
-    if "fuel" in selected_categories:
+    if "fuel" in selected_categories and not filters["branch"]:
         fuel_query = _apply_common_filters(
             _build_string_date_query("fuel_date", filters),
             filters=filters,
             driver_field="driver_id",
             vehicle_field="vehicle_id",
         )
-        fuel_documents = list(fuel_logs_collection().find(fuel_query))
+        fuel_documents = _fetch_documents(
+            fuel_logs_collection(),
+            fuel_query,
+            REPORT_FUEL_PROJECTION,
+            sort_fields=[("fuel_date", DESCENDING), ("created_at", DESCENDING)],
+        )
         reports["fuel"] = _build_fuel_report(
             fuel_documents,
             filters=filters,
@@ -967,11 +1306,21 @@ def get_finance_reports(
             active_filters=active_filters,
         )
 
-    if "maintenance" in selected_categories:
+    if "maintenance" in selected_categories and not filters["branch"]:
         maintenance_query = _apply_common_filters({}, filters=filters, driver_field="driver_id", vehicle_field="vehicle_id")
         fault_query = _apply_common_filters({}, filters=filters, driver_field="driver_id", vehicle_field="vehicle_id")
-        maintenance_documents = list(maintenance_jobs_collection().find(maintenance_query))
-        fault_documents = list(faults_collection().find(fault_query))
+        maintenance_documents = _fetch_documents(
+            maintenance_jobs_collection(),
+            maintenance_query,
+            REPORT_MAINTENANCE_PROJECTION,
+            sort_fields=[("created_at", DESCENDING)],
+        )
+        fault_documents = _fetch_documents(
+            faults_collection(),
+            fault_query,
+            REPORT_FAULT_PROJECTION,
+            sort_fields=[("reported_at", DESCENDING), ("created_at", DESCENDING)],
+        )
         reports["maintenance"] = _build_maintenance_report(
             maintenance_documents,
             filters=filters,
@@ -988,19 +1337,26 @@ def get_finance_reports(
         )
 
     if "customers" in selected_categories:
-        booking_documents = list(bookings_collection().find(_apply_common_filters({}, filters=filters, driver_field="driver_id", vehicle_field="vehicle_id")))
-        ride_documents = list(rides_collection().find(_apply_common_filters(_build_string_date_query("trip_date", filters), filters=filters, driver_field="driver_id", vehicle_field="vehicle_id")))
+        scoped_customer_ids = _load_scoped_customer_ids(filters) if filters["driver_id"] or filters["vehicle_id"] else set()
+        customer_documents = _fetch_documents(
+            customers_collection(),
+            _build_customer_query(filters, scoped_customer_ids),
+            REPORT_CUSTOMER_PROJECTION,
+            sort_fields=[("created_at", DESCENDING)],
+        )
         reports["customers"] = _build_customer_report(
             customer_documents,
-            booking_documents,
-            ride_documents,
             filters=filters,
             active_filters=active_filters,
+            scoped_customer_ids=scoped_customer_ids,
         )
 
-    if "trips" in selected_categories:
+    if "trips" in selected_categories and not filters["branch"]:
         booking_query = _apply_common_filters(
-            {"is_recurring_template": False},
+            {
+                "is_recurring_template": False,
+                **_build_booking_datetime_or_string_query(filters),
+            },
             filters=filters,
             driver_field="driver_id",
             vehicle_field="vehicle_id",
@@ -1011,8 +1367,18 @@ def get_finance_reports(
             driver_field="driver_id",
             vehicle_field="vehicle_id",
         )
-        booking_documents = list(bookings_collection().find(booking_query))
-        ride_documents = list(rides_collection().find(ride_query))
+        booking_documents = _fetch_documents(
+            bookings_collection(),
+            booking_query,
+            REPORT_BOOKING_PROJECTION,
+            sort_fields=[("pickup_at", DESCENDING), ("created_at", DESCENDING)],
+        )
+        ride_documents = _fetch_documents(
+            rides_collection(),
+            ride_query,
+            REPORT_RIDE_PROJECTION,
+            sort_fields=[("trip_date", DESCENDING), ("created_at", DESCENDING)],
+        )
         reports["bookings"] = _build_booking_report(
             booking_documents,
             filters=filters,
@@ -1037,22 +1403,24 @@ def get_finance_reports(
         )
 
     if "vehicles" in selected_categories:
-        ride_documents = list(
-            rides_collection().find(
+        if not filters["branch"]:
+            vehicle_ride_documents = _fetch_documents(
+                rides_collection(),
                 _apply_common_filters(
                     _build_string_date_query("trip_date", filters),
                     filters=filters,
                     driver_field="driver_id",
                     vehicle_field="vehicle_id",
-                )
+                ),
+                REPORT_RIDE_PROJECTION,
+                sort_fields=[("trip_date", DESCENDING), ("created_at", DESCENDING)],
             )
-        )
-        reports["vehicle_performance"] = _build_vehicle_performance_report(
-            ride_documents,
-            vehicle_documents,
-            filters=filters,
-            active_filters=active_filters,
-        )
+            reports["vehicle_performance"] = _build_vehicle_performance_report(
+                vehicle_ride_documents,
+                vehicle_documents,
+                filters=filters,
+                active_filters=active_filters,
+            )
         vehicle_economics_dashboard = _filter_economics_dashboard(
             get_vehicle_economics_dashboard(current_role=current_role),
             vehicle_id=filters["vehicle_id"],
@@ -1070,6 +1438,24 @@ def get_finance_reports(
         }
         reports["vehicle_economics"] = vehicle_economics_dashboard
 
+    customer_creator_roles = _sorted_distinct_strings(customers_collection(), "created_by_role")
+    customer_categories = _sorted_distinct_strings(customers_collection(), "customer_category")
+    customer_sources = _sorted_distinct_strings(customers_collection(), "source")
+    customer_category_items = sorted(
+        [
+            {"id": _id_string(item["_id"]["id"]), "name": item["_id"]["name"]}
+            for item in customers_collection().aggregate(
+                [
+                    {"$match": {"customer_category_id": {"$ne": None}, "customer_category": {"$ne": None}}},
+                    {"$group": {"_id": {"id": "$customer_category_id", "name": "$customer_category"}}},
+                    {"$sort": {"_id.name": 1}},
+                ]
+            )
+            if item["_id"].get("id") and item["_id"].get("name")
+        ],
+        key=lambda item: item["name"],
+    )
+
     result = {
         "generated_by": serialize_user(current_user) if current_user else None,
         "generated_at": now_utc().isoformat(),
@@ -1085,42 +1471,17 @@ def get_finance_reports(
                 }
             ),
             "branches": branches,
-            "creator_roles": sorted(
-                {
-                    role
-                    for document in customer_documents
-                    if (role := _normalize_string(document.get("created_by_role")))
-                }
-            ),
-            "customer_categories": sorted(
-                {
-                    document.get("customer_category")
-                    for document in customer_documents
-                    if document.get("customer_category")
-                }
-            ),
-            "customer_category_items": sorted(
-                [
-                    {"id": item_id, "name": item_name}
-                    for item_id, item_name in {
-                        (
-                            _id_string(document.get("customer_category_id")),
-                            document.get("customer_category"),
-                        )
-                        for document in customer_documents
-                        if document.get("customer_category") and document.get("customer_category_id")
-                    }
-                ],
-                key=lambda item: item["name"],
-            ),
-            "sources": sorted(
-                {
-                    document.get("source")
-                    for document in customer_documents
-                    if document.get("source")
-                }
-            ),
+            "creator_roles": customer_creator_roles,
+            "customer_categories": customer_categories,
+            "customer_category_items": customer_category_items,
+            "sources": customer_sources,
         },
         "reports": reports,
     }
+    _log_finance_report_duration(
+        started_at=request_started_at,
+        category=category,
+        filters=filters,
+        selected_categories=selected_categories,
+    )
     return set_ttl_cached(cache_key, result, ttl_seconds=15)

@@ -3,10 +3,12 @@ from datetime import date, datetime, timedelta, timezone
 from time import perf_counter
 
 from flask import current_app
+from pymongo import ASCENDING, DESCENDING
 from extensions import get_collection
 from services.payment_cycle_service import APPROVED_PAYMENT_STATUSES, get_weekly_cycle_window
 from services.system_settings_service import get_admin_role_permissions, should_include_fuel_in_profitability
 from services.vehicle_service import _matches_company_expense, get_vehicle_economics_dashboard
+from utils.mongo_indexes import ensure_indexes_for_collection
 from utils.performance import build_cache_key, get_ttl_cached, log_db_duration, set_ttl_cached
 
 
@@ -65,6 +67,30 @@ def compliance_records_collection():
 
 def incidents_collection():
     return get_collection("incidents")
+
+
+def ensure_dashboard_indexes():
+    ensure_indexes_for_collection(
+        fuel_logs_collection(),
+        [
+            {"keys": [("status", ASCENDING), ("fuel_date", DESCENDING), ("created_at", DESCENDING)]},
+        ],
+        collection_name="fuel_logs_dashboard",
+    )
+    ensure_indexes_for_collection(
+        expenses_collection(),
+        [
+            {"keys": [("status", ASCENDING), ("expense_date", DESCENDING), ("expense_category", ASCENDING)]},
+        ],
+        collection_name="expenses_dashboard",
+    )
+    ensure_indexes_for_collection(
+        compliance_records_collection(),
+        [
+            {"keys": [("status", ASCENDING), ("expiry_date", ASCENDING)], "options": {"sparse": True}},
+        ],
+        collection_name="vehicle_compliance_records_dashboard",
+    )
 
 
 def _safe_float(value) -> float:
@@ -156,6 +182,338 @@ def _load_driver_lookup() -> dict[str, str]:
         for driver in drivers
     }
     return set_ttl_cached(cache_key, lookup, ttl_seconds=60)
+
+
+def _dashboard_vehicle_summary_rows():
+    cache_key = "dashboard:vehicle_summary_rows"
+    cached = get_ttl_cached(cache_key)
+    if cached is not None:
+        return cached
+    rows = list(
+        vehicles_collection().aggregate(
+            [
+                {
+                    "$project": {
+                        "status": 1,
+                        "current_estimated_value": 1,
+                        "purchase_cost": 1,
+                        "total_vehicle_investment": 1,
+                        "amount_recovered": 1,
+                        "remaining_balance": 1,
+                        "asset_owner_name": 1,
+                        "asset_owner_type": 1,
+                    }
+                },
+                {
+                    "$facet": {
+                        "headline": [
+                            {
+                                "$group": {
+                                    "_id": None,
+                                    "total_managed_fleet": {"$sum": 1},
+                                    "total_active_vehicles": {
+                                        "$sum": {"$cond": [{"$in": ["$status", list(ACTIVE_VEHICLE_STATUSES)]}, 1, 0]}
+                                    },
+                                    "total_managed_fleet_value": {
+                                        "$sum": {"$ifNull": ["$current_estimated_value", {"$ifNull": ["$purchase_cost", 0]}]}
+                                    },
+                                    "total_fleet_investment": {
+                                        "$sum": {"$ifNull": ["$total_vehicle_investment", {"$ifNull": ["$purchase_cost", 0]}]}
+                                    },
+                                    "total_capital_recovered": {"$sum": {"$ifNull": ["$amount_recovered", 0]}},
+                                    "outstanding_capital": {"$sum": {"$ifNull": ["$remaining_balance", 0]}},
+                                }
+                            }
+                        ],
+                        "owners": [
+                            {
+                                "$group": {
+                                    "_id": {
+                                        "asset_owner_name": {"$ifNull": ["$asset_owner_name", "Unspecified Owner"]},
+                                        "asset_owner_type": {"$ifNull": ["$asset_owner_type", "Unknown"]},
+                                    },
+                                    "vehicle_count": {"$sum": 1},
+                                    "fleet_value": {
+                                        "$sum": {"$ifNull": ["$current_estimated_value", {"$ifNull": ["$purchase_cost", 0]}]}
+                                    },
+                                    "capital_basis_for_recovery": {
+                                        "$sum": {"$ifNull": ["$total_vehicle_investment", {"$ifNull": ["$purchase_cost", 0]}]}
+                                    },
+                                    "capital_recovered": {"$sum": {"$ifNull": ["$amount_recovered", 0]}},
+                                    "outstanding_capital": {"$sum": {"$ifNull": ["$remaining_balance", 0]}},
+                                }
+                            },
+                            {"$sort": {"_id.asset_owner_name": 1}},
+                        ],
+                    }
+                }
+            ]
+        )
+    )
+    return set_ttl_cached(cache_key, rows, ttl_seconds=300)
+
+
+def _dashboard_collections_summary_rows(week_window: dict):
+    cache_key = build_cache_key(
+        "dashboard:collections_summary_rows",
+        week_start=week_window.get("week_start"),
+        week_end=week_window.get("week_end"),
+    )
+    cached = get_ttl_cached(cache_key)
+    if cached is not None:
+        return cached
+    rows = list(
+        collections_collection().aggregate(
+            [
+                {
+                    "$facet": {
+                        "weekly_totals": [
+                            {
+                                "$match": {
+                                    "status": {"$in": list(APPROVED_PAYMENT_STATUSES)},
+                                    "collection_date": {
+                                        "$gte": week_window["week_start"],
+                                        "$lte": week_window["week_end"],
+                                    },
+                                }
+                            },
+                            {
+                                "$group": {
+                                    "_id": None,
+                                    "approved_total": {"$sum": {"$ifNull": ["$amount", 0]}},
+                                }
+                            },
+                        ],
+                        "by_assignment": [
+                            {
+                                "$match": {
+                                    "status": {"$in": list(APPROVED_PAYMENT_STATUSES)},
+                                    "collection_date": {
+                                        "$gte": week_window["week_start"],
+                                        "$lte": week_window["week_end"],
+                                    },
+                                    "assignment_id": {"$ne": None},
+                                }
+                            },
+                            {"$group": {"_id": "$assignment_id", "amount": {"$sum": {"$ifNull": ["$amount", 0]}}}},
+                        ],
+                        "by_vehicle": [
+                            {
+                                "$match": {
+                                    "status": {"$in": list(APPROVED_PAYMENT_STATUSES)},
+                                    "collection_date": {
+                                        "$gte": week_window["week_start"],
+                                        "$lte": week_window["week_end"],
+                                    },
+                                    "vehicle_id": {"$ne": None},
+                                }
+                            },
+                            {"$group": {"_id": "$vehicle_id", "amount": {"$sum": {"$ifNull": ["$amount", 0]}}}},
+                        ],
+                        "by_day": [
+                            {
+                                "$match": {
+                                    "status": {"$in": list(APPROVED_PAYMENT_STATUSES)},
+                                    "collection_date": {
+                                        "$gte": week_window["week_start"],
+                                        "$lte": week_window["week_end"],
+                                    },
+                                }
+                            },
+                            {"$group": {"_id": "$collection_date", "amount": {"$sum": {"$ifNull": ["$amount", 0]}}}},
+                        ],
+                        "recent": [
+                            {"$sort": {"created_at": -1}},
+                            {"$limit": 5},
+                            {
+                                "$project": {
+                                    "amount": 1,
+                                    "vehicle_id": 1,
+                                    "driver_id": 1,
+                                    "collection_date": 1,
+                                    "status": 1,
+                                    "created_at": 1,
+                                }
+                            },
+                        ],
+                    }
+                }
+            ]
+        )
+    )
+    return set_ttl_cached(cache_key, rows, ttl_seconds=60)
+
+
+def _dashboard_fuel_summary_rows(week_window: dict):
+    cache_key = build_cache_key(
+        "dashboard:fuel_summary_rows",
+        week_start=week_window.get("week_start"),
+        week_end=week_window.get("week_end"),
+    )
+    cached = get_ttl_cached(cache_key)
+    if cached is not None:
+        return cached
+    rows = list(
+        fuel_logs_collection().aggregate(
+            [
+                {
+                    "$facet": {
+                        "weekly_totals": [
+                            {
+                                "$match": {
+                                    "status": "approved",
+                                    "fuel_date": {
+                                        "$gte": week_window["week_start"],
+                                        "$lte": week_window["week_end"],
+                                    },
+                                }
+                            },
+                            {"$group": {"_id": None, "fuel_spend": {"$sum": {"$ifNull": ["$amount", 0]}}}},
+                        ],
+                        "by_vehicle": [
+                            {
+                                "$match": {
+                                    "status": "approved",
+                                    "fuel_date": {
+                                        "$gte": week_window["week_start"],
+                                        "$lte": week_window["week_end"],
+                                    },
+                                    "vehicle_id": {"$ne": None},
+                                }
+                            },
+                            {"$group": {"_id": "$vehicle_id", "amount": {"$sum": {"$ifNull": ["$amount", 0]}}}},
+                        ],
+                        "recent": [
+                            {"$sort": {"created_at": -1}},
+                            {"$limit": 3},
+                            {
+                                "$project": {
+                                    "vehicle_id": 1,
+                                    "driver_id": 1,
+                                    "amount": 1,
+                                    "fuel_date": 1,
+                                    "created_at": 1,
+                                }
+                            },
+                        ],
+                    }
+                }
+            ]
+        )
+    )
+    return set_ttl_cached(cache_key, rows, ttl_seconds=60)
+
+
+def _dashboard_expense_summary_rows(week_window: dict):
+    cache_key = build_cache_key(
+        "dashboard:expense_summary_rows",
+        week_start=week_window.get("week_start"),
+        week_end=week_window.get("week_end"),
+    )
+    cached = get_ttl_cached(cache_key)
+    if cached is not None:
+        return cached
+    rows = list(
+        expenses_collection().aggregate(
+            [
+                {
+                    "$match": {
+                        "status": {"$in": ["approved", "paid"]},
+                        "expense_date": {"$gte": week_window["week_start"], "$lte": week_window["week_end"]},
+                        "expense_category": {"$in": ["repairs", "servicing", "insurance", "roadworthy", "tyres", "battery", "other"]},
+                    }
+                },
+                {
+                    "$facet": {
+                        "weekly_totals": [
+                            {"$group": {"_id": None, "company_expense_total": {"$sum": {"$ifNull": ["$amount", 0]}}}}
+                        ],
+                        "by_vehicle": [
+                            {"$match": {"vehicle_id": {"$ne": None}}},
+                            {"$group": {"_id": "$vehicle_id", "amount": {"$sum": {"$ifNull": ["$amount", 0]}}}},
+                        ],
+                        "driver_ids": [
+                            {"$match": {"driver_id": {"$ne": None}}},
+                            {"$group": {"_id": "$driver_id"}},
+                        ],
+                    }
+                },
+            ]
+        )
+    )
+    return set_ttl_cached(cache_key, rows, ttl_seconds=60)
+
+
+def _dashboard_incident_summary_rows():
+    cache_key = "dashboard:incident_summary_rows"
+    cached = get_ttl_cached(cache_key)
+    if cached is not None:
+        return cached
+    rows = list(
+        incidents_collection().aggregate(
+            [
+                {
+                    "$facet": {
+                        "open_incidents": [
+                            {"$match": {"status": {"$nin": ["resolved", "rejected", "closed"]}}},
+                            {"$count": "count"},
+                        ],
+                        "open_claims": [
+                            {
+                                "$match": {
+                                    "claim_status": {
+                                        "$in": ["under_review", "submitted", "assessment_scheduled", "approved", "partially_paid"]
+                                    }
+                                }
+                            },
+                            {"$count": "count"},
+                        ],
+                    }
+                }
+            ]
+        )
+    )
+    return set_ttl_cached(cache_key, rows, ttl_seconds=60)
+
+
+def _dashboard_compliance_summary_rows(today_iso: str):
+    cache_key = build_cache_key("dashboard:compliance_summary_rows", today=today_iso)
+    cached = get_ttl_cached(cache_key)
+    if cached is not None:
+        return cached
+    rows = list(
+        compliance_records_collection().aggregate(
+            [
+                {
+                    "$facet": {
+                        "expired": [
+                            {
+                                "$match": {
+                                    "status": {"$ne": "inactive"},
+                                    "$or": [{"status": "expired"}, {"expiry_date": {"$lt": today_iso}}],
+                                }
+                            },
+                            {"$count": "count"},
+                        ],
+                        "records": [
+                            {"$match": {"expiry_date": {"$ne": None}}},
+                            {"$sort": {"expiry_date": 1, "created_at": -1}},
+                            {"$limit": 25},
+                            {
+                                "$project": {
+                                    "vehicle_id": 1,
+                                    "compliance_item_name": 1,
+                                    "expiry_date": 1,
+                                    "status": 1,
+                                }
+                            },
+                        ],
+                    }
+                }
+            ]
+        )
+    )
+    return set_ttl_cached(cache_key, rows, ttl_seconds=60)
 
 
 def _empty_owner_fleet_economics_summary() -> dict:
@@ -881,33 +1239,9 @@ def get_dashboard_summary_fast(*, current_role: str) -> dict:
             or "Vehicle"
         )
 
-    fleet_investment = run_section(
-        "fleet investment summary",
-        lambda: list(
-            vehicles_collection().aggregate(
-                [
-                    {
-                        "$group": {
-                            "_id": None,
-                            "total_managed_fleet": {"$sum": 1},
-                            "total_active_vehicles": {
-                                "$sum": {"$cond": [{"$in": ["$status", list(ACTIVE_VEHICLE_STATUSES)]}, 1, 0]}
-                            },
-                            "total_managed_fleet_value": {
-                                "$sum": {"$ifNull": ["$current_estimated_value", {"$ifNull": ["$purchase_cost", 0]}]}
-                            },
-                            "total_fleet_investment": {
-                                "$sum": {"$ifNull": ["$total_vehicle_investment", {"$ifNull": ["$purchase_cost", 0]}]}
-                            },
-                            "total_capital_recovered": {"$sum": {"$ifNull": ["$amount_recovered", 0]}},
-                            "outstanding_capital": {"$sum": {"$ifNull": ["$remaining_balance", 0]}},
-                        }
-                    }
-                ]
-            )
-        ),
-    ) or []
-    fleet_row = fleet_investment[0] if fleet_investment else {}
+    fleet_summary_rows = run_section("fleet investment summary", _dashboard_vehicle_summary_rows) or []
+    fleet_summary = fleet_summary_rows[0] if fleet_summary_rows else {}
+    fleet_row = (fleet_summary.get("headline") or [{}])[0]
     result["summary"]["total_vehicles"] = int(fleet_row.get("total_managed_fleet") or 0)
     result["summary"]["active_vehicles"] = int(fleet_row.get("total_active_vehicles") or 0)
     result["fleet_economics_summary"].update(
@@ -921,33 +1255,7 @@ def get_dashboard_summary_fast(*, current_role: str) -> dict:
         }
     )
 
-    asset_owner_breakdown = run_section(
-        "asset owner summary",
-        lambda: list(
-            vehicles_collection().aggregate(
-                [
-                    {
-                        "$group": {
-                            "_id": {
-                                "asset_owner_name": {"$ifNull": ["$asset_owner_name", "Unspecified Owner"]},
-                                "asset_owner_type": {"$ifNull": ["$asset_owner_type", "Unknown"]},
-                            },
-                            "vehicle_count": {"$sum": 1},
-                            "fleet_value": {
-                                "$sum": {"$ifNull": ["$current_estimated_value", {"$ifNull": ["$purchase_cost", 0]}]}
-                            },
-                            "capital_basis_for_recovery": {
-                                "$sum": {"$ifNull": ["$total_vehicle_investment", {"$ifNull": ["$purchase_cost", 0]}]}
-                            },
-                            "capital_recovered": {"$sum": {"$ifNull": ["$amount_recovered", 0]}},
-                            "outstanding_capital": {"$sum": {"$ifNull": ["$remaining_balance", 0]}},
-                        }
-                    },
-                    {"$sort": {"_id.asset_owner_name": 1}},
-                ]
-            )
-        ),
-    ) or []
+    asset_owner_breakdown = run_section("asset owner summary", lambda: fleet_summary.get("owners") or []) or []
     result["fleet_economics_summary"]["portfolio_breakdown"] = [
         {
             "asset_owner_name": row["_id"]["asset_owner_name"],
@@ -1021,83 +1329,39 @@ def get_dashboard_summary_fast(*, current_role: str) -> dict:
     revenue_payload = run_section(
         "revenue summary",
         lambda: {
-            "approved_collections": list(
-                collections_collection().find(
-                    {
-                        "status": {"$in": list(APPROVED_PAYMENT_STATUSES)},
-                        "collection_date": {"$gte": week_window["week_start"], "$lte": week_window["week_end"]},
-                    },
-                    {
-                        "amount": 1,
-                        "vehicle_id": 1,
-                        "driver_id": 1,
-                        "assignment_id": 1,
-                        "collection_date": 1,
-                        "status": 1,
-                        "created_at": 1,
-                    },
-                ).sort([("collection_date", -1), ("created_at", -1)]).limit(100)
-            ),
-            "recent_collections": list(
-                collections_collection().find(
-                    {},
-                    {
-                        "amount": 1,
-                        "vehicle_id": 1,
-                        "driver_id": 1,
-                        "collection_date": 1,
-                        "status": 1,
-                        "created_at": 1,
-                    },
-                ).sort([("created_at", -1)]).limit(5)
-            ),
-            "approved_fuel_logs": list(
-                fuel_logs_collection().find(
-                    {
-                        "status": "approved",
-                        "fuel_date": {"$gte": week_window["week_start"], "$lte": week_window["week_end"]},
-                    },
-                    {"vehicle_id": 1, "driver_id": 1, "amount": 1, "fuel_date": 1, "created_at": 1},
-                ).sort([("fuel_date", -1), ("created_at", -1)]).limit(75)
-            ),
-            "recent_fuel_logs": list(
-                fuel_logs_collection().find(
-                    {},
-                    {"vehicle_id": 1, "driver_id": 1, "amount": 1, "fuel_date": 1, "created_at": 1},
-                ).sort([("created_at", -1)]).limit(3)
-            ),
-            "approved_expenses": list(
-                expenses_collection().find(
-                    {
-                        "status": {"$in": ["approved", "paid"]},
-                        "expense_date": {"$gte": week_window["week_start"], "$lte": week_window["week_end"]},
-                    },
-                    {"vehicle_id": 1, "driver_id": 1, "amount": 1, "expense_category": 1, "notes": 1},
-                ).limit(75)
-            ),
+            "collections": _dashboard_collections_summary_rows(week_window),
+            "fuel": _dashboard_fuel_summary_rows(week_window),
+            "expenses": _dashboard_expense_summary_rows(week_window),
         },
     ) or {}
-    approved_collections = revenue_payload.get("approved_collections") or []
-    recent_collection_documents = revenue_payload.get("recent_collections") or []
-    approved_fuel_logs = revenue_payload.get("approved_fuel_logs") or []
-    recent_fuel_logs = revenue_payload.get("recent_fuel_logs") or []
-    approved_expenses = revenue_payload.get("approved_expenses") or []
-    revenue_context["approved_total_this_week"] = round(sum(_safe_float(item.get("amount")) for item in approved_collections), 2)
-    revenue_context["fuel_spend"] = round(sum(_safe_float(item.get("amount")) for item in approved_fuel_logs), 2)
-    company_expenses = [item for item in approved_expenses if _matches_company_expense(item)]
-    revenue_context["company_expense_total"] = round(sum(_safe_float(item.get("amount")) for item in company_expenses), 2)
+    collections_summary = (revenue_payload.get("collections") or [{}])[0]
+    fuel_summary = (revenue_payload.get("fuel") or [{}])[0]
+    expense_summary = (revenue_payload.get("expenses") or [{}])[0]
+    recent_collection_documents = collections_summary.get("recent") or []
+    recent_fuel_logs = fuel_summary.get("recent") or []
+    revenue_context["approved_total_this_week"] = round(
+        _safe_float(((collections_summary.get("weekly_totals") or [{}])[0]).get("approved_total")),
+        2,
+    )
+    revenue_context["fuel_spend"] = round(
+        _safe_float(((fuel_summary.get("weekly_totals") or [{}])[0]).get("fuel_spend")),
+        2,
+    )
+    revenue_context["company_expense_total"] = round(
+        _safe_float(((expense_summary.get("weekly_totals") or [{}])[0]).get("company_expense_total")),
+        2,
+    )
     result["summary"]["revenue_collected"] = revenue_context["approved_total_this_week"]
     result["summary"]["fuel_spend"] = revenue_context["fuel_spend"]
-    for item in approved_collections:
-        assignment_id = str(item.get("assignment_id")) if item.get("assignment_id") else None
-        if assignment_id:
-            collections_by_assignment[assignment_id] += _safe_float(item.get("amount"))
-        if item.get("vehicle_id"):
-            collections_by_vehicle[str(item.get("vehicle_id"))] += _safe_float(item.get("amount"))
-            vehicle_ids.add(item.get("vehicle_id"))
-        if item.get("driver_id"):
-            driver_ids.add(item.get("driver_id"))
-        collection_date = _parse_iso_date(item.get("collection_date"))
+    for item in collections_summary.get("by_assignment") or []:
+        if item.get("_id") is not None:
+            collections_by_assignment[str(item.get("_id"))] += _safe_float(item.get("amount"))
+    for item in collections_summary.get("by_vehicle") or []:
+        if item.get("_id") is not None:
+            collections_by_vehicle[str(item.get("_id"))] += _safe_float(item.get("amount"))
+            vehicle_ids.add(item.get("_id"))
+    for item in collections_summary.get("by_day") or []:
+        collection_date = _parse_iso_date(item.get("_id"))
         if collection_date:
             collections_by_day[collection_date.isoformat()] += _safe_float(item.get("amount"))
     for item in recent_collection_documents:
@@ -1105,62 +1369,42 @@ def get_dashboard_summary_fast(*, current_role: str) -> dict:
             vehicle_ids.add(item.get("vehicle_id"))
         if item.get("driver_id"):
             driver_ids.add(item.get("driver_id"))
-    for item in approved_fuel_logs:
-        if item.get("vehicle_id"):
-            fuel_cost_by_vehicle[str(item.get("vehicle_id"))] += _safe_float(item.get("amount"))
-            vehicle_ids.add(item.get("vehicle_id"))
-        if item.get("driver_id"):
-            driver_ids.add(item.get("driver_id"))
+    for item in fuel_summary.get("by_vehicle") or []:
+        if item.get("_id") is not None:
+            fuel_cost_by_vehicle[str(item.get("_id"))] += _safe_float(item.get("amount"))
+            vehicle_ids.add(item.get("_id"))
     for item in recent_fuel_logs:
         if item.get("vehicle_id"):
             vehicle_ids.add(item.get("vehicle_id"))
         if item.get("driver_id"):
             driver_ids.add(item.get("driver_id"))
-    for item in company_expenses:
-        if item.get("vehicle_id"):
-            expense_cost_by_vehicle[str(item.get("vehicle_id"))] += _safe_float(item.get("amount"))
-            vehicle_ids.add(item.get("vehicle_id"))
-        if item.get("driver_id"):
-            driver_ids.add(item.get("driver_id"))
+    for item in expense_summary.get("by_vehicle") or []:
+        if item.get("_id") is not None:
+            expense_cost_by_vehicle[str(item.get("_id"))] += _safe_float(item.get("amount"))
+            vehicle_ids.add(item.get("_id"))
+    for item in expense_summary.get("driver_ids") or []:
+        if item.get("_id") is not None:
+            driver_ids.add(item.get("_id"))
 
     incidents_payload = run_section(
         "incidents/claims summary",
-        lambda: {
-            "open_incidents": incidents_collection().count_documents(
-                {"status": {"$nin": ["resolved", "rejected", "closed"]}}
-            ),
-            "open_claims": incidents_collection().count_documents(
-                {"claim_status": {"$in": ["under_review", "submitted", "assessment_scheduled", "approved", "partially_paid"]}}
-            ),
-        },
-    ) or {}
+        _dashboard_incident_summary_rows,
+    ) or []
+    incidents_summary = incidents_payload[0] if incidents_payload else {}
     result["fleet_risk_summary"]["vehicles_due_service"] = result["summary"]["vehicles_due_service"]
-    result["fleet_risk_summary"]["open_incidents"] = int(incidents_payload.get("open_incidents") or 0)
-    result["fleet_risk_summary"]["open_claims"] = int(incidents_payload.get("open_claims") or 0)
+    result["fleet_risk_summary"]["open_incidents"] = int(((incidents_summary.get("open_incidents") or [{}])[0].get("count") or 0))
+    result["fleet_risk_summary"]["open_claims"] = int(((incidents_summary.get("open_claims") or [{}])[0].get("count") or 0))
     section_payloads["incidentsClaimsSummary"] = {
         "openIncidents": result["fleet_risk_summary"]["open_incidents"],
         "openClaims": result["fleet_risk_summary"]["open_claims"],
     }
 
-    compliance_payload = run_section(
-        "compliance summary",
-        lambda: {
-            "expired_compliance_count": compliance_records_collection().count_documents(
-                {
-                    "status": {"$ne": "inactive"},
-                    "$or": [{"status": "expired"}, {"expiry_date": {"$lt": today_iso}}],
-                }
-            ),
-            "records": list(
-                compliance_records_collection().find(
-                    {"expiry_date": {"$ne": None}},
-                    {"vehicle_id": 1, "compliance_item_name": 1, "expiry_date": 1, "status": 1},
-                ).limit(25)
-            ),
-        },
-    ) or {}
-    result["fleet_risk_summary"]["expired_compliance_count"] = int(compliance_payload.get("expired_compliance_count") or 0)
-    compliance_records = compliance_payload.get("records") or []
+    compliance_payload = run_section("compliance summary", lambda: _dashboard_compliance_summary_rows(today_iso)) or []
+    compliance_summary = compliance_payload[0] if compliance_payload else {}
+    result["fleet_risk_summary"]["expired_compliance_count"] = int(
+        ((compliance_summary.get("expired") or [{}])[0].get("count") or 0)
+    )
+    compliance_records = compliance_summary.get("records") or []
     section_payloads["complianceSummary"] = {
         "expiredComplianceCount": result["fleet_risk_summary"]["expired_compliance_count"],
         "recordsCount": len(compliance_records),

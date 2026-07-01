@@ -12,6 +12,7 @@ from services.booking_service import ensure_booking_indexes
 from services.auth_service import ensure_demo_users, ensure_indexes
 from services.collection_service import ensure_collection_indexes
 from services.customer_service import ensure_customer_indexes
+from services.dashboard_service import ensure_dashboard_indexes
 from services.deposit_service import ensure_deposit_indexes
 from services.expense_service import ensure_expense_indexes
 from services.fault_service import ensure_fault_indexes, seed_default_fault_catalog
@@ -66,6 +67,7 @@ def create_app(config_name: str | None = None) -> Flask:
                 ensure_booking_indexes()
                 ensure_collection_indexes()
                 ensure_customer_indexes()
+                ensure_dashboard_indexes()
                 ensure_deposit_indexes()
                 ensure_expense_indexes()
                 ensure_fault_indexes()

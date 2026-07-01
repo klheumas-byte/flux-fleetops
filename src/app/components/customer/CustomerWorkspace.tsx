@@ -1,4 +1,4 @@
-import { Component, useEffect, useMemo, useState, type ErrorInfo, type ReactNode } from 'react';
+import { Component, useEffect, useMemo, useRef, useState, type ErrorInfo, type ReactNode } from 'react';
 import {
   Briefcase,
   Calendar,
@@ -20,8 +20,6 @@ import {
   createBooking,
   createCustomer,
   fetchBookingOptions,
-  fetchBookingSummary,
-  fetchCustomerSummary,
   fetchBookings,
   fetchCustomerOptions,
   fetchCustomers,
@@ -71,6 +69,370 @@ class CustomerWorkspaceErrorBoundary extends Component<{ children: ReactNode }, 
 }
 
 const weekdayOptions = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+const defaultBookingStatuses = ['Scheduled', 'Acknowledged', 'Confirmed', 'En Route', 'Picked Up', 'In Progress', 'Completed', 'Cancelled', 'Missed'];
+const defaultBookingPriorities = ['Low', 'Medium', 'High', 'Critical'];
+const defaultBookingTypes = ['Customer Booking', 'Personal Reminder', 'Follow-Up Reminder'];
+const defaultRecurrenceTypes = ['Daily', 'Weekly', 'Monthly', 'Custom'];
+
+function isoDateFromValue(value?: string | null) {
+  if (!value) {
+    return null;
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return value;
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  return parsed.toISOString().slice(0, 10);
+}
+
+function startOfDay(value: Date) {
+  const next = new Date(value);
+  next.setHours(0, 0, 0, 0);
+  return next;
+}
+
+function normalizeText(value?: string | null) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function sortCountEntries<T extends { count: number }>(entries: T[]) {
+  return [...entries].sort((left, right) => right.count - left.count || JSON.stringify(left).localeCompare(JSON.stringify(right)));
+}
+
+function buildLocalBookingSummary(customers: CustomerRecord[], bookings: BookingRecord[]): BookingSummary {
+  const now = new Date();
+  const today = now.toISOString().slice(0, 10);
+  const activeStatuses = new Set(['Scheduled', 'Acknowledged', 'Confirmed', 'En Route', 'Picked Up', 'In Progress']);
+  const inProgressStatuses = new Set(['Acknowledged', 'Confirmed', 'En Route', 'Picked Up', 'In Progress']);
+  const completedStatuses = new Set(['Completed']);
+  const skippedStatuses = new Set(['Completed', 'Cancelled', 'Missed']);
+  const bookingsByStatus: Record<string, number> = {};
+  const recurringCustomers = new Set<string>();
+  const driverSchedules = new Set<string>();
+  const recentCustomers = customers.filter((customer) => {
+    const createdAt = customer.created_at ? new Date(customer.created_at) : null;
+    return createdAt && !Number.isNaN(createdAt.getTime()) && createdAt >= new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  }).length;
+  const growthMap = new Map<string, number>();
+
+  for (let offset = 6; offset >= 0; offset -= 1) {
+    const day = new Date(now);
+    day.setDate(now.getDate() - offset);
+    growthMap.set(day.toISOString().slice(0, 10), 0);
+  }
+
+  customers.forEach((customer) => {
+    const createdDay = isoDateFromValue(customer.created_at);
+    if (createdDay && growthMap.has(createdDay)) {
+      growthMap.set(createdDay, (growthMap.get(createdDay) || 0) + 1);
+    }
+  });
+
+  let upcomingBookings = 0;
+  let missedBookings = 0;
+  let todaySchedule = 0;
+  let upcomingPickups = 0;
+  let totalScheduledBookings = 0;
+  let pendingAcknowledgement = 0;
+  let inProgressBookings = 0;
+  let completedToday = 0;
+  let overdueReminders = 0;
+  let followUpsDueToday = 0;
+  let upcomingCorporateBookings = 0;
+  let totalFutureBookings = 0;
+  let vipBookings = 0;
+  let strategicMeetings = 0;
+  let followUpTotal = 0;
+  let followUpCompleted = 0;
+
+  bookings.forEach((booking) => {
+    const status = booking.status || 'Unknown';
+    bookingsByStatus[status] = (bookingsByStatus[status] || 0) + 1;
+
+    if (booking.is_recurring_template && booking.customer_id) {
+      recurringCustomers.add(booking.customer_id);
+    }
+
+    const pickupAt = booking.pickup_at ? new Date(booking.pickup_at) : null;
+    const pickupDay = isoDateFromValue(booking.pickup_at || booking.pickup_date || booking.reminder_date);
+    const bookingType = normalizeText(booking.booking_type);
+    const isFollowUp = bookingType.includes('follow-up');
+    const isReminder = bookingType.includes('reminder');
+    const isCorporate = bookingType.includes('corporate') || bookingType.includes('company');
+    const isVip = bookingType.includes('vip');
+    const isStrategic = bookingType.includes('strategic');
+
+    if (!booking.is_recurring_template && activeStatuses.has(status)) {
+      upcomingBookings += 1;
+      totalScheduledBookings += 1;
+    }
+    if (status === 'Missed') {
+      missedBookings += 1;
+    }
+    if (pickupDay === today && !booking.is_recurring_template && activeStatuses.has(status)) {
+      todaySchedule += 1;
+    }
+    if (!booking.is_recurring_template && pickupAt && !Number.isNaN(pickupAt.getTime()) && pickupAt >= now) {
+      upcomingPickups += 1;
+      totalFutureBookings += 1;
+      if (booking.driver_id) {
+        driverSchedules.add(booking.driver_id);
+      }
+      if (isCorporate) {
+        upcomingCorporateBookings += 1;
+      }
+      if (isVip) {
+        vipBookings += 1;
+      }
+      if (isStrategic) {
+        strategicMeetings += 1;
+      }
+    }
+    if (status === 'Scheduled') {
+      pendingAcknowledgement += 1;
+    }
+    if (inProgressStatuses.has(status)) {
+      inProgressBookings += 1;
+    }
+    if (completedStatuses.has(status) && isoDateFromValue(booking.completed_at || booking.pickup_at) === today) {
+      completedToday += 1;
+    }
+    if ((isReminder || isFollowUp) && pickupAt && !Number.isNaN(pickupAt.getTime()) && pickupAt < now && !skippedStatuses.has(status)) {
+      overdueReminders += 1;
+    }
+    if (isFollowUp) {
+      followUpTotal += 1;
+      if (pickupDay === today && !skippedStatuses.has(status)) {
+        followUpsDueToday += 1;
+      }
+      if (completedStatuses.has(status)) {
+        followUpCompleted += 1;
+      }
+    }
+  });
+
+  return {
+    upcoming_bookings: upcomingBookings,
+    missed_bookings: missedBookings,
+    active_recurring_customers: recurringCustomers.size,
+    total_customers: customers.length,
+    total_recurring_customers: recurringCustomers.size,
+    today_schedule: todaySchedule,
+    upcoming_pickups: upcomingPickups,
+    recent_customers: recentCustomers,
+    scheduled_today: todaySchedule,
+    total_scheduled_bookings: totalScheduledBookings,
+    pending_acknowledgement: pendingAcknowledgement,
+    in_progress_bookings: inProgressBookings,
+    completed_today: completedToday,
+    overdue_reminders: overdueReminders,
+    follow_ups_due_today: followUpsDueToday,
+    upcoming_corporate_bookings: upcomingCorporateBookings,
+    total_future_bookings: totalFutureBookings,
+    vip_bookings: vipBookings,
+    strategic_meetings: strategicMeetings,
+    driver_schedules: driverSchedules.size,
+    follow_up_completion_rate: followUpTotal ? Math.round((followUpCompleted / followUpTotal) * 100) : 0,
+    bookings_by_status: bookingsByStatus,
+    customer_growth_trend: Array.from(growthMap.entries()).map(([day, value]) => ({
+      label: new Date(`${day}T00:00:00`).toLocaleDateString(undefined, { weekday: 'short' }),
+      value,
+    })),
+  };
+}
+
+function buildLocalCustomerSummary(
+  allCustomers: CustomerRecord[],
+  scopedCustomers: CustomerRecord[],
+  customerOptions: CustomerOptionsResponse | null,
+): CustomerSummary {
+  const today = new Date();
+  const todayIso = today.toISOString().slice(0, 10);
+  const weekStart = startOfDay(new Date(today.getFullYear(), today.getMonth(), today.getDate() - 6));
+  const monthStart = startOfDay(new Date(today.getFullYear(), today.getMonth(), 1));
+  const creatorCounts = new Map<string, CustomerSummary['customers_by_creator'][number]>();
+  const sourceCounts = new Map<string, CustomerSummary['customers_by_source'][number]>();
+  const driverCounts = new Map<string, CustomerSummary['customers_by_driver'][number]>();
+  const growthMap = new Map<string, number>();
+
+  for (let offset = 6; offset >= 0; offset -= 1) {
+    const day = new Date(today);
+    day.setDate(today.getDate() - offset);
+    growthMap.set(day.toISOString().slice(0, 10), 0);
+  }
+
+  let newCustomersThisWeek = 0;
+  let newCustomersThisMonth = 0;
+  let totalBusinessLeads = 0;
+  let totalStrategicContacts = 0;
+  let totalInvestors = 0;
+  let totalGatekeepers = 0;
+  let followUpsDueToday = 0;
+  let followUpsOverdue = 0;
+  let highPriorityFollowUpsDue = 0;
+  let convertedLeads = 0;
+
+  scopedCustomers.forEach((customer) => {
+    const createdAt = customer.created_at ? new Date(customer.created_at) : null;
+    if (createdAt && !Number.isNaN(createdAt.getTime())) {
+      if (createdAt >= weekStart) {
+        newCustomersThisWeek += 1;
+      }
+      if (createdAt >= monthStart) {
+        newCustomersThisMonth += 1;
+      }
+      const growthKey = createdAt.toISOString().slice(0, 10);
+      if (growthMap.has(growthKey)) {
+        growthMap.set(growthKey, (growthMap.get(growthKey) || 0) + 1);
+      }
+    }
+
+    if (customer.is_business_lead) {
+      totalBusinessLeads += 1;
+    }
+    if (normalizeText(customer.opportunity_level) === 'strategic') {
+      totalStrategicContacts += 1;
+    }
+    if (normalizeText(customer.relationship_category) === 'investor') {
+      totalInvestors += 1;
+    }
+    if (
+      normalizeText(customer.relationship_category) === 'gatekeeper' ||
+      normalizeText(customer.network_value) === 'industry gatekeeper'
+    ) {
+      totalGatekeepers += 1;
+    }
+
+    const followUpDate = customer.next_follow_up_date || customer.follow_up_date || null;
+    if (followUpDate) {
+      if (followUpDate === todayIso) {
+        followUpsDueToday += 1;
+      }
+      if (followUpDate < todayIso) {
+        followUpsOverdue += 1;
+      }
+      if (normalizeText(customer.follow_up_priority) === 'high' && followUpDate <= todayIso) {
+        highPriorityFollowUpsDue += 1;
+      }
+    }
+
+    if (normalizeText(customer.lead_status) === 'converted') {
+      convertedLeads += 1;
+    }
+
+    const creatorName = customer.created_by_name || 'Unknown';
+    const creatorRole = customer.created_by_role || 'legacy';
+    const creatorKey = `${creatorRole}:${creatorName}`;
+    creatorCounts.set(creatorKey, {
+      creator_name: creatorName,
+      creator_role: creatorRole,
+      creator_user_id: customer.created_by_user_id || null,
+      count: (creatorCounts.get(creatorKey)?.count || 0) + 1,
+    });
+
+    const sourceValue = customer.source || 'unknown';
+    const sourceLabel = customer.source_label || customer.customer_source || sourceValue;
+    sourceCounts.set(sourceValue, {
+      source: sourceValue,
+      label: sourceLabel,
+      count: (sourceCounts.get(sourceValue)?.count || 0) + 1,
+    });
+
+    const driverId = customer.preferred_driver_id || customer.assigned_driver_id || customer.created_by_driver_id || '';
+    const driverName =
+      customer.preferred_driver?.full_name ||
+      customer.assigned_driver?.full_name ||
+      (normalizeText(customer.created_by_role) === 'driver' ? customer.created_by_name || 'Driver' : 'Unassigned');
+    const driverKey = driverId || driverName;
+    driverCounts.set(driverKey, {
+      driver_id: driverId || null,
+      driver_name: driverName,
+      count: (driverCounts.get(driverKey)?.count || 0) + 1,
+    });
+  });
+
+  const creatorRoles = Array.from(new Set(allCustomers.map((customer) => customer.created_by_role).filter(Boolean) as string[])).sort();
+  const drivers = Array.from(
+    new Map(
+      allCustomers
+        .flatMap((customer) => {
+          const entries = [];
+          if (customer.preferred_driver) {
+            entries.push([customer.preferred_driver.id, customer.preferred_driver] as const);
+          }
+          if (customer.assigned_driver) {
+            entries.push([customer.assigned_driver.id, customer.assigned_driver] as const);
+          }
+          if (normalizeText(customer.created_by_role) === 'driver' && customer.created_by_user) {
+            entries.push([customer.created_by_user.id, customer.created_by_user] as const);
+          }
+          return entries;
+        }),
+    ).values(),
+  );
+  const customerCategories = Array.from(
+    new Map(
+      allCustomers
+        .filter((customer) => customer.customer_category_id && customer.customer_category)
+        .map((customer) => [customer.customer_category_id!, { id: customer.customer_category_id!, name: customer.customer_category }]),
+    ).values(),
+  ).sort((left, right) => left.name.localeCompare(right.name));
+  const sources = Array.from(
+    new Map(
+      allCustomers
+        .filter((customer) => customer.source)
+        .map((customer) => [customer.source!, { value: customer.source!, label: customer.source_label || customer.customer_source || customer.source! }]),
+    ).values(),
+  ).sort((left, right) => left.label.localeCompare(right.label));
+
+  return {
+    total_customers: scopedCustomers.length,
+    new_customers_this_week: newCustomersThisWeek,
+    new_customers_this_month: newCustomersThisMonth,
+    total_business_leads: totalBusinessLeads,
+    total_strategic_contacts: totalStrategicContacts,
+    total_investors: totalInvestors,
+    total_gatekeepers: totalGatekeepers,
+    follow_ups_due_today: followUpsDueToday,
+    follow_ups_overdue: followUpsOverdue,
+    high_priority_follow_ups_due: highPriorityFollowUpsDue,
+    lead_conversion_rate: totalBusinessLeads ? Math.round((convertedLeads / totalBusinessLeads) * 100) : 0,
+    customers_by_creator: sortCountEntries(Array.from(creatorCounts.values())),
+    customers_by_driver: sortCountEntries(Array.from(driverCounts.values())),
+    customers_by_source: sortCountEntries(Array.from(sourceCounts.values())),
+    top_customer_generators: sortCountEntries(Array.from(creatorCounts.values())).slice(0, 5),
+    follow_up_due_customers: scopedCustomers
+      .filter((customer) => {
+        const followUpDate = customer.next_follow_up_date || customer.follow_up_date || null;
+        return Boolean(followUpDate && followUpDate <= todayIso);
+      })
+      .slice(0, 10)
+      .map((customer) => ({
+        id: customer.id,
+        full_name: customer.full_name,
+        phone_number: customer.phone_number,
+        follow_up_date: customer.next_follow_up_date || customer.follow_up_date || null,
+        follow_up_priority: customer.follow_up_priority || null,
+        follow_up_status_label: customer.follow_up_status_label || null,
+        lead_status: customer.lead_status || null,
+        relationship_category: customer.relationship_category || null,
+      })),
+    customer_growth_trend: Array.from(growthMap.entries()).map(([day, value]) => ({
+      label: new Date(`${day}T00:00:00`).toLocaleDateString(undefined, { weekday: 'short' }),
+      value,
+    })),
+    available_filters: {
+      creator_roles: creatorRoles.length ? creatorRoles : customerOptions?.creator_roles || [],
+      drivers: drivers.length ? drivers : customerOptions?.drivers || [],
+      customer_categories: customerCategories.length ? customerCategories : [],
+      sources: sources.length ? sources : customerOptions?.source_options || [],
+    },
+    applied_filters: {},
+  };
+}
 
 function formatDateTime(value?: string | null) {
   if (!value) return 'Not available';
@@ -444,8 +806,6 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
   const [bookings, setBookings] = useState<BookingRecord[]>([]);
   const [customerOptions, setCustomerOptions] = useState<CustomerOptionsResponse | null>(null);
   const [bookingOptions, setBookingOptions] = useState<BookingOptionsResponse | null>(null);
-  const [summary, setSummary] = useState<BookingSummary | null>(null);
-  const [customerSummary, setCustomerSummary] = useState<CustomerSummary | null>(null);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search, 250);
@@ -469,6 +829,8 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
   const [filterDriverId, setFilterDriverId] = useState('');
   const [filterCustomerCategoryId, setFilterCustomerCategoryId] = useState('');
   const [filterSource, setFilterSource] = useState('');
+  const customerOptionsRequestRef = useRef<Promise<CustomerOptionsResponse> | null>(null);
+  const bookingOptionsRequestRef = useRef<Promise<BookingOptionsResponse> | null>(null);
   usePageToastFeedback(pageError, pageNotice);
 
   const clearCustomerFormErrors = () => {
@@ -532,124 +894,6 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
       } else if (bookingsResult.status === 'rejected') {
         setPageNotice('Scheduled bookings are temporarily unavailable. Customer records are still shown.');
       }
-
-      const secondaryResults = await Promise.allSettled([
-        fetchCustomerOptions(),
-        fetchBookingOptions(),
-        fetchBookingSummary(),
-        fetchCustomerSummary(),
-      ]);
-      const [customerOptionsResult, bookingOptionsResult, bookingSummaryResult, customerSummaryResult] = secondaryResults;
-
-      setCustomerOptions(
-        customerOptionsResult.status === 'fulfilled'
-          ? customerOptionsResult.value
-          : {
-              drivers: [],
-              customer_categories: [],
-              customer_category_items: [],
-              customer_sources: [],
-              customer_source_items: [],
-              company_industries: [],
-              industry_items: [],
-              organization_types: [],
-              organization_type_items: [],
-              relationship_category_items: [],
-              opportunity_level_items: [],
-              network_value_items: [],
-              lead_status_items: [],
-              potential_service_items: [],
-              follow_up_priorities: ['low', 'medium', 'high'],
-              statuses: ['active', 'inactive'],
-              source_options: [],
-              creator_roles: [],
-            },
-      );
-      setBookingOptions(
-        bookingOptionsResult.status === 'fulfilled'
-          ? bookingOptionsResult.value
-          : {
-              customers: [],
-              drivers: [],
-              vehicles: [],
-              booking_types: [],
-              statuses: [],
-              recurrence_types: [],
-              priorities: ['Low', 'Medium', 'High', 'Critical'],
-            },
-      );
-      setSummary(
-        bookingSummaryResult.status === 'fulfilled'
-          ? bookingSummaryResult.value
-          : {
-              upcoming_bookings: 0,
-              missed_bookings: 0,
-              active_recurring_customers: 0,
-              total_customers: 0,
-              total_recurring_customers: 0,
-              today_schedule: 0,
-              upcoming_pickups: 0,
-              recent_customers: 0,
-              scheduled_today: 0,
-              total_scheduled_bookings: 0,
-              pending_acknowledgement: 0,
-              in_progress_bookings: 0,
-              completed_today: 0,
-              overdue_reminders: 0,
-              follow_ups_due_today: 0,
-              upcoming_corporate_bookings: 0,
-              total_future_bookings: 0,
-              vip_bookings: 0,
-              strategic_meetings: 0,
-              driver_schedules: 0,
-              follow_up_completion_rate: 0,
-              bookings_by_status: {},
-              customer_growth_trend: [],
-            },
-      );
-      setCustomerSummary(
-        customerSummaryResult.status === 'fulfilled'
-          ? customerSummaryResult.value
-          : {
-              total_customers: 0,
-              new_customers_this_week: 0,
-              new_customers_this_month: 0,
-              total_business_leads: 0,
-              total_strategic_contacts: 0,
-              total_investors: 0,
-              total_gatekeepers: 0,
-              follow_ups_due_today: 0,
-              follow_ups_overdue: 0,
-              high_priority_follow_ups_due: 0,
-              lead_conversion_rate: 0,
-              customers_by_creator: [],
-              customers_by_driver: [],
-              customers_by_source: [],
-              top_customer_generators: [],
-              follow_up_due_customers: [],
-              customer_growth_trend: [],
-              available_filters: {
-                creator_roles: [],
-                drivers: [],
-                customer_categories: [],
-                sources: [],
-              },
-              applied_filters: {},
-            },
-      );
-
-      const unavailableSections: string[] = [];
-      if (customerOptionsResult.status === 'rejected') unavailableSections.push('customer options');
-      if (bookingOptionsResult.status === 'rejected') unavailableSections.push('booking options');
-      if (bookingSummaryResult.status === 'rejected') unavailableSections.push('booking summary');
-      if (customerSummaryResult.status === 'rejected') unavailableSections.push('CRM summary');
-      if (unavailableSections.length > 0) {
-        setPageNotice((current) =>
-          current
-            ? `${current} Some sections are temporarily unavailable: ${unavailableSections.join(', ')}.`
-            : `Some sections are temporarily unavailable: ${unavailableSections.join(', ')}.`,
-        );
-      }
     } catch (error) {
       setPageError(getErrorMessage(error, 'Unable to load customer management right now.'));
     } finally {
@@ -661,25 +905,6 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
     void loadWorkspace();
   }, []);
 
-  useEffect(() => {
-    const loadFilteredSummary = async () => {
-      try {
-        const nextSummary = await fetchCustomerSummary({
-          date_from: filterDateFrom || undefined,
-          date_to: filterDateTo || undefined,
-          creator_role: filterCreatorRole || undefined,
-          driver_id: filterDriverId || undefined,
-          customer_category_id: filterCustomerCategoryId || undefined,
-          source: filterSource || undefined,
-        });
-        setCustomerSummary(nextSummary);
-      } catch {
-        // Keep the existing summary visible if a filtered refresh fails.
-      }
-    };
-    void loadFilteredSummary();
-  }, [filterCustomerCategoryId, filterCreatorRole, filterDateFrom, filterDateTo, filterDriverId, filterSource]);
-
   const selectedCustomer = useMemo(
     () => customers.find((customer) => customer.id === selectedCustomerId) || null,
     [customers, selectedCustomerId],
@@ -690,6 +915,99 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
   const selectedCustomerRideHistory = Array.isArray(selectedCustomer?.ride_history) ? selectedCustomer.ride_history : [];
   const selectedCustomerRecurringSchedule = Array.isArray(selectedCustomer?.recurring_schedule) ? selectedCustomer.recurring_schedule : [];
   const selectedCustomerFollowUpHistory = Array.isArray(selectedCustomer?.follow_up_history) ? selectedCustomer.follow_up_history : [];
+
+  const ensureCustomerOptionsLoaded = async () => {
+    if (customerOptions) {
+      return customerOptions;
+    }
+    if (!customerOptionsRequestRef.current) {
+      customerOptionsRequestRef.current = fetchCustomerOptions()
+        .then((response) => {
+          setCustomerOptions(response);
+          return response;
+        })
+        .catch((error) => {
+          setPageNotice((current) =>
+            current
+              ? `${current} Customer setup options are temporarily unavailable.`
+              : 'Customer setup options are temporarily unavailable.',
+          );
+          throw error;
+        })
+        .finally(() => {
+          customerOptionsRequestRef.current = null;
+        });
+    }
+    return customerOptionsRequestRef.current;
+  };
+
+  const ensureBookingOptionsLoaded = async () => {
+    if (bookingOptions) {
+      return bookingOptions;
+    }
+    if (!bookingOptionsRequestRef.current) {
+      bookingOptionsRequestRef.current = fetchBookingOptions()
+        .then((response) => {
+          setBookingOptions(response);
+          return response;
+        })
+        .catch((error) => {
+          setPageNotice((current) =>
+            current
+              ? `${current} Booking setup options are temporarily unavailable.`
+              : 'Booking setup options are temporarily unavailable.',
+          );
+          throw error;
+        })
+        .finally(() => {
+          bookingOptionsRequestRef.current = null;
+        });
+    }
+    return bookingOptionsRequestRef.current;
+  };
+
+  const summaryScopedCustomers = useMemo(
+    () =>
+      customers.filter((customer) =>
+        (!filterCreatorRole || customer.created_by_role === filterCreatorRole)
+        && (!filterSource || customer.source === filterSource)
+        && (!filterCustomerCategoryId || customer.customer_category_id === filterCustomerCategoryId)
+        && (!filterDriverId || customer.preferred_driver_id === filterDriverId || customer.created_by_driver_id === filterDriverId)
+        && (!filterDateFrom || !customer.created_at || new Date(customer.created_at) >= new Date(filterDateFrom))
+        && (!filterDateTo || !customer.created_at || new Date(customer.created_at) <= new Date(`${filterDateTo}T23:59:59`)),
+      ),
+    [customers, filterCreatorRole, filterSource, filterCustomerCategoryId, filterDriverId, filterDateFrom, filterDateTo],
+  );
+
+  const summary: BookingSummary = useMemo(
+    () => buildLocalBookingSummary(customers, bookings),
+    [customers, bookings],
+  );
+
+  const customerSummary: CustomerSummary = useMemo(() => {
+    const nextSummary = buildLocalCustomerSummary(customers, summaryScopedCustomers, customerOptions);
+    return {
+      ...nextSummary,
+      applied_filters: {
+        date_from: filterDateFrom || null,
+        date_to: filterDateTo || null,
+        creator_role: filterCreatorRole || null,
+        driver_id: filterDriverId || null,
+        customer_category_id: filterCustomerCategoryId || null,
+        source: filterSource || null,
+      },
+    };
+  }, [
+    customerOptions,
+    customers,
+    filterCreatorRole,
+    filterCustomerCategoryId,
+    filterDateFrom,
+    filterDateTo,
+    filterDriverId,
+    filterSource,
+    summaryScopedCustomers,
+  ]);
 
   const filteredCustomers = useMemo(
     () =>
@@ -802,21 +1120,28 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
     [customers.length, customerSummary, portal, summary, upcomingBookings.length],
   );
 
-  const openCreateCustomer = () => {
+  const openCreateCustomer = async () => {
     clearCustomerFormErrors();
+    setPageError('');
+    const options = await ensureCustomerOptionsLoaded().catch(() => null);
+    if (!options) {
+      return;
+    }
     setEditingCustomer(null);
     setCustomerForm({
       ...emptyCustomerForm,
       source: 'manual_entry',
-      customer_category_id: customerOptions?.customer_category_items?.[0]?.id || '',
-      follow_up_priority: customerOptions?.follow_up_priorities?.[1] || 'medium',
-      lead_status_id: customerOptions?.lead_status_items?.[0]?.id || '',
+      customer_category_id: options.customer_category_items?.[0]?.id || '',
+      follow_up_priority: options.follow_up_priorities?.[1] || 'medium',
+      lead_status_id: options.lead_status_items?.[0]?.id || '',
     });
     setShowCustomerModal(true);
   };
 
-  const openEditCustomer = (customer: CustomerRecord) => {
+  const openEditCustomer = async (customer: CustomerRecord) => {
     clearCustomerFormErrors();
+    setPageError('');
+    await ensureCustomerOptionsLoaded().catch(() => null);
     setEditingCustomer(customer);
     setCustomerForm({
       full_name: customer.full_name || '',
@@ -864,7 +1189,11 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
     setShowCustomerModal(true);
   };
 
-  const openCreateBooking = () => {
+  const openCreateBooking = async () => {
+    const options = await ensureBookingOptionsLoaded().catch(() => null);
+    if (!options) {
+      return;
+    }
     setBookingForm({
       ...emptyBookingForm,
       customer_id: selectedCustomer?.id || '',
@@ -873,30 +1202,38 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
         selectedCustomer?.preferred_pickup_location || selectedCustomer?.pickup_location || '',
       destination:
         selectedCustomer?.preferred_dropoff_location || selectedCustomer?.destination_location || '',
-      booking_type: bookingOptions?.booking_types?.[0] || 'Customer Booking',
+      booking_type: options.booking_types?.[0] || 'Customer Booking',
       title: '',
       description: '',
-      priority: bookingOptions?.priorities?.[1] || 'Medium',
-      status: bookingOptions?.statuses?.[0] || 'Scheduled',
+      priority: options.priorities?.[1] || 'Medium',
+      status: options.statuses?.[0] || 'Scheduled',
     });
     setShowBookingModal(true);
   };
 
-  const openCreateReminder = () => {
+  const openCreateReminder = async () => {
+    const options = await ensureBookingOptionsLoaded().catch(() => null);
+    if (!options) {
+      return;
+    }
     setBookingForm({
       ...emptyBookingForm,
       customer_id: selectedCustomer?.id || '',
-      driver_id: portal === 'driver' ? bookingOptions?.drivers?.[0]?.id || '' : selectedCustomer?.preferred_driver_id || '',
+      driver_id: portal === 'driver' ? options.drivers?.[0]?.id || '' : selectedCustomer?.preferred_driver_id || '',
       booking_type: 'Personal Reminder',
       title: '',
       description: '',
-      priority: bookingOptions?.priorities?.[1] || 'Medium',
+      priority: options.priorities?.[1] || 'Medium',
       status: 'Scheduled',
     });
     setShowBookingModal(true);
   };
 
-  const openCreateFollowUpBooking = () => {
+  const openCreateFollowUpBooking = async () => {
+    const options = await ensureBookingOptionsLoaded().catch(() => null);
+    if (!options) {
+      return;
+    }
     setBookingForm({
       ...emptyBookingForm,
       customer_id: selectedCustomer?.id || '',
@@ -904,7 +1241,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
       booking_type: 'Follow-Up Reminder',
       title: selectedCustomer ? `Follow up with ${selectedCustomer.full_name}` : '',
       description: '',
-      priority: bookingOptions?.priorities?.[2] || 'High',
+      priority: options.priorities?.[2] || 'High',
       status: 'Scheduled',
     });
     setShowBookingModal(true);
@@ -928,8 +1265,14 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
         ? await updateCustomer(editingCustomer.id, payload)
         : await createCustomer(payload);
       closeCustomerModal();
+      setCustomers((current) => {
+        if (editingCustomer) {
+          return current.map((customer) => (customer.id === savedCustomer.id ? savedCustomer : customer));
+        }
+        return [savedCustomer, ...current];
+      });
       setSelectedCustomerId(savedCustomer.id);
-      await loadWorkspace();
+      setPageNotice(editingCustomer ? 'Customer profile updated.' : 'Customer added successfully.');
     } catch (error) {
       if (error instanceof ApiRequestError) {
         const normalized = normalizeCustomerFormError(error);
@@ -1027,7 +1370,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
         follow_up_completion_note: `Completed from ${portal} portal`,
       });
       setCustomers((current) => current.map((customer) => (customer.id === updated.id ? updated : customer)));
-      await loadWorkspace();
+      setPageNotice('Follow-up marked as completed.');
     } catch (error) {
       if (error instanceof ApiRequestError) {
         setPageError(error.message);
@@ -1055,17 +1398,17 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
     }
     if (quickActionIntent === 'create_booking') {
       clearDriverQuickActionIntent();
-      openCreateBooking();
+      void openCreateBooking();
       return;
     }
     if (quickActionIntent === 'create_reminder') {
       clearDriverQuickActionIntent();
-      openCreateReminder();
+      void openCreateReminder();
       return;
     }
     if (quickActionIntent === 'schedule_follow_up') {
       clearDriverQuickActionIntent();
-      openCreateFollowUpBooking();
+      void openCreateFollowUpBooking();
     }
   }, [isLoading, portal, bookingOptions, selectedCustomerId]);
 
@@ -1087,28 +1430,28 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
         </div>
         <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row">
           <button
-            onClick={openCreateCustomer}
+            onClick={() => void openCreateCustomer()}
             className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-medium text-[#0F172A] hover:bg-gray-50 sm:w-auto"
           >
             <UserPlus className="h-4 w-4" />
             Add Customer
           </button>
           <button
-            onClick={openCreateBooking}
+            onClick={() => void openCreateBooking()}
             className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#2563EB] px-4 py-2.5 text-sm font-medium text-white hover:bg-[#1d4ed8] sm:w-auto"
           >
             <Plus className="h-4 w-4" />
             Schedule Booking
           </button>
           <button
-            onClick={openCreateReminder}
+            onClick={() => void openCreateReminder()}
             className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-purple-200 bg-purple-50 px-4 py-2.5 text-sm font-medium text-purple-700 hover:bg-purple-100 sm:w-auto"
           >
             <Clock className="h-4 w-4" />
             Create Reminder
           </button>
           <button
-            onClick={openCreateFollowUpBooking}
+            onClick={() => void openCreateFollowUpBooking()}
             className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm font-medium text-amber-700 hover:bg-amber-100 sm:w-auto"
           >
             <Calendar className="h-4 w-4" />
@@ -1383,7 +1726,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                     </div>
                   </div>
                   <button
-                    onClick={() => openEditCustomer(selectedCustomer)}
+                    onClick={() => void openEditCustomer(selectedCustomer)}
                     className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-white/15 px-4 py-2.5 text-sm font-medium text-white hover:bg-white/25 sm:w-auto"
                   >
                     <Pencil className="h-4 w-4" />
@@ -1483,7 +1826,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                                   disabled={isCompletedBookingStatus(booking.status)}
                                   className="rounded-lg border border-gray-300 px-3 py-2 text-xs focus:border-[#2563EB] focus:outline-none"
                                 >
-                                  {(bookingOptions?.statuses || []).map((status) => (
+                                  {(bookingOptions?.statuses || defaultBookingStatuses).map((status) => (
                                     <option key={status} value={status}>
                                       {status}
                                     </option>
@@ -1621,7 +1964,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                       </div>
                       <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
                         <button
-                          onClick={() => openEditCustomer(selectedCustomer)}
+                          onClick={() => void openEditCustomer(selectedCustomer)}
                           className="w-full rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 sm:w-auto"
                         >
                           Schedule Follow-Up
@@ -1831,7 +2174,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                       type="button"
                       onClick={() => {
                         setSelectedCustomerId(duplicateCustomer.id);
-                        openEditCustomer(duplicateCustomer);
+                        void openEditCustomer(duplicateCustomer);
                       }}
                       className="rounded-lg bg-red-700 px-3 py-2 text-xs font-medium text-white hover:bg-red-800"
                     >
@@ -2089,7 +2432,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                 onChange={(event) => updateCustomerField('follow_up_priority', event.target.value)}
                 className={getCustomerFieldClass(Boolean(customerFieldErrors.follow_up_priority))}
               >
-                {(customerOptions?.follow_up_priorities || []).map((priority) => (
+                {(customerOptions?.follow_up_priorities || ['low', 'medium', 'high']).map((priority) => (
                   <option key={priority} value={priority}>
                     {priority}
                   </option>
@@ -2126,7 +2469,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                 onChange={(event) => updateCustomerField('status', event.target.value)}
                 className={getCustomerFieldClass(Boolean(customerFieldErrors.status))}
               >
-                {(customerOptions?.statuses || []).map((status) => (
+                {(customerOptions?.statuses || ['active', 'inactive']).map((status) => (
                   <option key={status} value={status}>
                     {status}
                   </option>
@@ -2229,7 +2572,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                 onChange={(event) => setBookingForm((current) => ({ ...current, booking_type: event.target.value }))}
                 className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm"
               >
-                {(bookingOptions?.booking_types || []).map((type) => (
+                {(bookingOptions?.booking_types || defaultBookingTypes).map((type) => (
                   <option key={type} value={type}>
                     {type}
                   </option>
@@ -2254,7 +2597,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                 onChange={(event) => setBookingForm((current) => ({ ...current, priority: event.target.value }))}
                 className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm"
               >
-                {(bookingOptions?.priorities || ['Low', 'Medium', 'High', 'Critical']).map((priority) => (
+                {(bookingOptions?.priorities || defaultBookingPriorities).map((priority) => (
                   <option key={priority} value={priority}>
                     {priority}
                   </option>
@@ -2380,7 +2723,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                 onChange={(event) => setBookingForm((current) => ({ ...current, status: event.target.value }))}
                 className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm"
               >
-                {(bookingOptions?.statuses || []).map((status) => (
+                {(bookingOptions?.statuses || defaultBookingStatuses).map((status) => (
                   <option key={status} value={status}>
                     {status}
                   </option>
@@ -2399,7 +2742,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                   className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm"
                 >
                   <option value="">One Time</option>
-                  {(bookingOptions?.recurrence_types || []).map((type) => (
+                  {(bookingOptions?.recurrence_types || defaultRecurrenceTypes).map((type) => (
                     type !== 'One Time' ? (
                     <option key={type} value={type}>
                       {type}

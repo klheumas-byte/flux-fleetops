@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   AlertCircle,
   AlertTriangle,
@@ -64,12 +64,46 @@ function todayValue() {
   return new Date().toISOString().slice(0, 10);
 }
 
+function useVisibilityOnce<T extends HTMLElement>() {
+  const ref = useRef<T | null>(null);
+  const [isVisible, setIsVisible] = useState(false);
+
+  useEffect(() => {
+    if (isVisible) {
+      return;
+    }
+    if (typeof IntersectionObserver === 'undefined') {
+      setIsVisible(true);
+      return;
+    }
+    if (!ref.current) {
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setIsVisible(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: '160px 0px' },
+    );
+
+    observer.observe(ref.current);
+    return () => observer.disconnect();
+  }, [isVisible]);
+
+  return [ref, isVisible] as const;
+}
+
 export default function DriverDashboard({
   currentUser,
   activeAssignment,
   dashboardSummary,
   onNavigate,
 }: DriverDashboardProps) {
+  const [bookingInsightsRef, shouldLoadBookingSummary] = useVisibilityOnce<HTMLDivElement>();
   const [bookingSummary, setBookingSummary] = useState<BookingSummary | null>(null);
   const [bookingSummaryError, setBookingSummaryError] = useState('');
   const [bookingSummaryNotice, setBookingSummaryNotice] = useState('');
@@ -115,12 +149,11 @@ export default function DriverDashboard({
   };
 
   useEffect(() => {
+    if (!shouldLoadBookingSummary || bookingSummary || bookingSummaryError || bookingSummaryNotice) {
+      return;
+    }
     void loadBookingSummary();
-  }, []);
-
-  useEffect(() => {
-    void loadRideWorkspace();
-  }, []);
+  }, [bookingSummary, bookingSummaryError, bookingSummaryNotice, shouldLoadBookingSummary]);
 
   const selectedBooking = useMemo(
     () => rideOptions?.bookings.find((booking) => booking.id === startTripForm.booking_id) || null,
@@ -199,8 +232,13 @@ export default function DriverDashboard({
       if (ridesResult.status === 'rejected') {
         toast.error('Trip history is temporarily unavailable, but you can still start a new trip.');
       }
+      return {
+        options: optionsResult.value,
+        activeRide: nextActiveRide,
+      };
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Unable to load trip actions right now.');
+      return null;
     } finally {
       setIsLoadingRideWorkspace(false);
     }
@@ -230,13 +268,17 @@ export default function DriverDashboard({
       toast.info(`Finish ${activeRide.trip_id} before starting another trip.`);
       return;
     }
-    await loadRideWorkspace();
+    const workspace = await loadRideWorkspace();
+    if (workspace?.activeRide) {
+      toast.info(`Finish ${workspace.activeRide.trip_id} before starting another trip.`);
+      return;
+    }
     setShowStartTripModal(true);
   };
 
   const openEndTrip = async () => {
-    await loadRideWorkspace();
-    if (!activeRide) {
+    const workspace = await loadRideWorkspace();
+    if (!workspace?.activeRide) {
       toast.info('There is no active trip to end right now.');
       return;
     }
@@ -551,41 +593,43 @@ export default function DriverDashboard({
         </div>
       </div>
 
-      {bookingSummaryError && (
-        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <span>{bookingSummaryError}</span>
-            <button onClick={() => void loadBookingSummary()} className="rounded-lg border border-red-200 bg-white px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-100">
-              Retry
-            </button>
-          </div>
-        </div>
-      )}
-
-      {bookingSummaryNotice && (
-        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-          {bookingSummaryNotice}
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-        {[
-          { label: 'Scheduled Today', value: bookingSummary?.scheduled_today ?? 0, icon: Calendar, tint: 'bg-blue-100 text-blue-600' },
-          { label: 'Upcoming Bookings', value: bookingSummary?.upcoming_bookings ?? 0, icon: Navigation, tint: 'bg-emerald-100 text-emerald-600' },
-          { label: 'Overdue Reminders', value: bookingSummary?.overdue_reminders ?? 0, icon: Clock, tint: 'bg-rose-100 text-rose-600' },
-          { label: 'Follow-Ups Due Today', value: bookingSummary?.follow_ups_due_today ?? 0, icon: CheckCircle, tint: 'bg-amber-100 text-amber-600' },
-        ].map((card) => {
-          const Icon = card.icon;
-          return (
-            <div key={card.label} className="rounded-lg border border-gray-200 bg-white p-5">
-              <div className={`mb-4 flex h-11 w-11 items-center justify-center rounded-xl ${card.tint}`}>
-                <Icon className="h-5 w-5" />
-              </div>
-              <div className="text-3xl font-semibold text-[#0F172A]">{card.value}</div>
-              <div className="mt-1 text-sm text-gray-500">{card.label}</div>
+      <div ref={bookingInsightsRef} className="space-y-4">
+        {bookingSummaryError && (
+          <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <span>{bookingSummaryError}</span>
+              <button onClick={() => void loadBookingSummary()} className="rounded-lg border border-red-200 bg-white px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-100">
+                Retry
+              </button>
             </div>
-          );
-        })}
+          </div>
+        )}
+
+        {bookingSummaryNotice && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            {bookingSummaryNotice}
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+          {[
+            { label: 'Scheduled Today', value: bookingSummary?.scheduled_today ?? 0, icon: Calendar, tint: 'bg-blue-100 text-blue-600' },
+            { label: 'Upcoming Bookings', value: bookingSummary?.upcoming_bookings ?? 0, icon: Navigation, tint: 'bg-emerald-100 text-emerald-600' },
+            { label: 'Overdue Reminders', value: bookingSummary?.overdue_reminders ?? 0, icon: Clock, tint: 'bg-rose-100 text-rose-600' },
+            { label: 'Follow-Ups Due Today', value: bookingSummary?.follow_ups_due_today ?? 0, icon: CheckCircle, tint: 'bg-amber-100 text-amber-600' },
+          ].map((card) => {
+            const Icon = card.icon;
+            return (
+              <div key={card.label} className="rounded-lg border border-gray-200 bg-white p-5">
+                <div className={`mb-4 flex h-11 w-11 items-center justify-center rounded-xl ${card.tint}`}>
+                  <Icon className="h-5 w-5" />
+                </div>
+                <div className="text-3xl font-semibold text-[#0F172A]">{card.value}</div>
+                <div className="mt-1 text-sm text-gray-500">{card.label}</div>
+              </div>
+            );
+          })}
+        </div>
       </div>
 
       <div className="rounded-lg border border-gray-200 bg-white p-6">

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, Calendar, Car, Gauge, Loader2, Shield, Truck, Wrench } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
 import { getAssignedVehicleLabel, type SessionUser } from '../../lib/auth-session';
@@ -151,9 +151,44 @@ function preventiveStatusBadgeClass(status: PreventiveScheduleStatus) {
   }
 }
 
+function useVisibilityOnce<T extends HTMLElement>() {
+  const ref = useRef<T | null>(null);
+  const [isVisible, setIsVisible] = useState(false);
+
+  useEffect(() => {
+    if (isVisible) {
+      return;
+    }
+    if (typeof IntersectionObserver === 'undefined') {
+      setIsVisible(true);
+      return;
+    }
+    if (!ref.current) {
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setIsVisible(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: '160px 0px' },
+    );
+
+    observer.observe(ref.current);
+    return () => observer.disconnect();
+  }, [isVisible]);
+
+  return [ref, isVisible] as const;
+}
+
 export default function MyVehicle({ currentUser, activeAssignment }: MyVehicleProps) {
   const vehicle = activeAssignment?.vehicle || null;
   const hasAssignedVehicle = Boolean(activeAssignment && vehicle);
+  const [preventiveSectionRef, shouldLoadPreventive] = useVisibilityOnce<HTMLDivElement>();
+  const [maintenanceSectionRef, shouldLoadMaintenance] = useVisibilityOnce<HTMLDivElement>();
   const [maintenanceJobs, setMaintenanceJobs] = useState<MaintenanceJob[]>([]);
   const [isLoadingMaintenance, setIsLoadingMaintenance] = useState(false);
   const [maintenanceError, setMaintenanceError] = useState('');
@@ -174,76 +209,62 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
       setMaintenanceError('');
       setIsLoadingMaintenance(false);
       setPreventiveSchedules([]);
+      setComplianceRecords([]);
       setPreventiveError('');
       setIsLoadingPreventive(false);
+    }
+  }, [hasAssignedVehicle]);
+
+  const loadMaintenanceJobs = async () => {
+    setIsLoadingMaintenance(true);
+    setMaintenanceError('');
+    try {
+      const maintenanceResponse = await apiRequest<MaintenanceJobsResponse>('/driver/maintenance');
+      setMaintenanceJobs(Array.isArray(maintenanceResponse.data?.jobs) ? maintenanceResponse.data.jobs : []);
+    } catch (error) {
+      setMaintenanceJobs([]);
+      if (error instanceof ApiRequestError) {
+        setMaintenanceError(error.message);
+      } else {
+        setMaintenanceError('Unable to load maintenance status right now.');
+      }
+    } finally {
+      setIsLoadingMaintenance(false);
+    }
+  };
+
+  const loadPreventiveData = async () => {
+    setIsLoadingPreventive(true);
+    setPreventiveError('');
+    try {
+      const preventiveResponse = await apiRequest<PreventiveSchedulesResponse>('/driver/preventive-maintenance');
+      setPreventiveSchedules(Array.isArray(preventiveResponse.data?.schedules) ? preventiveResponse.data.schedules : []);
+      setComplianceRecords(Array.isArray(preventiveResponse.data?.compliance_records) ? preventiveResponse.data.compliance_records : []);
+    } catch (error) {
+      setPreventiveSchedules([]);
+      setComplianceRecords([]);
+      if (error instanceof ApiRequestError) {
+        setPreventiveError(error.message);
+      } else {
+        setPreventiveError('Unable to load preventive maintenance reminders right now.');
+      }
+    } finally {
+      setIsLoadingPreventive(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!hasAssignedVehicle || !shouldLoadPreventive || isLoadingPreventive || preventiveSchedules.length || complianceRecords.length || preventiveError) {
       return;
     }
+    void loadPreventiveData();
+  }, [complianceRecords.length, hasAssignedVehicle, isLoadingPreventive, preventiveError, preventiveSchedules.length, shouldLoadPreventive]);
 
-    let isMounted = true;
-
-    const loadMaintenance = async () => {
-      const loadMaintenanceJobs = async () => {
-        setIsLoadingMaintenance(true);
-        setMaintenanceError('');
-        try {
-          const maintenanceResponse = await apiRequest<MaintenanceJobsResponse>('/driver/maintenance');
-          if (!isMounted) {
-            return;
-          }
-          setMaintenanceJobs(Array.isArray(maintenanceResponse.data?.jobs) ? maintenanceResponse.data.jobs : []);
-        } catch (error) {
-          if (!isMounted) {
-            return;
-          }
-          setMaintenanceJobs([]);
-          if (error instanceof ApiRequestError) {
-            setMaintenanceError(error.message);
-          } else {
-            setMaintenanceError('Unable to load maintenance status right now.');
-          }
-        } finally {
-          if (isMounted) {
-            setIsLoadingMaintenance(false);
-          }
-        }
-      };
-
-      const loadPreventiveData = async () => {
-        setIsLoadingPreventive(true);
-        setPreventiveError('');
-        try {
-          const preventiveResponse = await apiRequest<PreventiveSchedulesResponse>('/driver/preventive-maintenance');
-          if (!isMounted) {
-            return;
-          }
-          setPreventiveSchedules(Array.isArray(preventiveResponse.data?.schedules) ? preventiveResponse.data.schedules : []);
-          setComplianceRecords(Array.isArray(preventiveResponse.data?.compliance_records) ? preventiveResponse.data.compliance_records : []);
-        } catch (error) {
-          if (!isMounted) {
-            return;
-          }
-          setPreventiveSchedules([]);
-          setComplianceRecords([]);
-          if (error instanceof ApiRequestError) {
-            setPreventiveError(error.message);
-          } else {
-            setPreventiveError('Unable to load preventive maintenance reminders right now.');
-          }
-        } finally {
-          if (isMounted) {
-            setIsLoadingPreventive(false);
-          }
-        }
-      };
-
-      await Promise.allSettled([loadMaintenanceJobs(), loadPreventiveData()]);
-    };
-
-    void loadMaintenance();
-
-    return () => {
-      isMounted = false;
-    };
+  useEffect(() => {
+    if (!hasAssignedVehicle || !shouldLoadMaintenance || isLoadingMaintenance || maintenanceJobs.length || maintenanceError) {
+      return;
+    }
+    void loadMaintenanceJobs();
   }, [hasAssignedVehicle]);
 
   const activeMaintenanceJobs = useMemo(
@@ -467,7 +488,7 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
               </div>
             </div>
 
-            <div className="rounded-xl border border-gray-200 bg-white p-5">
+            <div ref={preventiveSectionRef} className="rounded-xl border border-gray-200 bg-white p-5">
               <div className="mb-4 flex items-center gap-3">
                 <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-amber-100">
                   <AlertCircle className="h-5 w-5 text-amber-600" />
@@ -559,7 +580,7 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
               )}
             </div>
 
-            <div className="rounded-xl border border-gray-200 bg-white p-5">
+            <div ref={maintenanceSectionRef} className="rounded-xl border border-gray-200 bg-white p-5">
               <div className="mb-4 flex items-center gap-3">
                 <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-100">
                   <Wrench className="h-5 w-5 text-blue-600" />

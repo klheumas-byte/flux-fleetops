@@ -154,10 +154,21 @@ export async function fetchRideOptions() {
   return response.data;
 }
 
-export async function fetchRides() {
-  const response = await apiRequest<{ data: { rides: TripRecord[] } }>('/rides', {
+interface FetchRidesParams {
+  q?: string;
+  page?: number;
+  limit?: number;
+}
+
+export async function fetchRides(params: FetchRidesParams = {}) {
+  const searchParams = new URLSearchParams();
+  if (params.q) searchParams.set('q', params.q);
+  if (params.page) searchParams.set('page', String(params.page));
+  if (params.limit) searchParams.set('limit', String(params.limit));
+  const query = searchParams.toString();
+  const response = await apiRequest<{ data: { rides: TripRecord[] } }>(`/rides${query ? `?${query}` : ''}`, {
     cacheTtlMs: 10000,
-    dedupeKey: 'rides-list',
+    dedupeKey: `rides-list:${query || 'default'}`,
     componentName: 'RideWorkspace',
     requestLabel: 'rides-list',
   });

@@ -24,7 +24,7 @@ export default function RideHistory() {
       setIsLoading(true);
       setPageError('');
       try {
-        const [ridesResult, summaryResult] = await Promise.allSettled([fetchRides(), fetchRideSummary()]);
+        const [ridesResult, summaryResult] = await Promise.allSettled([fetchRides({ q: debouncedSearch, limit: 50 }), fetchRideSummary()]);
         setRides(ridesResult.status === 'fulfilled' ? ridesResult.value : []);
         setSummary(summaryResult.status === 'fulfilled' ? summaryResult.value : null);
 
@@ -46,18 +46,15 @@ export default function RideHistory() {
       }
     };
     void loadHistory();
-  }, []);
+  }, [debouncedSearch]);
 
   const filteredRides = useMemo(
     () =>
       rides.filter((trip) => {
-        const matchesSearch = [trip.trip_id, trip.customer?.full_name, trip.customer_name_snapshot, trip.pickup_area, trip.destination_area]
-          .filter(Boolean)
-          .some((value) => value?.toLowerCase().includes(debouncedSearch.toLowerCase()));
         const matchesStatus = statusFilter === 'all' || trip.status === statusFilter;
-        return matchesSearch && matchesStatus;
+        return matchesStatus;
       }),
-    [rides, debouncedSearch, statusFilter],
+    [rides, statusFilter],
   );
 
   if (isLoading) {

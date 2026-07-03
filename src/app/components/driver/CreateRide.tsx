@@ -162,7 +162,7 @@ export default function CreateRide() {
     setIsLoading(true);
     setPageError('');
     try {
-      const [nextOptions, nextRides] = await Promise.all([fetchRideOptions(), fetchRides()]);
+      const [nextOptions, nextRides] = await Promise.all([fetchRideOptions(), fetchRides({ limit: 20 })]);
       setOptions(nextOptions);
       setRides(nextRides);
       setForm((current) => ({

@@ -1,9 +1,12 @@
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
+from time import perf_counter
 from typing import Any
+import re
 
 from bson import ObjectId
 from pymongo import ASCENDING, DESCENDING
+from flask import current_app
 
 from extensions import get_collection
 from models.booking import serialize_booking
@@ -14,6 +17,7 @@ from models.vehicle import serialize_vehicle
 from services.master_data_service import get_active_master_data_items, resolve_master_data_item
 from services.notification_service import create_notification, notify_roles
 from utils.api_error import ApiError
+from utils.performance import build_cache_key, get_ttl_cached, log_db_duration, set_ttl_cached
 
 
 TRIP_STATUSES = {
@@ -21,6 +25,45 @@ TRIP_STATUSES = {
     "Scheduled",
     "Completed",
     "Cancelled",
+}
+
+ACTIVE_BOOKING_STATUSES = ["Scheduled", "Acknowledged", "En Route", "Picked Up", "Confirmed"]
+
+RIDE_LIST_PROJECTION = {
+    "trip_id": 1,
+    "ride_id": 1,
+    "customer_id": 1,
+    "customer_name_snapshot": 1,
+    "driver_id": 1,
+    "vehicle_id": 1,
+    "trip_source_id": 1,
+    "trip_purpose_id": 1,
+    "trip_source": 1,
+    "trip_purpose": 1,
+    "trip_date": 1,
+    "start_time": 1,
+    "end_time": 1,
+    "pickup_area": 1,
+    "destination_area": 1,
+    "odometer_start": 1,
+    "odometer_end": 1,
+    "notes": 1,
+    "status": 1,
+    "created_by": 1,
+    "created_at": 1,
+    "updated_at": 1,
+    "source_booking_id": 1,
+    "actual_fare": 1,
+}
+
+RIDE_SUMMARY_PROJECTION = {
+    "trip_date": 1,
+    "status": 1,
+    "vehicle_id": 1,
+    "trip_source": 1,
+    "trip_purpose": 1,
+    "driver_id": 1,
+    "customer_id": 1,
 }
 
 
@@ -106,6 +149,15 @@ def _normalize_text(value: Any):
         return None
     normalized = str(value).strip()
     return normalized or None
+
+
+def _merge_queries(*queries: dict | None):
+    normalized = [query for query in queries if query]
+    if not normalized:
+        return {}
+    if len(normalized) == 1:
+        return normalized[0]
+    return {"$and": normalized}
 
 
 def _parse_trip_date(value, field_name: str, *, required: bool = False):
@@ -265,6 +317,243 @@ def _enrich_ride(ride_document: dict):
     return ride
 
 
+def _serialize_ride_option_customer(customer_document: dict) -> dict:
+    return {
+        "id": str(customer_document.get("_id")),
+        "full_name": customer_document.get("full_name"),
+        "phone_number": customer_document.get("phone_number"),
+    }
+
+
+def _serialize_ride_option_driver(user_document: dict) -> dict:
+    return {
+        "id": str(user_document.get("_id")),
+        "full_name": user_document.get("full_name"),
+        "role": "driver",
+        "status": user_document.get("status"),
+    }
+
+
+def _serialize_ride_option_vehicle(vehicle_document: dict) -> dict:
+    registration_number = vehicle_document.get("registration_number")
+    vehicle_name = " ".join(
+        part for part in [
+            vehicle_document.get("make"),
+            vehicle_document.get("model"),
+            vehicle_document.get("vehicle_type"),
+        ] if part
+    ) or registration_number
+    return {
+        "id": str(vehicle_document.get("_id")),
+        "registration_number": registration_number,
+        "plate_number": registration_number,
+        "vehicle_name": vehicle_name,
+        "status": vehicle_document.get("status"),
+    }
+
+
+def _serialize_ride_option_booking(booking_document: dict) -> dict:
+    pickup_at = booking_document.get("pickup_at")
+    return {
+        "id": str(booking_document.get("_id")),
+        "booking_id": booking_document.get("booking_id"),
+        "customer_id": str(booking_document.get("customer_id")) if booking_document.get("customer_id") else None,
+        "driver_id": str(booking_document.get("driver_id")) if booking_document.get("driver_id") else None,
+        "vehicle_id": str(booking_document.get("vehicle_id")) if booking_document.get("vehicle_id") else None,
+        "booking_type": booking_document.get("booking_type"),
+        "pickup_location": booking_document.get("pickup_location"),
+        "destination": booking_document.get("destination"),
+        "pickup_date": booking_document.get("pickup_date"),
+        "pickup_time": booking_document.get("pickup_time"),
+        "pickup_at": pickup_at.isoformat() if pickup_at else None,
+        "status": booking_document.get("status"),
+    }
+
+
+def _serialize_ride_list_customer(customer_document: dict | None) -> dict | None:
+    if not customer_document:
+        return None
+    return {
+        "id": str(customer_document.get("_id")),
+        "full_name": customer_document.get("full_name"),
+        "phone_number": customer_document.get("phone_number"),
+    }
+
+
+def _serialize_ride_list_driver(user_document: dict | None) -> dict | None:
+    if not user_document:
+        return None
+    return {
+        "id": str(user_document.get("_id")),
+        "full_name": user_document.get("full_name"),
+        "role": str(user_document.get("role")).strip().lower() if user_document.get("role") else None,
+        "status": user_document.get("status"),
+    }
+
+
+def _serialize_ride_list_vehicle(vehicle_document: dict | None) -> dict | None:
+    if not vehicle_document:
+        return None
+    return {
+        "id": str(vehicle_document.get("_id")),
+        "registration_number": vehicle_document.get("registration_number"),
+        "vehicle_type": vehicle_document.get("vehicle_type"),
+        "make": vehicle_document.get("make"),
+        "model": vehicle_document.get("model"),
+        "status": vehicle_document.get("status"),
+    }
+
+
+def _serialize_ride_list_booking(booking_document: dict | None) -> dict | None:
+    if not booking_document:
+        return None
+    return _serialize_ride_option_booking(booking_document)
+
+
+def _collection_freshness_token(collection, query: dict | None = None) -> str:
+    scoped_query = query or {}
+    latest_document = collection.find_one(
+        scoped_query,
+        {"updated_at": 1, "created_at": 1},
+        sort=[("updated_at", DESCENDING), ("created_at", DESCENDING)],
+    )
+    latest_marker = None
+    if latest_document:
+        latest_value = latest_document.get("updated_at") or latest_document.get("created_at")
+        latest_marker = latest_value.isoformat() if isinstance(latest_value, datetime) else str(latest_value)
+    count = collection.count_documents(scoped_query)
+    return f"{count}:{latest_marker or 'none'}"
+
+
+def _cached_collection_freshness_token(cache_namespace: str, collection, query: dict | None = None) -> str:
+    cache_key = build_cache_key("ride_options_freshness", scope=cache_namespace, query=str(query or {}))
+    cached = get_ttl_cached(cache_key)
+    if cached is not None:
+        return cached
+    return set_ttl_cached(cache_key, _collection_freshness_token(collection, query), ttl_seconds=5)
+
+
+def _log_slow_endpoint(endpoint: str, *, role: str, duration_ms: float, query_metrics: list[dict]):
+    if duration_ms <= 1000:
+        return
+    largest_query = max(query_metrics, key=lambda item: item.get("duration_ms", 0), default=None)
+    current_app.logger.warning(
+        "SLOW API WARNING endpoint=%s role=%s duration_ms=%.2f largest_query=%s query_duration_ms=%s collection=%s",
+        endpoint,
+        role,
+        duration_ms,
+        (largest_query or {}).get("label"),
+        (largest_query or {}).get("duration_ms"),
+        (largest_query or {}).get("collection"),
+    )
+
+
+def _load_ride_relationship_maps(ride_documents: list[dict]) -> tuple[dict[str, dict], dict[str, dict]]:
+    driver_ids = {
+        ride_document.get("driver_id")
+        for ride_document in ride_documents
+        if isinstance(ride_document.get("driver_id"), ObjectId)
+    }
+    vehicle_ids = {
+        ride_document.get("vehicle_id")
+        for ride_document in ride_documents
+        if isinstance(ride_document.get("vehicle_id"), ObjectId)
+    }
+    driver_map = {
+        str(user_document["_id"]): user_document
+        for user_document in users_collection().find(
+            {"_id": {"$in": list(driver_ids)}},
+            {"full_name": 1, "role": 1, "status": 1},
+        )
+    } if driver_ids else {}
+    vehicle_map = {
+        str(vehicle_document["_id"]): vehicle_document
+        for vehicle_document in vehicles_collection().find(
+            {"_id": {"$in": list(vehicle_ids)}},
+            {"registration_number": 1, "vehicle_type": 1, "make": 1, "model": 1, "status": 1},
+        )
+    } if vehicle_ids else {}
+    return driver_map, vehicle_map
+
+
+def _enrich_ride_list_item(
+    ride_document: dict,
+    *,
+    driver_map: dict[str, dict],
+    vehicle_map: dict[str, dict],
+) -> dict:
+    ride = serialize_ride(ride_document)
+    driver = driver_map.get(str(ride_document.get("driver_id"))) if ride_document.get("driver_id") else None
+    vehicle = vehicle_map.get(str(ride_document.get("vehicle_id"))) if ride_document.get("vehicle_id") else None
+    ride["customer"] = {
+        "id": str(ride_document.get("customer_id")),
+        "full_name": ride_document.get("customer_name_snapshot"),
+        "phone_number": None,
+    } if ride_document.get("customer_id") and ride_document.get("customer_name_snapshot") else None
+    ride["driver"] = _serialize_ride_list_driver(driver)
+    ride["vehicle"] = _serialize_ride_list_vehicle(vehicle)
+    ride["source_booking"] = None
+    ride["trip_source_item"] = (
+        {"id": str(ride_document.get("trip_source_id")), "name": ride_document.get("trip_source"), "active": True}
+        if ride_document.get("trip_source_id") or ride_document.get("trip_source")
+        else None
+    )
+    ride["trip_purpose_item"] = (
+        {"id": str(ride_document.get("trip_purpose_id")), "name": ride_document.get("trip_purpose"), "active": True}
+        if ride_document.get("trip_purpose_id") or ride_document.get("trip_purpose")
+        else None
+    )
+    return ride
+
+
+def _normalize_page_limit(page: int | None, limit: int | None) -> tuple[int, int]:
+    normalized_page = max(int(page or 1), 1)
+    normalized_limit = max(1, min(int(limit or 20), 50))
+    return normalized_page, normalized_limit
+
+
+def _build_ride_search_query(search_query: str | None) -> dict:
+    normalized_search_query = _normalize_text(search_query)
+    if not normalized_search_query:
+        return {}
+
+    regex = {"$regex": re.escape(normalized_search_query), "$options": "i"}
+    driver_ids = [
+        driver_document["_id"]
+        for driver_document in users_collection().find(
+            {"role": "driver", "full_name": regex},
+            {"_id": 1},
+        ).limit(25)
+    ]
+    vehicle_ids = [
+        vehicle_document["_id"]
+        for vehicle_document in vehicles_collection().find(
+            {"registration_number": regex},
+            {"_id": 1},
+        ).limit(25)
+    ]
+    customer_ids = [
+        customer_document["_id"]
+        for customer_document in customers_collection().find(
+            {"full_name": regex},
+            {"_id": 1},
+        ).limit(25)
+    ]
+    or_conditions = [
+        {"trip_id": regex},
+        {"ride_id": regex},
+        {"customer_name_snapshot": regex},
+        {"destination_area": regex},
+    ]
+    if driver_ids:
+        or_conditions.append({"driver_id": {"$in": driver_ids}})
+    if vehicle_ids:
+        or_conditions.append({"vehicle_id": {"$in": vehicle_ids}})
+    if customer_ids:
+        or_conditions.append({"customer_id": {"$in": customer_ids}})
+    return {"$or": or_conditions}
+
+
 def _sync_booking_status_from_ride(ride_document: dict):
     booking_id = ride_document.get("source_booking_id")
     if not booking_id:
@@ -400,37 +689,203 @@ def _normalized_ride_payload(payload: dict, *, partial: bool = False) -> dict:
 
 
 def list_ride_options(current_user_id: str, current_role: str) -> dict:
+    request_started_at = perf_counter()
     customer_query = {}
     driver_query = {"role": "driver", "status": "active"}
     if current_role == "driver":
         customer_query["created_by"] = _to_object_id(current_user_id, "current_user_id")
         driver_query["_id"] = _to_object_id(current_user_id, "current_user_id")
     bookings_query = {
-        "status": {"$in": ["Scheduled", "Acknowledged", "En Route", "Picked Up", "Confirmed"]},
+        "status": {"$in": ACTIVE_BOOKING_STATUSES},
         "is_recurring_template": False,
     }
     if current_role == "driver":
         current_object_id = _to_object_id(current_user_id, "current_user_id")
         bookings_query["$or"] = [{"driver_id": current_object_id}, {"created_by": current_object_id}]
 
-    return {
-        "customers": [serialize_customer(customer) for customer in customers_collection().find(customer_query).sort("full_name", ASCENDING)],
-        "drivers": [serialize_user(driver) for driver in users_collection().find(driver_query).sort("full_name", ASCENDING)],
-        "vehicles": [serialize_vehicle(vehicle) for vehicle in vehicles_collection().find({}).sort("registration_number", ASCENDING)],
-        "bookings": [serialize_booking(booking) for booking in bookings_collection().find(bookings_query).sort([("pickup_at", ASCENDING)])],
+    cache_key = build_cache_key(
+        "ride_options",
+        current_user_id=current_user_id,
+        current_role=current_role,
+        customers=_cached_collection_freshness_token("customers", customers_collection(), customer_query),
+        drivers=_cached_collection_freshness_token("drivers", users_collection(), driver_query),
+        vehicles=_cached_collection_freshness_token("vehicles", vehicles_collection()),
+        bookings=_cached_collection_freshness_token("bookings", bookings_collection(), bookings_query),
+    )
+    cached = get_ttl_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    query_metrics: list[dict] = []
+
+    customers_started_at = perf_counter()
+    customers = list(
+        customers_collection().find(
+            customer_query,
+            {"full_name": 1, "phone_number": 1},
+        ).sort("full_name", ASCENDING)
+    )
+    query_metrics.append({
+        "label": "rides.options.customers",
+        "collection": "customers",
+        "duration_ms": log_db_duration("rides.options.customers", customers_started_at),
+    })
+
+    drivers_started_at = perf_counter()
+    drivers = list(
+        users_collection().find(
+            driver_query,
+            {"full_name": 1, "status": 1},
+        ).sort("full_name", ASCENDING)
+    )
+    query_metrics.append({
+        "label": "rides.options.drivers",
+        "collection": "users",
+        "duration_ms": log_db_duration("rides.options.drivers", drivers_started_at),
+    })
+
+    vehicles_started_at = perf_counter()
+    vehicles = list(
+        vehicles_collection().find(
+            {},
+            {"registration_number": 1, "make": 1, "model": 1, "vehicle_type": 1, "status": 1},
+        ).sort("registration_number", ASCENDING)
+    )
+    query_metrics.append({
+        "label": "rides.options.vehicles",
+        "collection": "vehicles",
+        "duration_ms": log_db_duration("rides.options.vehicles", vehicles_started_at),
+    })
+
+    bookings_started_at = perf_counter()
+    bookings = list(
+        bookings_collection().find(
+            bookings_query,
+            {
+                "booking_id": 1,
+                "customer_id": 1,
+                "driver_id": 1,
+                "vehicle_id": 1,
+                "booking_type": 1,
+                "pickup_location": 1,
+                "destination": 1,
+                "pickup_date": 1,
+                "pickup_time": 1,
+                "pickup_at": 1,
+                "status": 1,
+            },
+        ).sort([("pickup_at", ASCENDING)])
+    )
+    query_metrics.append({
+        "label": "rides.options.bookings",
+        "collection": "bookings",
+        "duration_ms": log_db_duration("rides.options.bookings", bookings_started_at),
+    })
+
+    result = {
+        "customers": [_serialize_ride_option_customer(customer) for customer in customers],
+        "drivers": [_serialize_ride_option_driver(driver) for driver in drivers],
+        "vehicles": [_serialize_ride_option_vehicle(vehicle) for vehicle in vehicles],
+        "bookings": [_serialize_ride_option_booking(booking) for booking in bookings],
         "trip_sources": get_active_master_data_items("ride_sources"),
         "trip_purposes": get_active_master_data_items("ride_purposes"),
         "statuses": sorted(TRIP_STATUSES),
     }
+    total_duration_ms = (perf_counter() - request_started_at) * 1000
+    current_app.logger.info(
+        "[Flux Rides] options role=%s duration_ms=%.2f",
+        current_role,
+        total_duration_ms,
+    )
+    _log_slow_endpoint("/api/rides/options", role=current_role, duration_ms=total_duration_ms, query_metrics=query_metrics)
+    return set_ttl_cached(cache_key, result, ttl_seconds=30)
 
 
-def list_rides(current_user_id: str, current_role: str) -> list[dict]:
-    query = {}
-    if current_role == "driver":
-        current_object_id = _to_object_id(current_user_id, "current_user_id")
-        query["$or"] = [{"driver_id": current_object_id}, {"created_by": current_object_id}]
-    rides = rides_collection().find(query).sort([("trip_date", DESCENDING), ("created_at", DESCENDING)])
-    return [_enrich_ride(ride_document) for ride_document in rides]
+def list_rides(
+    current_user_id: str,
+    current_role: str,
+    *,
+    page: int | None = None,
+    limit: int | None = None,
+    search_query: str | None = None,
+) -> dict:
+    request_started_at = perf_counter()
+    normalized_page, normalized_limit = _normalize_page_limit(page, limit)
+    query = _merge_queries(
+        _in_scope_query(current_user_id, current_role),
+        _build_ride_search_query(search_query),
+    )
+
+    query_metrics: list[dict] = []
+
+    find_started_at = perf_counter()
+    ride_documents_page = list(
+        rides_collection().find(query, RIDE_LIST_PROJECTION)
+        .sort([("trip_date", DESCENDING), ("created_at", DESCENDING)])
+        .skip((normalized_page - 1) * normalized_limit)
+        .limit(normalized_limit + 1)
+    )
+    query_metrics.append({
+        "label": "rides.list.find",
+        "collection": "rides",
+        "duration_ms": log_db_duration("rides.list.find", find_started_at),
+    })
+
+    has_next = len(ride_documents_page) > normalized_limit
+    ride_documents = ride_documents_page[:normalized_limit]
+    if normalized_page == 1 and not has_next:
+        total = len(ride_documents)
+    else:
+        count_started_at = perf_counter()
+        total = rides_collection().count_documents(query)
+        query_metrics.append({
+            "label": "rides.list.count",
+            "collection": "rides",
+            "duration_ms": log_db_duration("rides.list.count", count_started_at),
+        })
+
+    enrichment_started_at = perf_counter()
+    driver_map, vehicle_map = _load_ride_relationship_maps(ride_documents)
+    rides = [
+        _enrich_ride_list_item(
+            ride_document,
+            driver_map=driver_map,
+            vehicle_map=vehicle_map,
+        )
+        for ride_document in ride_documents
+    ]
+    query_metrics.append({
+        "label": "rides.list.enrichment",
+        "collection": "relationships",
+        "duration_ms": round((perf_counter() - enrichment_started_at) * 1000, 2),
+    })
+
+    total_pages = max((total + normalized_limit - 1) // normalized_limit, 1)
+    result = {
+        "rides": rides,
+        "pagination": {
+            "page": normalized_page,
+            "limit": normalized_limit,
+            "total": total,
+            "total_pages": total_pages,
+            "has_next": has_next if normalized_page == 1 and total <= normalized_limit else normalized_page < total_pages,
+            "has_prev": normalized_page > 1,
+        },
+        "query": {
+            "q": _normalize_text(search_query),
+        },
+    }
+    total_duration_ms = (perf_counter() - request_started_at) * 1000
+    current_app.logger.info(
+        "[Flux Rides] list role=%s page=%s limit=%s total=%s duration_ms=%.2f",
+        current_role,
+        normalized_page,
+        normalized_limit,
+        total,
+        total_duration_ms,
+    )
+    _log_slow_endpoint("/api/rides", role=current_role, duration_ms=total_duration_ms, query_metrics=query_metrics)
+    return result
 
 
 def create_ride(payload: dict, current_user_id: str, current_role: str) -> dict:
@@ -635,8 +1090,22 @@ def _in_date_window(trip_date_value: str | None, start_date, end_date):
 
 
 def get_ride_summary(current_user_id: str, current_role: str) -> dict:
+    cache_key = build_cache_key("ride_summary", current_user_id=current_user_id, current_role=current_role)
+    cached = get_ttl_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    request_started_at = perf_counter()
     query = _in_scope_query(current_user_id, current_role)
-    ride_documents = list(rides_collection().find(query))
+    query_metrics: list[dict] = []
+
+    rides_started_at = perf_counter()
+    ride_documents = list(rides_collection().find(query, RIDE_SUMMARY_PROJECTION))
+    query_metrics.append({
+        "label": "rides.summary.find",
+        "collection": "rides",
+        "duration_ms": log_db_duration("rides.summary.find", rides_started_at),
+    })
     now, today, week_start, month_start = _current_time_windows()
 
     trips_today = [document for document in ride_documents if _in_date_window(document.get("trip_date"), today, today)]
@@ -663,7 +1132,18 @@ def get_ride_summary(current_user_id: str, current_role: str) -> dict:
     source_counter = Counter(document.get("trip_source") for document in ride_documents if document.get("trip_source"))
     purpose_counter = Counter(document.get("trip_purpose") for document in ride_documents if document.get("trip_purpose"))
 
-    vehicle_documents = list(vehicles_collection().find({}).sort("registration_number", ASCENDING))
+    vehicles_started_at = perf_counter()
+    vehicle_documents = list(
+        vehicles_collection().find(
+            {},
+            {"registration_number": 1, "vehicle_type": 1, "make": 1, "model": 1, "status": 1},
+        ).sort("registration_number", ASCENDING)
+    )
+    query_metrics.append({
+        "label": "rides.summary.vehicles",
+        "collection": "vehicles",
+        "duration_ms": log_db_duration("rides.summary.vehicles", vehicles_started_at),
+    })
     days_elapsed_this_month = today.day
     vehicle_activity: dict[str, set[str]] = defaultdict(set)
     for document in trips_this_month:
@@ -680,7 +1160,7 @@ def get_ride_summary(current_user_id: str, current_role: str) -> dict:
         total_vehicle_idle_days += idle_days
         vehicle_utilization.append(
             {
-                "vehicle": serialize_vehicle(vehicle),
+                "vehicle": _serialize_ride_list_vehicle(vehicle),
                 "active_days": active_days,
                 "idle_days": idle_days,
                 "trip_count": len(
@@ -703,19 +1183,34 @@ def get_ride_summary(current_user_id: str, current_role: str) -> dict:
         if document.get("status") == "Completed":
             driver_counter[key]["completed"] += 1
 
+    driver_ids = [ObjectId(driver_id) for driver_id in driver_counter]
+    drivers_started_at = perf_counter()
+    driver_lookup = {
+        str(driver_document["_id"]): driver_document
+        for driver_document in users_collection().find(
+            {"_id": {"$in": driver_ids}},
+            {"full_name": 1, "role": 1, "status": 1},
+        )
+    } if driver_ids else {}
+    query_metrics.append({
+        "label": "rides.summary.drivers",
+        "collection": "users",
+        "duration_ms": log_db_duration("rides.summary.drivers", drivers_started_at),
+    })
+
     trip_performance = []
     for driver_id, stats in driver_counter.items():
-        driver = users_collection().find_one({"_id": ObjectId(driver_id)})
+        driver = driver_lookup.get(driver_id)
         trip_performance.append(
             {
-                "driver": serialize_user(driver) if driver else None,
+                "driver": _serialize_ride_list_driver(driver),
                 "trips": stats["trips"],
                 "completed_trips": stats["completed"],
             }
         )
     trip_performance.sort(key=lambda item: (-item["trips"], -(item["completed_trips"])))
 
-    return {
+    result = {
         "total_trips": len(ride_documents),
         "completed_trips": _status_count(ride_documents, "Completed"),
         "cancelled_trips": _status_count(ride_documents, "Cancelled"),
@@ -742,3 +1237,11 @@ def get_ride_summary(current_user_id: str, current_role: str) -> dict:
         "customer_linked_trip_count": len([document for document in ride_documents if document.get("customer_id")]),
         "generated_at": now.isoformat(),
     }
+    total_duration_ms = (perf_counter() - request_started_at) * 1000
+    current_app.logger.info(
+        "[Flux Rides] summary role=%s duration_ms=%.2f",
+        current_role,
+        total_duration_ms,
+    )
+    _log_slow_endpoint("/api/rides/summary", role=current_role, duration_ms=total_duration_ms, query_metrics=query_metrics)
+    return set_ttl_cached(cache_key, result, ttl_seconds=30)

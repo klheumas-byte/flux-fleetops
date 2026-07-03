@@ -277,7 +277,7 @@ export default function DriverDashboard({
   const loadRideWorkspace = async () => {
     setIsLoadingRideWorkspace(true);
     try {
-      const [optionsResult, ridesResult] = await Promise.allSettled([fetchRideOptions(), fetchRides()]);
+      const [optionsResult, ridesResult] = await Promise.allSettled([fetchRideOptions(), fetchRides({ limit: 20 })]);
       if (optionsResult.status === 'rejected') {
         throw optionsResult.reason;
       }

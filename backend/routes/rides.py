@@ -17,16 +17,26 @@ from utils.responses import success_response
 rides_bp = Blueprint("rides", __name__)
 
 
+def _ride_list_filters() -> dict:
+    return {
+        "page": request.args.get("page", type=int),
+        "limit": request.args.get("limit", type=int),
+        "q": request.args.get("q"),
+    }
+
+
 @rides_bp.get("")
 @role_required("owner", "admin", "driver")
 def get_rides_route():
+    filters = _ride_list_filters()
     return success_response(
-        data={
-            "rides": list_rides(
-                get_jwt_identity(),
-                get_jwt().get("role"),
-            )
-        }
+        data=list_rides(
+            get_jwt_identity(),
+            get_jwt().get("role"),
+            page=filters["page"],
+            limit=filters["limit"],
+            search_query=filters["q"],
+        )
     )
 
 

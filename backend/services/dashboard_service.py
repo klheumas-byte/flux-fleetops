@@ -1,4 +1,5 @@
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from time import perf_counter
 
@@ -582,6 +583,80 @@ def _dashboard_maintenance_summary_rows(week_window: dict):
         )
     )
     return set_ttl_cached(cache_key, rows, ttl_seconds=60)
+
+
+def _dashboard_operations_payload() -> dict:
+    app = current_app._get_current_object()
+
+    def _with_app_context(callback):
+        with app.app_context():
+            return callback()
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        active_drivers_future = executor.submit(
+            _with_app_context,
+            lambda: users_collection().count_documents({"role": "driver", "status": "active"}),
+        )
+        active_assignments_future = executor.submit(
+            _with_app_context,
+            lambda: list(
+                assignments_collection().find(
+                    {"status": "active"},
+                    {"driver_id": 1, "vehicle_id": 1, "weekly_target": 1, "daily_target": 1},
+                ).limit(100)
+            ),
+        )
+        due_service_future = executor.submit(
+            _with_app_context,
+            lambda: preventive_maintenance_collection().count_documents({"status": {"$in": ["due", "overdue"]}}),
+        )
+        active_rides_future = executor.submit(
+            _with_app_context,
+            lambda: rides_collection().count_documents({"status": {"$in": list(ACTIVE_RIDE_STATUSES)}}),
+        )
+        active_bookings_future = executor.submit(
+            _with_app_context,
+            lambda: bookings_collection().count_documents({"status": {"$in": list(ACTIVE_TRIP_BOOKING_STATUSES)}}),
+        )
+        return {
+            "active_drivers": active_drivers_future.result(),
+            "active_assignments": active_assignments_future.result(),
+            "due_service_count": due_service_future.result(),
+            "active_rides": active_rides_future.result(),
+            "active_bookings": active_bookings_future.result(),
+        }
+
+
+def _dashboard_supporting_lookups(*, vehicle_ids: set, driver_ids: set) -> dict:
+    app = current_app._get_current_object()
+
+    def _with_app_context(callback):
+        with app.app_context():
+            return callback()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        vehicles_future = executor.submit(
+            _with_app_context,
+            lambda: list(
+                vehicles_collection().find(
+                    {"_id": {"$in": list(vehicle_ids)}} if vehicle_ids else {"_id": {"$in": []}},
+                    {"registration_number": 1, "make": 1, "model": 1},
+                )
+            ),
+        )
+        drivers_future = executor.submit(
+            _with_app_context,
+            lambda: list(
+                users_collection().find(
+                    {"_id": {"$in": list(driver_ids)}} if driver_ids else {"_id": {"$in": []}},
+                    {"full_name": 1},
+                )
+            ),
+        )
+        return {
+            "vehicles": vehicles_future.result(),
+            "drivers": drivers_future.result(),
+        }
 
 
 def _empty_owner_fleet_economics_summary() -> dict:
@@ -1352,22 +1427,7 @@ def get_dashboard_summary_fast(*, current_role: str) -> dict:
 
     operations_payload = run_section(
         "operations summary",
-        lambda: {
-            "active_drivers": users_collection().count_documents({"role": "driver", "status": "active"}),
-            "active_assignments": list(
-                assignments_collection().find(
-                    {"status": "active"},
-                    {"driver_id": 1, "vehicle_id": 1, "weekly_target": 1, "daily_target": 1},
-                ).limit(100)
-            ),
-            "due_service_count": preventive_maintenance_collection().count_documents(
-                {"status": {"$in": ["due", "overdue"]}}
-            ),
-            "active_rides": rides_collection().count_documents({"status": {"$in": list(ACTIVE_RIDE_STATUSES)}}),
-            "active_bookings": bookings_collection().count_documents(
-                {"status": {"$in": list(ACTIVE_TRIP_BOOKING_STATUSES)}}
-            ),
-        },
+        lambda: _dashboard_operations_payload(),
     ) or {}
     active_assignments = operations_payload.get("active_assignments") or []
     result["summary"]["active_drivers"] = int(operations_payload.get("active_drivers") or 0)
@@ -1501,20 +1561,7 @@ def get_dashboard_summary_fast(*, current_role: str) -> dict:
 
     lookup_payload = run_section(
         "supporting lookups",
-        lambda: {
-            "vehicles": list(
-                vehicles_collection().find(
-                    {"_id": {"$in": list(vehicle_ids)}} if vehicle_ids else {"_id": {"$in": []}},
-                    {"registration_number": 1, "make": 1, "model": 1},
-                )
-            ),
-            "drivers": list(
-                users_collection().find(
-                    {"_id": {"$in": list(driver_ids)}} if driver_ids else {"_id": {"$in": []}},
-                    {"full_name": 1},
-                )
-            ),
-        },
+        lambda: _dashboard_supporting_lookups(vehicle_ids=vehicle_ids, driver_ids=driver_ids),
     ) or {"vehicles": [], "drivers": []}
     vehicle_lookup = {
         str(vehicle["_id"]): build_vehicle_label(vehicle)

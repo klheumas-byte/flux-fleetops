@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from math import ceil
+from concurrent.futures import ThreadPoolExecutor
 from time import perf_counter
 
 from bson import ObjectId
@@ -21,7 +22,7 @@ from services.payment_cycle_service import (
 from services.wallet_service import create_wallet_entry
 from utils.api_error import ApiError
 from utils.mongo_indexes import ensure_indexes_for_collection
-from utils.performance import log_db_duration
+from utils.performance import build_cache_key, get_ttl_cached, log_db_duration, set_ttl_cached
 
 
 ALLOWED_COLLECTION_STATUSES = {"pending", "submitted", "received", "approved", "rejected", "reversed"}
@@ -212,11 +213,35 @@ def _load_collection_related_maps(collection_documents: list[dict]) -> dict[str,
         for document in collection_documents
         if isinstance(document.get("assignment_id"), ObjectId)
     }
-    return {
-        "users": _build_document_lookup(users_collection(), user_ids, USER_SUMMARY_PROJECTION),
-        "vehicles": _build_document_lookup(vehicles_collection(), vehicle_ids, VEHICLE_SUMMARY_PROJECTION),
-        "assignments": _build_document_lookup(assignments_collection(), assignment_ids, ASSIGNMENT_SUMMARY_PROJECTION),
-    }
+    cache_key = build_cache_key(
+        "collections:related_maps",
+        user_ids=",".join(sorted(str(item) for item in user_ids)),
+        vehicle_ids=",".join(sorted(str(item) for item in vehicle_ids)),
+        assignment_ids=",".join(sorted(str(item) for item in assignment_ids)),
+    )
+    cached = get_ttl_cached(cache_key)
+    if cached is not None:
+        return cached
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        user_future = executor.submit(_build_document_lookup, users_collection(), user_ids, USER_SUMMARY_PROJECTION)
+        vehicle_future = executor.submit(
+            _build_document_lookup,
+            vehicles_collection(),
+            vehicle_ids,
+            VEHICLE_SUMMARY_PROJECTION,
+        )
+        assignment_future = executor.submit(
+            _build_document_lookup,
+            assignments_collection(),
+            assignment_ids,
+            ASSIGNMENT_SUMMARY_PROJECTION,
+        )
+        related_maps = {
+            "users": user_future.result(),
+            "vehicles": vehicle_future.result(),
+            "assignments": assignment_future.result(),
+        }
+    return set_ttl_cached(cache_key, related_maps, ttl_seconds=15)
 
 
 def _enrich_collection(
@@ -303,6 +328,52 @@ def _log_slow_collection_section(label: str, started_at: float, *, threshold_ms:
     return duration_ms
 
 
+def _cached_collection_options_payload() -> dict:
+    cache_key = "collections:options"
+    cached = get_ttl_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    assignments = list(
+        assignments_collection()
+        .find({"status": {"$in": ["active", "suspended"]}}, ASSIGNMENT_SUMMARY_PROJECTION)
+        .sort("created_at", DESCENDING)
+    )
+    admins = list(
+        users_collection()
+        .find({"role": {"$in": ["owner", "admin"]}}, USER_SUMMARY_PROJECTION)
+        .sort("full_name", ASCENDING)
+    )
+    driver_lookup = _build_document_lookup(
+        users_collection(),
+        {assignment.get("driver_id") for assignment in assignments if isinstance(assignment.get("driver_id"), ObjectId)},
+        USER_SUMMARY_PROJECTION,
+    )
+    vehicle_lookup = _build_document_lookup(
+        vehicles_collection(),
+        {assignment.get("vehicle_id") for assignment in assignments if isinstance(assignment.get("vehicle_id"), ObjectId)},
+        VEHICLE_SUMMARY_PROJECTION,
+    )
+
+    assignment_options = []
+    for assignment in assignments:
+        option = serialize_assignment(assignment)
+        driver = driver_lookup.get(assignment.get("driver_id"))
+        vehicle = vehicle_lookup.get(assignment.get("vehicle_id"))
+        option["driver"] = serialize_user(driver) if driver else None
+        option["vehicle"] = serialize_vehicle(vehicle) if vehicle else None
+        assignment_options.append(option)
+
+    return set_ttl_cached(
+        cache_key,
+        {
+            "assignments": assignment_options,
+            "admins": [serialize_user(admin) for admin in admins],
+        },
+        ttl_seconds=15,
+    )
+
+
 def _create_wallet_credit_for_collection(collection_document: dict, *, current_user_id: str):
     create_wallet_entry(
         driver_id=collection_document["driver_id"],
@@ -383,6 +454,19 @@ def list_collections(
     search: str | None = None,
 ) -> dict:
     request_started_at = perf_counter()
+    cache_key = build_cache_key(
+        "collections:list",
+        page=page,
+        page_size=page_size,
+        status=status or "all",
+        driver_id=driver_id or "all",
+        payment_method=payment_method or "all",
+        collection_date=collection_date or "",
+        search=(search or "").strip().lower(),
+    )
+    cached = get_ttl_cached(cache_key)
+    if cached is not None:
+        return cached
     query = {}
     if status and status != "all":
         if status == "pending":
@@ -408,48 +492,50 @@ def list_collections(
     page_size = min(max(int(page_size or 25), 1), 100)
     skip = (page - 1) * page_size
 
-    count_started_at = perf_counter()
-    total_records = collections_collection().count_documents(query)
-    log_db_duration("collections.count_documents", count_started_at)
-
-    summary_started_at = perf_counter()
-    summary_pipeline = [
-        {"$match": query},
-        {
-            "$group": {
-                "_id": None,
-                "approved_total": {
-                    "$sum": {
-                        "$cond": [{"$eq": ["$status", "approved"]}, {"$ifNull": ["$amount", 0]}, 0]
+    aggregate_started_at = perf_counter()
+    aggregate_result = list(
+        collections_collection().aggregate(
+            [
+                {"$match": query},
+                {
+                    "$facet": {
+                        "summary": [
+                            {
+                                "$group": {
+                                    "_id": None,
+                                    "approved_total": {
+                                        "$sum": {
+                                            "$cond": [{"$eq": ["$status", "approved"]}, {"$ifNull": ["$amount", 0]}, 0]
+                                        }
+                                    },
+                                    "approved_count": {"$sum": {"$cond": [{"$eq": ["$status", "approved"]}, 1, 0]}},
+                                    "pending_count": {
+                                        "$sum": {
+                                            "$cond": [{"$in": ["$status", ["pending", "submitted", "received"]]}, 1, 0]
+                                        }
+                                    },
+                                    "rejected_count": {"$sum": {"$cond": [{"$eq": ["$status", "rejected"]}, 1, 0]}},
+                                    "reversed_count": {"$sum": {"$cond": [{"$eq": ["$status", "reversed"]}, 1, 0]}},
+                                }
+                            }
+                        ],
+                        "total_count": [{"$count": "count"}],
+                        "documents": [
+                            {"$sort": {"collection_date": -1, "created_at": -1}},
+                            {"$skip": skip},
+                            {"$limit": page_size},
+                            {"$project": COLLECTION_LIST_PROJECTION},
+                        ],
                     }
                 },
-                "approved_count": {"$sum": {"$cond": [{"$eq": ["$status", "approved"]}, 1, 0]}},
-                "pending_count": {
-                    "$sum": {
-                        "$cond": [{"$in": ["$status", ["pending", "submitted", "received"]]}, 1, 0]
-                    }
-                },
-                "rejected_count": {"$sum": {"$cond": [{"$eq": ["$status", "rejected"]}, 1, 0]}},
-                "reversed_count": {"$sum": {"$cond": [{"$eq": ["$status", "reversed"]}, 1, 0]}},
-            }
-        },
-    ]
-    summary_result = list(collections_collection().aggregate(summary_pipeline))
-    log_db_duration("collections.summary_aggregate", summary_started_at)
-    summary = summary_result[0] if summary_result else {}
-
-    find_started_at = perf_counter()
-    documents = list(
-        collections_collection()
-        .find(
-            query,
-            COLLECTION_LIST_PROJECTION,
+            ]
         )
-        .sort([("collection_date", DESCENDING), ("created_at", DESCENDING)])
-        .skip(skip)
-        .limit(page_size)
     )
-    log_db_duration("collections.find_page", find_started_at)
+    log_db_duration("collections.page_aggregate", aggregate_started_at)
+    aggregate_payload = aggregate_result[0] if aggregate_result else {}
+    total_records = int(((aggregate_payload.get("total_count") or [{}])[0]).get("count") or 0)
+    summary = ((aggregate_payload.get("summary") or [{}])[0]) if aggregate_payload.get("summary") else {}
+    documents = aggregate_payload.get("documents") or []
     enrich_started_at = perf_counter()
     enriched_collections = _batch_enrich_collections(documents)
     _log_slow_collection_section("list_collections.enrich_page", enrich_started_at, threshold_ms=250)
@@ -472,7 +558,7 @@ def list_collections(
         },
     }
     _log_slow_collection_section("list_collections.total", request_started_at)
-    return response
+    return set_ttl_cached(cache_key, response, ttl_seconds=10)
 
 
 def get_collection_by_id(collection_id: str) -> dict:
@@ -678,15 +764,24 @@ def update_collection_status(
 
 
 def list_pending_payment_submissions() -> list[dict]:
+    cache_key = "collections:pending_submissions"
+    cached = get_ttl_cached(cache_key)
+    if cached is not None:
+        return cached
     submissions = list(
         collections_collection()
         .find({"status": {"$in": list(PENDING_PAYMENT_STATUSES)}}, COLLECTION_LIST_PROJECTION)
         .sort([("collection_date", DESCENDING), ("created_at", DESCENDING)])
     )
-    return _batch_enrich_collections(submissions)
+    return set_ttl_cached(cache_key, _batch_enrich_collections(submissions), ttl_seconds=10)
 
 
 def list_driver_weekly_statuses() -> list[dict]:
+    cache_key = "collections:weekly_statuses"
+    cached = get_ttl_cached(cache_key)
+    if cached is not None:
+        return cached
+
     assignments = list(
         assignments_collection().find(
             {"status": {"$in": ["active", "suspended"]}},
@@ -724,44 +819,11 @@ def list_driver_weekly_statuses() -> list[dict]:
         ),
         reverse=True,
     )
-    return weekly_statuses
+    return set_ttl_cached(cache_key, weekly_statuses, ttl_seconds=15)
 
 
 def list_collection_options() -> dict:
-    assignments = list(
-        assignments_collection()
-        .find({"status": {"$in": ["active", "suspended"]}}, ASSIGNMENT_SUMMARY_PROJECTION)
-        .sort("created_at", DESCENDING)
-    )
-    admins = list(
-        users_collection()
-        .find({"role": {"$in": ["owner", "admin"]}}, USER_SUMMARY_PROJECTION)
-        .sort("full_name", ASCENDING)
-    )
-    driver_lookup = _build_document_lookup(
-        users_collection(),
-        {assignment.get("driver_id") for assignment in assignments if isinstance(assignment.get("driver_id"), ObjectId)},
-        USER_SUMMARY_PROJECTION,
-    )
-    vehicle_lookup = _build_document_lookup(
-        vehicles_collection(),
-        {assignment.get("vehicle_id") for assignment in assignments if isinstance(assignment.get("vehicle_id"), ObjectId)},
-        VEHICLE_SUMMARY_PROJECTION,
-    )
-
-    assignment_options = []
-    for assignment in assignments:
-        option = serialize_assignment(assignment)
-        driver = driver_lookup.get(assignment.get("driver_id"))
-        vehicle = vehicle_lookup.get(assignment.get("vehicle_id"))
-        option["driver"] = serialize_user(driver) if driver else None
-        option["vehicle"] = serialize_vehicle(vehicle) if vehicle else None
-        assignment_options.append(option)
-
-    return {
-        "assignments": assignment_options,
-        "admins": [serialize_user(admin) for admin in admins],
-    }
+    return _cached_collection_options_payload()
 
 
 def _parse_collection_date(value: str | None) -> datetime | None:
@@ -775,6 +837,10 @@ def _parse_collection_date(value: str | None) -> datetime | None:
 
 
 def get_driver_dashboard_summary(driver_user_id: str) -> dict:
+    cache_key = build_cache_key("driver_dashboard_summary", driver_user_id=driver_user_id)
+    cached = get_ttl_cached(cache_key)
+    if cached is not None:
+        return cached
     request_started_at = perf_counter()
     driver = _get_driver_document(driver_user_id)
 
@@ -890,4 +956,4 @@ def get_driver_dashboard_summary(driver_user_id: str) -> dict:
         "today_collection_total": today_collection_total,
     }
     _log_slow_collection_section("driver_dashboard_summary.total", request_started_at, threshold_ms=800)
-    return summary
+    return set_ttl_cached(cache_key, summary, ttl_seconds=15)

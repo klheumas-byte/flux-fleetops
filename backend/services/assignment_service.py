@@ -10,6 +10,7 @@ from models.vehicle import serialize_vehicle
 from services.wallet_service import create_wallet_entry
 from utils.api_error import ApiError
 from utils.mongo_indexes import ensure_indexes_for_collection
+from utils.performance import build_cache_key, get_ttl_cached, set_ttl_cached
 
 
 ALLOWED_ASSIGNMENT_STATUSES = {"active", "ended", "suspended"}
@@ -108,6 +109,10 @@ def get_assignment(assignment_id: str) -> dict:
 
 
 def get_active_assignment_for_driver(driver_user_id: str) -> dict | None:
+    cache_key = build_cache_key("driver_active_assignment", driver_user_id=driver_user_id)
+    cached = get_ttl_cached(cache_key)
+    if cached is not None:
+        return cached
     if not ObjectId.is_valid(driver_user_id):
         raise ApiError("Invalid user identity.", status_code=400)
 
@@ -122,13 +127,15 @@ def get_active_assignment_for_driver(driver_user_id: str) -> dict | None:
         }
     )
     if not assignment_document:
-        return None
+        return set_ttl_cached(cache_key, None, ttl_seconds=15)
 
     serialized_assignment = serialize_assignment(assignment_document)
     vehicle_document = vehicles_collection().find_one({"_id": assignment_document["vehicle_id"]})
     serialized_vehicle = serialize_vehicle(vehicle_document) if vehicle_document else None
 
-    return {
+    return set_ttl_cached(
+        cache_key,
+        {
         "assignment_id": serialized_assignment["id"],
         "driver_id": serialized_assignment["driver_id"],
         "vehicle_id": serialized_assignment["vehicle_id"],
@@ -137,7 +144,9 @@ def get_active_assignment_for_driver(driver_user_id: str) -> dict | None:
         "start_date": serialized_assignment["start_date"],
         "status": serialized_assignment["status"],
         "vehicle": serialized_vehicle,
-    }
+    },
+        ttl_seconds=15,
+    )
 
 
 def _validate_driver_for_assignment(driver: dict):

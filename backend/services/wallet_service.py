@@ -8,6 +8,7 @@ from models.user import serialize_user
 from models.wallet_entry import serialize_wallet_entry
 from services.payment_cycle_service import get_current_cycle_for_assignment, list_assignment_weekly_cycles
 from utils.api_error import ApiError
+from utils.performance import build_cache_key, get_ttl_cached, set_ttl_cached
 
 
 ALLOWED_WALLET_ENTRY_TYPES = {"weekly_target", "collection", "adjustment", "reversal"}
@@ -187,12 +188,18 @@ def list_wallet_driver_options() -> list[dict]:
 
 
 def get_logged_in_driver_wallet(driver_user_id: str) -> dict:
+    cache_key = build_cache_key("driver_wallet", driver_user_id=driver_user_id)
+    cached = get_ttl_cached(cache_key)
+    if cached is not None:
+        return cached
     driver = _get_driver_document(driver_user_id)
     active_assignment = assignments_collection().find_one(
         {"driver_id": driver["_id"], "status": "active"}
     )
     if not active_assignment:
-        return {
+        return set_ttl_cached(
+            cache_key,
+            {
             "driver_id": str(driver["_id"]),
             "active_assignment_id": None,
             "weekly_target": 0,
@@ -204,7 +211,9 @@ def get_logged_in_driver_wallet(driver_user_id: str) -> dict:
             "weekly_cycle": None,
             "weekly_history": [],
             "ledger_entries": [],
-        }
+        },
+            ttl_seconds=15,
+        )
 
     ledger_documents = list(
         wallet_entries_collection()
@@ -240,7 +249,9 @@ def get_logged_in_driver_wallet(driver_user_id: str) -> dict:
     weekly_cycle = get_current_cycle_for_assignment(active_assignment)
     weekly_history = list_assignment_weekly_cycles(active_assignment)
 
-    return {
+    return set_ttl_cached(
+        cache_key,
+        {
         "driver_id": str(driver["_id"]),
         "active_assignment_id": str(active_assignment["_id"]),
         "weekly_target": weekly_target,
@@ -252,4 +263,6 @@ def get_logged_in_driver_wallet(driver_user_id: str) -> dict:
         "weekly_cycle": weekly_cycle,
         "weekly_history": weekly_history,
         "ledger_entries": serialized_ledger,
-    }
+    },
+        ttl_seconds=15,
+    )

@@ -1,4 +1,5 @@
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, time, timedelta, timezone
 from time import perf_counter
 
@@ -1194,6 +1195,23 @@ def _log_finance_report_duration(*, started_at: float, category: str | None, fil
     )
 
 
+def _run_report_tasks(tasks: dict[str, callable]) -> dict[str, object]:
+    if not tasks:
+        return {}
+    if len(tasks) == 1:
+        task_name, task = next(iter(tasks.items()))
+        return {task_name: task()}
+    app = current_app._get_current_object()
+
+    def _run_with_context(task):
+        with app.app_context():
+            return task()
+
+    with ThreadPoolExecutor(max_workers=min(len(tasks), 6)) as executor:
+        futures = {name: executor.submit(_run_with_context, task) for name, task in tasks.items()}
+        return {name: future.result() for name, future in futures.items()}
+
+
 def get_finance_reports(
     *,
     current_role: str,
@@ -1266,7 +1284,7 @@ def get_finance_reports(
     selected_categories = (
         {category}
         if category in {"revenue", "drivers", "vehicles", "trips", "fuel", "maintenance", "customers"}
-        else {"revenue", "drivers", "vehicles", "trips", "fuel", "maintenance", "customers"}
+        else {"revenue"}
     )
     reports = {
         "collections": _empty_section(active_filters),
@@ -1287,217 +1305,243 @@ def get_finance_reports(
         "vehicle_economics": _empty_vehicle_economics(active_filters),
     }
 
+    report_tasks: dict[str, callable] = {}
     if "revenue" in selected_categories:
-        if not filters["branch"]:
-            collections_query = _apply_common_filters(
-                {"status": "approved", **_build_string_date_query("collection_date", filters)},
+        def revenue_task():
+            payload = {}
+            if not filters["branch"]:
+                collections_query = _apply_common_filters(
+                    {"status": "approved", **_build_string_date_query("collection_date", filters)},
+                    filters=filters,
+                    driver_field="driver_id",
+                    vehicle_field="vehicle_id",
+                )
+                collection_documents = _fetch_documents(
+                    collections_collection(),
+                    collections_query,
+                    REPORT_COLLECTION_PROJECTION,
+                    sort_fields=[("collection_date", DESCENDING), ("created_at", DESCENDING)],
+                )
+                payload["collections"] = _build_collections_report(
+                    collection_documents,
+                    filters=filters,
+                    drivers_by_id=drivers_by_id,
+                    vehicles_by_id=vehicles_by_id,
+                    active_filters=active_filters,
+                )
+            deposit_documents = _fetch_documents(
+                deposits_collection(),
+                {
+                    **_build_string_date_query("deposit_date", filters),
+                    **({"finance_account_snapshot.branch": filters["branch"]} if filters["branch"] else {}),
+                },
+                REPORT_DEPOSIT_PROJECTION,
+                sort_fields=[("deposit_date", DESCENDING), ("created_at", DESCENDING)],
+            )
+            expenses_query = _apply_common_filters(
+                {
+                    **_build_string_date_query("expense_date", filters),
+                    **({"finance_account_snapshot.branch": filters["branch"]} if filters["branch"] else {}),
+                },
                 filters=filters,
                 driver_field="driver_id",
                 vehicle_field="vehicle_id",
             )
-            collection_documents = _fetch_documents(
-                collections_collection(),
-                collections_query,
-                REPORT_COLLECTION_PROJECTION,
-                sort_fields=[("collection_date", DESCENDING), ("created_at", DESCENDING)],
+            expense_documents = _fetch_documents(
+                expenses_collection(),
+                expenses_query,
+                REPORT_EXPENSE_PROJECTION,
+                sort_fields=[("expense_date", DESCENDING), ("created_at", DESCENDING)],
             )
-            reports["collections"] = _build_collections_report(
-                collection_documents,
+            payload["deposits"] = _build_deposits_report(
+                deposit_documents,
+                filters=filters,
+                active_filters=active_filters,
+            )
+            payload["expenses"] = _build_expenses_report(
+                expense_documents,
                 filters=filters,
                 drivers_by_id=drivers_by_id,
                 vehicles_by_id=vehicles_by_id,
                 active_filters=active_filters,
             )
-
-        deposit_documents = _fetch_documents(
-            deposits_collection(),
-            {
-                **_build_string_date_query("deposit_date", filters),
-                **({"finance_account_snapshot.branch": filters["branch"]} if filters["branch"] else {}),
-            },
-            REPORT_DEPOSIT_PROJECTION,
-            sort_fields=[("deposit_date", DESCENDING), ("created_at", DESCENDING)],
-        )
-        expenses_query = _apply_common_filters(
-            {
-                **_build_string_date_query("expense_date", filters),
-                **({"finance_account_snapshot.branch": filters["branch"]} if filters["branch"] else {}),
-            },
-            filters=filters,
-            driver_field="driver_id",
-            vehicle_field="vehicle_id",
-        )
-        expense_documents = _fetch_documents(
-            expenses_collection(),
-            expenses_query,
-            REPORT_EXPENSE_PROJECTION,
-            sort_fields=[("expense_date", DESCENDING), ("created_at", DESCENDING)],
-        )
-        reports["deposits"] = _build_deposits_report(
-            deposit_documents,
-            filters=filters,
-            active_filters=active_filters,
-        )
-        reports["expenses"] = _build_expenses_report(
-            expense_documents,
-            filters=filters,
-            drivers_by_id=drivers_by_id,
-            vehicles_by_id=vehicles_by_id,
-            active_filters=active_filters,
-        )
+            return payload
+        report_tasks["revenue"] = revenue_task
 
     if "fuel" in selected_categories and not filters["branch"]:
-        fuel_query = _apply_common_filters(
-            _build_string_date_query("fuel_date", filters),
-            filters=filters,
-            driver_field="driver_id",
-            vehicle_field="vehicle_id",
-        )
-        fuel_documents = _fetch_documents(
-            fuel_logs_collection(),
-            fuel_query,
-            REPORT_FUEL_PROJECTION,
-            sort_fields=[("fuel_date", DESCENDING), ("created_at", DESCENDING)],
-        )
-        reports["fuel"] = _build_fuel_report(
-            fuel_documents,
-            filters=filters,
-            drivers_by_id=drivers_by_id,
-            vehicles_by_id=vehicles_by_id,
-            active_filters=active_filters,
-        )
+        report_tasks["fuel"] = lambda: {
+            "fuel": _build_fuel_report(
+                _fetch_documents(
+                    fuel_logs_collection(),
+                    _apply_common_filters(
+                        _build_string_date_query("fuel_date", filters),
+                        filters=filters,
+                        driver_field="driver_id",
+                        vehicle_field="vehicle_id",
+                    ),
+                    REPORT_FUEL_PROJECTION,
+                    sort_fields=[("fuel_date", DESCENDING), ("created_at", DESCENDING)],
+                ),
+                filters=filters,
+                drivers_by_id=drivers_by_id,
+                vehicles_by_id=vehicles_by_id,
+                active_filters=active_filters,
+            )
+        }
 
     if "maintenance" in selected_categories and not filters["branch"]:
-        maintenance_query = _apply_common_filters({}, filters=filters, driver_field="driver_id", vehicle_field="vehicle_id")
-        fault_query = _apply_common_filters({}, filters=filters, driver_field="driver_id", vehicle_field="vehicle_id")
-        maintenance_documents = _fetch_documents(
-            maintenance_jobs_collection(),
-            maintenance_query,
-            REPORT_MAINTENANCE_PROJECTION,
-            sort_fields=[("created_at", DESCENDING)],
-        )
-        fault_documents = _fetch_documents(
-            faults_collection(),
-            fault_query,
-            REPORT_FAULT_PROJECTION,
-            sort_fields=[("reported_at", DESCENDING), ("created_at", DESCENDING)],
-        )
-        reports["maintenance"] = _build_maintenance_report(
-            maintenance_documents,
-            filters=filters,
-            drivers_by_id=drivers_by_id,
-            vehicles_by_id=vehicles_by_id,
-            active_filters=active_filters,
-        )
-        reports["faults"] = _build_fault_report(
-            fault_documents,
-            filters=filters,
-            drivers_by_id=drivers_by_id,
-            vehicles_by_id=vehicles_by_id,
-            active_filters=active_filters,
-        )
+        def maintenance_task():
+            maintenance_query = _apply_common_filters({}, filters=filters, driver_field="driver_id", vehicle_field="vehicle_id")
+            fault_query = _apply_common_filters({}, filters=filters, driver_field="driver_id", vehicle_field="vehicle_id")
+            maintenance_documents = _fetch_documents(
+                maintenance_jobs_collection(),
+                maintenance_query,
+                REPORT_MAINTENANCE_PROJECTION,
+                sort_fields=[("created_at", DESCENDING)],
+            )
+            fault_documents = _fetch_documents(
+                faults_collection(),
+                fault_query,
+                REPORT_FAULT_PROJECTION,
+                sort_fields=[("reported_at", DESCENDING), ("created_at", DESCENDING)],
+            )
+            return {
+                "maintenance": _build_maintenance_report(
+                    maintenance_documents,
+                    filters=filters,
+                    drivers_by_id=drivers_by_id,
+                    vehicles_by_id=vehicles_by_id,
+                    active_filters=active_filters,
+                ),
+                "faults": _build_fault_report(
+                    fault_documents,
+                    filters=filters,
+                    drivers_by_id=drivers_by_id,
+                    vehicles_by_id=vehicles_by_id,
+                    active_filters=active_filters,
+                ),
+            }
+        report_tasks["maintenance"] = maintenance_task
 
     if "customers" in selected_categories:
-        scoped_customer_ids = _load_scoped_customer_ids(filters) if filters["driver_id"] or filters["vehicle_id"] else set()
-        customer_documents = _fetch_documents(
-            customers_collection(),
-            _build_customer_query(filters, scoped_customer_ids),
-            REPORT_CUSTOMER_PROJECTION,
-            sort_fields=[("created_at", DESCENDING)],
-        )
-        reports["customers"] = _build_customer_report(
-            customer_documents,
-            filters=filters,
-            active_filters=active_filters,
-            scoped_customer_ids=scoped_customer_ids,
-        )
+        def customers_task():
+            scoped_customer_ids = _load_scoped_customer_ids(filters) if filters["driver_id"] or filters["vehicle_id"] else set()
+            customer_documents = _fetch_documents(
+                customers_collection(),
+                _build_customer_query(filters, scoped_customer_ids),
+                REPORT_CUSTOMER_PROJECTION,
+                sort_fields=[("created_at", DESCENDING)],
+            )
+            return {
+                "customers": _build_customer_report(
+                    customer_documents,
+                    filters=filters,
+                    active_filters=active_filters,
+                    scoped_customer_ids=scoped_customer_ids,
+                )
+            }
+        report_tasks["customers"] = customers_task
 
     if "trips" in selected_categories and not filters["branch"]:
-        booking_query = _apply_common_filters(
-            {
-                "is_recurring_template": False,
-                **_build_booking_datetime_or_string_query(filters),
-            },
-            filters=filters,
-            driver_field="driver_id",
-            vehicle_field="vehicle_id",
-        )
-        ride_query = _apply_common_filters(
-            _build_string_date_query("trip_date", filters),
-            filters=filters,
-            driver_field="driver_id",
-            vehicle_field="vehicle_id",
-        )
-        booking_documents = _fetch_documents(
-            bookings_collection(),
-            booking_query,
-            REPORT_BOOKING_PROJECTION,
-            sort_fields=[("pickup_at", DESCENDING), ("created_at", DESCENDING)],
-        )
-        ride_documents = _fetch_documents(
-            rides_collection(),
-            ride_query,
-            REPORT_RIDE_PROJECTION,
-            sort_fields=[("trip_date", DESCENDING), ("created_at", DESCENDING)],
-        )
-        reports["bookings"] = _build_booking_report(
-            booking_documents,
-            filters=filters,
-            drivers_by_id=drivers_by_id,
-            vehicles_by_id=vehicles_by_id,
-            active_filters=active_filters,
-        )
-        reports["trip_logs"] = _build_trip_report(
-            ride_documents,
-            filters=filters,
-            drivers_by_id=drivers_by_id,
-            vehicles_by_id=vehicles_by_id,
-            active_filters=active_filters,
-        )
-
-    if "drivers" in selected_categories:
-        reports["driver_performance"] = _build_driver_performance_report(
-            current_user_id=current_user_id,
-            current_role=current_role,
-            filters=filters,
-            active_filters=active_filters,
-        )
-
-    if "vehicles" in selected_categories:
-        if not filters["branch"]:
-            vehicle_ride_documents = _fetch_documents(
+        def trips_task():
+            booking_query = _apply_common_filters(
+                {
+                    "is_recurring_template": False,
+                    **_build_booking_datetime_or_string_query(filters),
+                },
+                filters=filters,
+                driver_field="driver_id",
+                vehicle_field="vehicle_id",
+            )
+            ride_query = _apply_common_filters(
+                _build_string_date_query("trip_date", filters),
+                filters=filters,
+                driver_field="driver_id",
+                vehicle_field="vehicle_id",
+            )
+            booking_documents = _fetch_documents(
+                bookings_collection(),
+                booking_query,
+                REPORT_BOOKING_PROJECTION,
+                sort_fields=[("pickup_at", DESCENDING), ("created_at", DESCENDING)],
+            )
+            ride_documents = _fetch_documents(
                 rides_collection(),
-                _apply_common_filters(
-                    _build_string_date_query("trip_date", filters),
-                    filters=filters,
-                    driver_field="driver_id",
-                    vehicle_field="vehicle_id",
-                ),
+                ride_query,
                 REPORT_RIDE_PROJECTION,
                 sort_fields=[("trip_date", DESCENDING), ("created_at", DESCENDING)],
             )
-            reports["vehicle_performance"] = _build_vehicle_performance_report(
-                vehicle_ride_documents,
-                vehicle_documents,
+            return {
+                "bookings": _build_booking_report(
+                    booking_documents,
+                    filters=filters,
+                    drivers_by_id=drivers_by_id,
+                    vehicles_by_id=vehicles_by_id,
+                    active_filters=active_filters,
+                ),
+                "trip_logs": _build_trip_report(
+                    ride_documents,
+                    filters=filters,
+                    drivers_by_id=drivers_by_id,
+                    vehicles_by_id=vehicles_by_id,
+                    active_filters=active_filters,
+                ),
+            }
+        report_tasks["trips"] = trips_task
+
+    if "drivers" in selected_categories:
+        report_tasks["drivers"] = lambda: {
+            "driver_performance": _build_driver_performance_report(
+                current_user_id=current_user_id,
+                current_role=current_role,
                 filters=filters,
                 active_filters=active_filters,
             )
-        vehicle_economics_dashboard = _filter_economics_dashboard(
-            get_vehicle_economics_dashboard(current_role=current_role),
-            vehicle_id=filters["vehicle_id"],
-            asset_owner_name=filters["asset_owner_name"],
-        )
-        if current_role == "admin" and not get_admin_role_permissions().get("view_reports"):
-            vehicle_economics_dashboard["message"] = (
-                "Financial report visibility is limited by owner settings. Operational vehicle cost data remains available."
-            )
-        vehicle_economics_dashboard["validation"] = {
-            "total_records": len(vehicle_economics_dashboard.get("vehicles") or []),
-            "total_amount": round(vehicle_economics_dashboard.get("net_fleet_profit") or 0, 2),
-            "last_updated": now_utc().isoformat(),
-            "active_filters": active_filters,
         }
-        reports["vehicle_economics"] = vehicle_economics_dashboard
+
+    if "vehicles" in selected_categories:
+        def vehicles_task():
+            payload = {}
+            if not filters["branch"]:
+                vehicle_ride_documents = _fetch_documents(
+                    rides_collection(),
+                    _apply_common_filters(
+                        _build_string_date_query("trip_date", filters),
+                        filters=filters,
+                        driver_field="driver_id",
+                        vehicle_field="vehicle_id",
+                    ),
+                    REPORT_RIDE_PROJECTION,
+                    sort_fields=[("trip_date", DESCENDING), ("created_at", DESCENDING)],
+                )
+                payload["vehicle_performance"] = _build_vehicle_performance_report(
+                    vehicle_ride_documents,
+                    vehicle_documents,
+                    filters=filters,
+                    active_filters=active_filters,
+                )
+            vehicle_economics_dashboard = _filter_economics_dashboard(
+                get_vehicle_economics_dashboard(current_role=current_role),
+                vehicle_id=filters["vehicle_id"],
+                asset_owner_name=filters["asset_owner_name"],
+            )
+            if current_role == "admin" and not get_admin_role_permissions().get("view_reports"):
+                vehicle_economics_dashboard["message"] = (
+                    "Financial report visibility is limited by owner settings. Operational vehicle cost data remains available."
+                )
+            vehicle_economics_dashboard["validation"] = {
+                "total_records": len(vehicle_economics_dashboard.get("vehicles") or []),
+                "total_amount": round(vehicle_economics_dashboard.get("net_fleet_profit") or 0, 2),
+                "last_updated": now_utc().isoformat(),
+                "active_filters": active_filters,
+            }
+            payload["vehicle_economics"] = vehicle_economics_dashboard
+            return payload
+        report_tasks["vehicles"] = vehicles_task
+
+    task_results = _run_report_tasks(report_tasks)
+    for payload in task_results.values():
+        reports.update(payload)
 
     result = {
         "generated_by": serialize_user(current_user) if current_user else None,

@@ -2,6 +2,11 @@ import { useEffect, useMemo, useState } from 'react';
 import { Calendar, CarFront, Clock, Loader2, MapPin, Navigation, Plus, Route } from 'lucide-react';
 import { ApiRequestError } from '../../lib/api';
 import {
+  createCustomer,
+  fetchCustomerOptions,
+  type CustomerOptionsResponse,
+} from '../../lib/customer-booking-api';
+import {
   convertBookingToRide,
   createRide,
   fetchRideOptions,
@@ -9,6 +14,7 @@ import {
   type TripOptions,
   type TripRecord,
 } from '../../lib/ride-masterdata-api';
+import { SearchableSelect, type SearchableSelectOption } from '../ui/searchable-select';
 
 interface TripFormState {
   booking_id: string;
@@ -24,8 +30,16 @@ interface TripFormState {
   destination_area: string;
   odometer_start: string;
   odometer_end: string;
+  amount_charged: string;
   notes: string;
   status: string;
+}
+
+interface QuickAddCustomerFormState {
+  full_name: string;
+  phone_number: string;
+  residential_area: string;
+  customer_category_id: string;
 }
 
 const todayDate = new Date().toISOString().slice(0, 10);
@@ -45,8 +59,16 @@ const emptyTripForm: TripFormState = {
   destination_area: '',
   odometer_start: '',
   odometer_end: '',
+  amount_charged: '',
   notes: '',
   status: 'Completed',
+};
+
+const emptyQuickAddCustomerForm: QuickAddCustomerFormState = {
+  full_name: '',
+  phone_number: '',
+  residential_area: '',
+  customer_category_id: '',
 };
 
 function formatDate(value?: string | null) {
@@ -59,13 +81,82 @@ function formatTime(value?: string | null) {
   return value || 'No time';
 }
 
+function buildBookingOptions(options: TripOptions | null): SearchableSelectOption[] {
+  return (options?.bookings || []).map((booking) => ({
+    value: booking.id,
+    label: `${booking.booking_id} - ${booking.pickup_date} ${booking.pickup_time}`,
+    description: `${booking.pickup_location} to ${booking.destination}`,
+    keywords: [booking.status, booking.booking_type],
+  }));
+}
+
+function buildCustomerOptions(options: TripOptions | null): SearchableSelectOption[] {
+  return (options?.customers || []).map((customer) => ({
+    value: customer.id,
+    label: customer.full_name,
+    description: [customer.phone_number, customer.residential_area || customer.work_area || customer.organization_name || customer.company_name]
+      .filter(Boolean)
+      .join(' • '),
+    keywords: [
+      customer.phone_number,
+      customer.organization_name || '',
+      customer.company_name || '',
+      customer.customer_category || '',
+      customer.residential_area || '',
+      customer.work_area || '',
+    ],
+  }));
+}
+
+function buildDriverOptions(options: TripOptions | null): SearchableSelectOption[] {
+  return (options?.drivers || []).map((driver) => ({
+    value: driver.id,
+    label: driver.full_name,
+    description: driver.role,
+    keywords: [driver.status],
+  }));
+}
+
+function buildVehicleOptions(options: TripOptions | null): SearchableSelectOption[] {
+  return (options?.vehicles || []).map((vehicle) => ({
+    value: vehicle.id,
+    label: vehicle.registration_number,
+    description: [vehicle.make, vehicle.model, vehicle.vehicle_type].filter(Boolean).join(' • '),
+  }));
+}
+
+function buildMasterDataOptions(items: Array<{ id: string; name: string; description?: string | null }> | undefined): SearchableSelectOption[] {
+  return (items || []).map((item) => ({
+    value: item.id,
+    label: item.name,
+    description: item.description || null,
+  }));
+}
+
 export default function CreateRide() {
   const [options, setOptions] = useState<TripOptions | null>(null);
   const [rides, setRides] = useState<TripRecord[]>([]);
   const [form, setForm] = useState<TripFormState>(emptyTripForm);
+  const [customerOptions, setCustomerOptions] = useState<CustomerOptionsResponse | null>(null);
+  const [showQuickAddCustomer, setShowQuickAddCustomer] = useState(false);
+  const [quickAddCustomerForm, setQuickAddCustomerForm] = useState<QuickAddCustomerFormState>(emptyQuickAddCustomerForm);
+  const [quickAddCustomerError, setQuickAddCustomerError] = useState('');
+  const [isLoadingCustomerOptions, setIsLoadingCustomerOptions] = useState(false);
+  const [isQuickAddingCustomer, setIsQuickAddingCustomer] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [pageError, setPageError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const bookingSelectOptions = useMemo(() => buildBookingOptions(options), [options]);
+  const customerSelectOptions = useMemo(() => buildCustomerOptions(options), [options]);
+  const driverSelectOptions = useMemo(() => buildDriverOptions(options), [options]);
+  const vehicleSelectOptions = useMemo(() => buildVehicleOptions(options), [options]);
+  const tripPurposeOptions = useMemo(() => buildMasterDataOptions(options?.trip_purposes), [options?.trip_purposes]);
+  const tripSourceOptions = useMemo(() => buildMasterDataOptions(options?.trip_sources), [options?.trip_sources]);
+  const customerCategoryOptions = useMemo(
+    () => buildMasterDataOptions(customerOptions?.customer_category_items),
+    [customerOptions?.customer_category_items],
+  );
 
   const loadTripWorkspace = async () => {
     setIsLoading(true);
@@ -87,6 +178,20 @@ export default function CreateRide() {
       }
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const ensureCustomerOptionsLoaded = async () => {
+    if (customerOptions) {
+      return customerOptions;
+    }
+    setIsLoadingCustomerOptions(true);
+    try {
+      const response = await fetchCustomerOptions();
+      setCustomerOptions(response);
+      return response;
+    } finally {
+      setIsLoadingCustomerOptions(false);
     }
   };
 
@@ -117,6 +222,56 @@ export default function CreateRide() {
 
   const recentTrips = useMemo(() => rides.slice(0, 5), [rides]);
 
+  const handleQuickAddCustomer = async () => {
+    if (!quickAddCustomerForm.full_name || !quickAddCustomerForm.phone_number || !quickAddCustomerForm.residential_area || !quickAddCustomerForm.customer_category_id) {
+      setQuickAddCustomerError('Name, phone number, location / area, and customer type are required.');
+      return;
+    }
+
+    setIsQuickAddingCustomer(true);
+    setQuickAddCustomerError('');
+    setPageError('');
+    try {
+      const savedCustomer = await createCustomer({
+        full_name: quickAddCustomerForm.full_name,
+        phone_number: quickAddCustomerForm.phone_number,
+        residential_area: quickAddCustomerForm.residential_area,
+        customer_category_id: quickAddCustomerForm.customer_category_id,
+        source: 'manual_entry',
+        status: 'active',
+        is_transport_customer: true,
+      });
+
+      setOptions((current) => {
+        if (!current) {
+          return current;
+        }
+        const nextCustomers = [savedCustomer, ...(current.customers || [])]
+          .filter((customer, index, items) => items.findIndex((item) => item.id === customer.id) === index)
+          .sort((left, right) => left.full_name.localeCompare(right.full_name));
+        return {
+          ...current,
+          customers: nextCustomers,
+        };
+      });
+      setForm((current) => ({
+        ...current,
+        customer_id: savedCustomer.id,
+        pickup_area: current.pickup_area || savedCustomer.residential_area || '',
+      }));
+      setShowQuickAddCustomer(false);
+      setQuickAddCustomerForm(emptyQuickAddCustomerForm);
+    } catch (error) {
+      if (error instanceof ApiRequestError) {
+        setQuickAddCustomerError(error.message);
+      } else {
+        setQuickAddCustomerError('Unable to create that customer right now.');
+      }
+    } finally {
+      setIsQuickAddingCustomer(false);
+    }
+  };
+
   const handleSubmit = async () => {
     setIsSubmitting(true);
     setPageError('');
@@ -134,6 +289,7 @@ export default function CreateRide() {
         destination_area: form.destination_area,
         odometer_start: form.odometer_start ? Number(form.odometer_start) : undefined,
         odometer_end: form.odometer_end ? Number(form.odometer_end) : undefined,
+        actual_fare: form.amount_charged ? Number(form.amount_charged) : undefined,
         notes: form.notes || undefined,
         status: form.status,
       };
@@ -147,6 +303,8 @@ export default function CreateRide() {
         trip_source_id: options?.trip_sources[0]?.id || '',
         trip_purpose_id: options?.trip_purposes[0]?.id || '',
       });
+      setShowQuickAddCustomer(false);
+      setQuickAddCustomerForm(emptyQuickAddCustomerForm);
       await loadTripWorkspace();
     } catch (error) {
       if (error instanceof ApiRequestError) {
@@ -187,98 +345,165 @@ export default function CreateRide() {
             )}
 
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-              <label className="space-y-2">
+              <label className="space-y-2 md:col-span-2">
                 <span className="text-sm font-medium text-[#0F172A]">Convert Scheduled Booking</span>
-                <select
+                <SearchableSelect
                   value={form.booking_id}
-                  onChange={(event) => setForm((current) => ({ ...current, booking_id: event.target.value }))}
-                  className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm"
-                >
-                  <option value="">Log without booking</option>
-                  {(options?.bookings || []).map((booking) => (
-                    <option key={booking.id} value={booking.id}>
-                      {booking.booking_id} - {booking.pickup_date} {booking.pickup_time}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(value) => setForm((current) => ({ ...current, booking_id: value }))}
+                  options={bookingSelectOptions}
+                  placeholder="Log without booking"
+                  searchPlaceholder="Search bookings..."
+                  emptyLabel="No bookings found."
+                  allowClear
+                  clearLabel="Log without booking"
+                />
               </label>
 
-              <label className="space-y-2">
+              <div className="space-y-2 md:col-span-2">
                 <span className="text-sm font-medium text-[#0F172A]">Customer</span>
-                <select
+                <SearchableSelect
                   value={form.customer_id}
-                  onChange={(event) => setForm((current) => ({ ...current, customer_id: event.target.value }))}
-                  className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm"
+                  onChange={(value) => setForm((current) => ({ ...current, customer_id: value }))}
+                  options={customerSelectOptions}
+                  placeholder="Optional customer"
+                  searchPlaceholder="Search customers..."
+                  emptyLabel="No customers found."
+                  allowClear
+                  clearLabel="No linked customer"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowQuickAddCustomer((current) => !current);
+                    setQuickAddCustomerError('');
+                    if (!customerOptions) {
+                      void ensureCustomerOptionsLoaded().catch((error) => {
+                        setQuickAddCustomerError(error instanceof ApiRequestError ? error.message : 'Unable to load customer setup right now.');
+                      });
+                    }
+                  }}
+                  className="text-sm font-medium text-[#2563EB] hover:text-[#1d4ed8]"
                 >
-                  <option value="">Optional customer</option>
-                  {(options?.customers || []).map((customer) => (
-                    <option key={customer.id} value={customer.id}>
-                      {customer.full_name}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                  + Quick Add Customer
+                </button>
+
+                {showQuickAddCustomer && (
+                  <div className="rounded-2xl border border-blue-100 bg-blue-50/60 p-4">
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                      <label className="space-y-2">
+                        <span className="text-sm font-medium text-[#0F172A]">Customer Name</span>
+                        <input
+                          value={quickAddCustomerForm.full_name}
+                          onChange={(event) => setQuickAddCustomerForm((current) => ({ ...current, full_name: event.target.value }))}
+                          className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm"
+                        />
+                      </label>
+                      <label className="space-y-2">
+                        <span className="text-sm font-medium text-[#0F172A]">Phone Number</span>
+                        <input
+                          value={quickAddCustomerForm.phone_number}
+                          onChange={(event) => setQuickAddCustomerForm((current) => ({ ...current, phone_number: event.target.value }))}
+                          className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm"
+                        />
+                      </label>
+                      <label className="space-y-2">
+                        <span className="text-sm font-medium text-[#0F172A]">Location / Area</span>
+                        <input
+                          value={quickAddCustomerForm.residential_area}
+                          onChange={(event) => setQuickAddCustomerForm((current) => ({ ...current, residential_area: event.target.value }))}
+                          className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm"
+                        />
+                      </label>
+                      <label className="space-y-2">
+                        <span className="text-sm font-medium text-[#0F172A]">Customer Type</span>
+                        <SearchableSelect
+                          value={quickAddCustomerForm.customer_category_id}
+                          onChange={(value) => setQuickAddCustomerForm((current) => ({ ...current, customer_category_id: value }))}
+                          options={customerCategoryOptions}
+                          placeholder={isLoadingCustomerOptions ? 'Loading customer types...' : 'Select customer type'}
+                          searchPlaceholder="Search customer types..."
+                          emptyLabel="No customer types found."
+                        />
+                      </label>
+                    </div>
+                    {quickAddCustomerError && (
+                      <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                        {quickAddCustomerError}
+                      </div>
+                    )}
+                    <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:justify-end">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowQuickAddCustomer(false);
+                          setQuickAddCustomerError('');
+                        }}
+                        className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm font-medium text-gray-700 hover:bg-white"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleQuickAddCustomer()}
+                        disabled={isQuickAddingCustomer}
+                        className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#2563EB] px-4 py-2.5 text-sm font-medium text-white disabled:opacity-60"
+                      >
+                        {isQuickAddingCustomer ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                        Add Customer
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
 
               <label className="space-y-2">
                 <span className="text-sm font-medium text-[#0F172A]">Trip Source</span>
-                <select
+                <SearchableSelect
                   value={form.trip_source_id}
-                  onChange={(event) => setForm((current) => ({ ...current, trip_source_id: event.target.value }))}
-                  className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm"
-                >
-                  {(options?.trip_sources || []).map((source) => (
-                    <option key={source.id} value={source.id}>
-                      {source.name}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(value) => setForm((current) => ({ ...current, trip_source_id: value }))}
+                  options={tripSourceOptions}
+                  placeholder="Select trip source"
+                  searchPlaceholder="Search trip sources..."
+                  emptyLabel="No trip sources found."
+                />
               </label>
 
               <label className="space-y-2">
                 <span className="text-sm font-medium text-[#0F172A]">Trip Purpose</span>
-                <select
+                <SearchableSelect
                   value={form.trip_purpose_id}
-                  onChange={(event) => setForm((current) => ({ ...current, trip_purpose_id: event.target.value }))}
-                  className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm"
-                >
-                  {(options?.trip_purposes || []).map((purpose) => (
-                    <option key={purpose.id} value={purpose.id}>
-                      {purpose.name}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(value) => setForm((current) => ({ ...current, trip_purpose_id: value }))}
+                  options={tripPurposeOptions}
+                  placeholder="Select trip purpose"
+                  searchPlaceholder="Search trip purposes..."
+                  emptyLabel="No trip purposes found."
+                />
               </label>
 
               <label className="space-y-2">
                 <span className="text-sm font-medium text-[#0F172A]">Driver</span>
-                <select
+                <SearchableSelect
                   value={form.driver_id}
-                  onChange={(event) => setForm((current) => ({ ...current, driver_id: event.target.value }))}
-                  className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm"
-                >
-                  <option value="">Auto-assign to me</option>
-                  {(options?.drivers || []).map((driver) => (
-                    <option key={driver.id} value={driver.id}>
-                      {driver.full_name}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(value) => setForm((current) => ({ ...current, driver_id: value }))}
+                  options={driverSelectOptions}
+                  placeholder="Auto-assign to me"
+                  searchPlaceholder="Search drivers..."
+                  emptyLabel="No drivers found."
+                  allowClear
+                  clearLabel="Auto-assign to me"
+                />
               </label>
 
               <label className="space-y-2">
                 <span className="text-sm font-medium text-[#0F172A]">Vehicle</span>
-                <select
+                <SearchableSelect
                   value={form.vehicle_id}
-                  onChange={(event) => setForm((current) => ({ ...current, vehicle_id: event.target.value }))}
-                  className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm"
-                >
-                  <option value="">Select vehicle</option>
-                  {(options?.vehicles || []).map((vehicle) => (
-                    <option key={vehicle.id} value={vehicle.id}>
-                      {vehicle.registration_number}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(value) => setForm((current) => ({ ...current, vehicle_id: value }))}
+                  options={vehicleSelectOptions}
+                  placeholder="Select vehicle"
+                  searchPlaceholder="Search vehicles..."
+                  emptyLabel="No vehicles found."
+                />
               </label>
 
               <label className="space-y-2">
@@ -293,17 +518,14 @@ export default function CreateRide() {
 
               <label className="space-y-2">
                 <span className="text-sm font-medium text-[#0F172A]">Status</span>
-                <select
+                <SearchableSelect
                   value={form.status}
-                  onChange={(event) => setForm((current) => ({ ...current, status: event.target.value }))}
-                  className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm"
-                >
-                  {(options?.statuses || []).map((status) => (
-                    <option key={status} value={status}>
-                      {status}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(value) => setForm((current) => ({ ...current, status: value }))}
+                  options={(options?.statuses || []).map((status) => ({ value: status, label: status }))}
+                  placeholder="Select status"
+                  searchPlaceholder="Search statuses..."
+                  emptyLabel="No statuses found."
+                />
               </label>
 
               <label className="space-y-2">
@@ -368,6 +590,17 @@ export default function CreateRide() {
                 />
               </label>
 
+              <label className="space-y-2">
+                <span className="text-sm font-medium text-[#0F172A]">Amount Charged</span>
+                <input
+                  type="number"
+                  min="0"
+                  value={form.amount_charged}
+                  onChange={(event) => setForm((current) => ({ ...current, amount_charged: event.target.value }))}
+                  className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm"
+                />
+              </label>
+
               <label className="space-y-2 md:col-span-2">
                 <span className="text-sm font-medium text-[#0F172A]">Notes</span>
                 <textarea
@@ -409,7 +642,7 @@ export default function CreateRide() {
                     </span>
                   </div>
                   <div className="text-sm text-gray-600">
-                    {(trip.customer?.full_name || 'No customer')} - {trip.trip_source} - {trip.trip_purpose}
+                    {(trip.customer?.full_name || trip.customer_name_snapshot || 'No customer')} - {trip.trip_source} - {trip.trip_purpose}
                   </div>
                   <div className="grid grid-cols-1 gap-2 text-sm text-gray-600">
                     <div className="flex items-center gap-2">
@@ -439,6 +672,9 @@ export default function CreateRide() {
                   <div className="mt-2 flex items-center gap-2">
                     <Route className="h-4 w-4 text-[#10B981]" />
                     {trip.odometer_start ?? '-'} to {trip.odometer_end ?? '-'}
+                  </div>
+                  <div className="mt-2 text-xs text-gray-500">
+                    Amount charged: {trip.amount_charged ?? trip.actual_fare ?? '-'}
                   </div>
                 </div>
               </div>

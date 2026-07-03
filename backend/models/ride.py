@@ -17,6 +17,7 @@ def serialize_ride(ride_document: dict) -> dict:
         "trip_id": trip_id,
         "ride_id": trip_id,
         "customer_id": _serialize_reference_id(ride_document.get("customer_id")),
+        "customer_name_snapshot": ride_document.get("customer_name_snapshot"),
         "driver_id": _serialize_reference_id(ride_document.get("driver_id")),
         "vehicle_id": _serialize_reference_id(ride_document.get("vehicle_id")),
         "trip_source_id": _serialize_reference_id(trip_source_id),
@@ -40,6 +41,7 @@ def serialize_ride(ride_document: dict) -> dict:
         if ride_document.get("updated_at")
         else None,
         "source_booking_id": _serialize_reference_id(ride_document.get("source_booking_id")),
+        "actual_fare": ride_document.get("actual_fare"),
         "counts_toward_company_collections": ride_document.get("trip_purpose") != "Personal Ride",
         "counts_toward_utilization": True,
         "audit_events": [
@@ -61,6 +63,6 @@ def serialize_ride(ride_document: dict) -> dict:
     payload["destination"] = payload["destination_area"]
     payload["scheduled_time"] = None
     payload["estimated_fare"] = None
-    payload["actual_fare"] = None
+    payload["amount_charged"] = payload["actual_fare"]
     payload["payment_method"] = None
     return payload

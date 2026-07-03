@@ -35,6 +35,7 @@ import {
 import { clearDriverQuickActionIntent, peekDriverQuickActionIntent } from '../../lib/driver-quick-actions';
 import { useDebouncedValue } from '../../lib/use-debounced-value';
 import { usePageToastFeedback } from '../../lib/use-page-toast-feedback';
+import { SearchableSelect } from '../ui/searchable-select';
 
 interface CustomerWorkspaceProps {
   portal: 'admin' | 'owner' | 'driver';
@@ -646,6 +647,7 @@ const customerFieldLabelMap: Partial<Record<CustomerFormField, string>> = {
   phone_number: 'Please enter a valid phone number.',
   alternate_phone: 'Please enter a valid phone number.',
   email_address: 'Please enter a valid email address.',
+  residential_area: 'Please enter a location or area.',
   customer_category_id: 'Please select a customer category.',
   customer_source_id: 'Please select a customer source.',
   organization_type_id: 'Please select an organization type.',
@@ -810,8 +812,10 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search, 250);
   const [isLoading, setIsLoading] = useState(true);
+  const [isBookingDataLoading, setIsBookingDataLoading] = useState(true);
   const [pageError, setPageError] = useState('');
   const [pageNotice, setPageNotice] = useState('');
+  const [bookingLoadError, setBookingLoadError] = useState('');
   const [duplicateCustomer, setDuplicateCustomer] = useState<CustomerRecord | null>(null);
   const [customerFormError, setCustomerFormError] = useState('');
   const [customerFieldErrors, setCustomerFieldErrors] = useState<Partial<Record<CustomerFormField, string>>>({});
@@ -867,37 +871,46 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
 
   const loadWorkspace = async () => {
     setIsLoading(true);
+    setIsBookingDataLoading(true);
     setPageError('');
     setPageNotice('');
+    setBookingLoadError('');
     setDuplicateCustomer(null);
+    const bookingsPromise = fetchBookings()
+      .then((bookingData) => {
+        setBookings(bookingData);
+        return { ok: true as const, bookingData };
+      })
+      .catch((error) => {
+        setBookings([]);
+        const message = getErrorMessage(error, 'Scheduled bookings are temporarily unavailable.');
+        setBookingLoadError(message);
+        return { ok: false as const, error, message };
+      })
+      .finally(() => {
+        setIsBookingDataLoading(false);
+      });
+
     try {
-      const [customersResult, bookingsResult] = await Promise.allSettled([
-        fetchCustomers(),
-        fetchBookings(),
-      ]);
-
-      const customerData = customersResult.status === 'fulfilled' ? customersResult.value : [];
-      const bookingData = bookingsResult.status === 'fulfilled' ? bookingsResult.value : [];
-
+      const customerData = await fetchCustomers();
       setCustomers(customerData);
-      setBookings(bookingData);
       setSelectedCustomerId((current) => {
         if (current && customerData.some((customer) => customer.id === current)) {
           return current;
         }
         return customerData[0]?.id || null;
       });
-
-      const primaryLoadFailed = customersResult.status === 'rejected' && bookingsResult.status === 'rejected';
-      if (primaryLoadFailed) {
-        setPageError(getErrorMessage(customersResult.reason, 'Unable to load customer management right now.'));
-      } else if (bookingsResult.status === 'rejected') {
-        setPageNotice('Scheduled bookings are temporarily unavailable. Customer records are still shown.');
-      }
     } catch (error) {
+      setCustomers([]);
+      setSelectedCustomerId(null);
       setPageError(getErrorMessage(error, 'Unable to load customer management right now.'));
     } finally {
       setIsLoading(false);
+    }
+
+    const bookingsResult = await bookingsPromise;
+    if (!bookingsResult.ok) {
+      setPageNotice('Scheduled bookings are temporarily unavailable. Customer records are still shown.');
     }
   };
 
@@ -1009,6 +1022,11 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
     summaryScopedCustomers,
   ]);
 
+  const occupationSuggestions = useMemo(
+    () => Array.from(new Set(customers.map((customer) => customer.occupation).filter(Boolean) as string[])).sort(),
+    [customers],
+  );
+
   const filteredCustomers = useMemo(
     () =>
       customers.filter((customer) =>
@@ -1063,19 +1081,19 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
               { label: 'My Customers', value: customers.length, icon: Users, tint: 'bg-blue-100 text-blue-700' },
               {
                 label: 'Today Schedule',
-                value: summary?.scheduled_today || 0,
+                value: isBookingDataLoading ? '...' : summary?.scheduled_today || 0,
                 icon: Calendar,
                 tint: 'bg-blue-100 text-blue-700',
               },
               {
                 label: 'Overdue Reminders',
-                value: summary?.overdue_reminders || customerSummary?.follow_ups_overdue || 0,
+                value: isBookingDataLoading ? '...' : summary?.overdue_reminders || customerSummary?.follow_ups_overdue || 0,
                 icon: Clock,
                 tint: 'bg-rose-100 text-rose-700',
               },
               {
                 label: 'Follow-Ups Due',
-                value: summary?.follow_ups_due_today || customerSummary?.follow_ups_due_today || 0,
+                value: isBookingDataLoading ? '...' : summary?.follow_ups_due_today || customerSummary?.follow_ups_due_today || 0,
                 icon: Star,
                 tint: 'bg-amber-100 text-amber-700',
               },
@@ -1117,7 +1135,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
               },
             ],
           },
-    [customers.length, customerSummary, portal, summary, upcomingBookings.length],
+    [customers.length, customerSummary, isBookingDataLoading, portal, summary, upcomingBookings.length],
   );
 
   const openCreateCustomer = async () => {
@@ -1150,7 +1168,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
       email_address: customer.email_address || '',
       date_of_birth: customer.date_of_birth || '',
       occupation: customer.occupation || '',
-      organization_name: customer.organization_name || '',
+      organization_name: customer.organization_name || customer.company_name || '',
       position_title: customer.position_title || '',
       pickup_location: customer.pickup_location || '',
       destination_location: customer.destination_location || '',
@@ -1183,7 +1201,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
       lead_notes: customer.lead_notes || '',
       important_notes: customer.important_notes || '',
       referred_by: customer.referred_by || '',
-      company_name: customer.company_name || '',
+      company_name: customer.organization_name || customer.company_name || '',
       status: customer.status || 'active',
     });
     setShowCustomerModal(true);
@@ -1252,8 +1270,15 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
     setPageError('');
     clearCustomerFormErrors();
     try {
+      if (!editingCustomer && !customerForm.residential_area.trim()) {
+        setCustomerFieldErrors({ residential_area: customerFieldLabelMap.residential_area || 'This field is required.' });
+        setCustomerFormError('Please complete the required customer details.');
+        return;
+      }
       const payload: Record<string, unknown> = {
         ...customerForm,
+        organization_name: customerForm.organization_name || undefined,
+        company_name: customerForm.organization_name || undefined,
         assigned_driver_id: customerForm.preferred_driver_id || undefined,
       };
       if (customerForm.lead_value_estimate === '') {
@@ -1808,7 +1833,11 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                       </div>
                     </div>
                     <div className="space-y-3 p-5">
-                      {selectedCustomerUpcomingBookings.length ? (
+                      {isBookingDataLoading ? (
+                        <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">
+                          Loading booking details for this customer...
+                        </div>
+                      ) : selectedCustomerUpcomingBookings.length ? (
                         selectedCustomerUpcomingBookings.map((booking) => (
                           <div key={booking.id} className="rounded-xl border border-gray-200 p-4">
                             <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -2058,11 +2087,11 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
             </div>
             <div className="grid grid-cols-1 gap-3 border-b border-gray-200 px-5 py-4 sm:grid-cols-2 xl:grid-cols-5">
               {[
-                { label: 'Scheduled Today', value: summary?.scheduled_today ?? upcomingBookings.length },
-                { label: 'Pending Acknowledgement', value: summary?.pending_acknowledgement ?? 0 },
-                { label: 'In Progress Bookings', value: summary?.in_progress_bookings ?? 0 },
-                { label: 'Completed Today', value: summary?.completed_today ?? 0 },
-                { label: 'Missed Bookings', value: summary?.missed_bookings ?? 0 },
+                { label: 'Scheduled Today', value: isBookingDataLoading ? '...' : summary?.scheduled_today ?? upcomingBookings.length },
+                { label: 'Pending Acknowledgement', value: isBookingDataLoading ? '...' : summary?.pending_acknowledgement ?? 0 },
+                { label: 'In Progress Bookings', value: isBookingDataLoading ? '...' : summary?.in_progress_bookings ?? 0 },
+                { label: 'Completed Today', value: isBookingDataLoading ? '...' : summary?.completed_today ?? 0 },
+                { label: 'Missed Bookings', value: isBookingDataLoading ? '...' : summary?.missed_bookings ?? 0 },
               ].map((card) => (
                 <div key={card.label} className="rounded-xl bg-gray-50 px-4 py-3">
                   <div className="text-xs font-medium uppercase tracking-wide text-gray-500">{card.label}</div>
@@ -2088,7 +2117,15 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
             <div className="grid grid-cols-1 gap-4 p-5 xl:grid-cols-2">
               <div className="space-y-3">
                 <div className="text-sm font-medium text-gray-500">{bookingQueueFilter} Bookings</div>
-                {filteredBookingQueue.slice(0, 8).map((booking) => (
+                {isBookingDataLoading ? (
+                  <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">
+                    Loading fleet booking queue...
+                  </div>
+                ) : bookingLoadError ? (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-6 text-sm text-amber-800">
+                    {bookingLoadError}
+                  </div>
+                ) : filteredBookingQueue.slice(0, 8).map((booking) => (
                   <div key={booking.id} className="rounded-xl border border-gray-200 p-4">
                     <div className="flex items-start justify-between gap-3">
                       <div>
@@ -2115,7 +2152,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                     </div>
                   </div>
                 ))}
-                {!filteredBookingQueue.length && (
+                {!isBookingDataLoading && !bookingLoadError && !filteredBookingQueue.length && (
                   <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">
                     No bookings match this filter right now.
                   </div>
@@ -2124,7 +2161,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
 
               <div className="space-y-3">
                 <div className="text-sm font-medium text-gray-500">Recurring Templates</div>
-                {recurringTemplates.slice(0, 8).map((booking) => (
+                {!isBookingDataLoading && recurringTemplates.slice(0, 8).map((booking) => (
                   <div key={booking.id} className="rounded-xl border border-gray-200 p-4">
                     <div className="text-sm font-semibold text-[#0F172A]">
                       {booking.customer?.full_name || 'Customer'} - {booking.recurrence_type}
@@ -2137,7 +2174,11 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                     </div>
                   </div>
                 ))}
-                {!recurringTemplates.length && (
+                {isBookingDataLoading ? (
+                  <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">
+                    Loading recurring templates...
+                  </div>
+                ) : !recurringTemplates.length && (
                   <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">
                     No recurring booking templates have been created yet.
                   </div>
@@ -2154,6 +2195,11 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
           subtitle="Capture the rider details, relationship context, and CRM fields that matter over time."
           onClose={closeCustomerModal}
         >
+          <datalist id="customer-occupation-suggestions">
+            {occupationSuggestions.map((occupation) => (
+              <option key={occupation} value={occupation} />
+            ))}
+          </datalist>
           {customerFormError && (
             <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -2186,347 +2232,164 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
             </div>
           )}
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            {[
-              ['Full Name', 'full_name'],
-              ['Phone Number', 'phone_number'],
-              ['Alternate Phone', 'alternate_phone'],
-              ['Email Address', 'email_address'],
-              ['Date of Birth', 'date_of_birth'],
-              ['Occupation', 'occupation'],
-              ['Organization Name', 'organization_name'],
-              ['Position Title', 'position_title'],
-              ['Company Name', 'company_name'],
-              ['Pickup Location', 'pickup_location'],
-              ['Destination Location', 'destination_location'],
-              ['Preferred Pickup Location', 'preferred_pickup_location'],
-              ['Preferred Dropoff Location', 'preferred_dropoff_location'],
-              ['Residential Area', 'residential_area'],
-              ['Work Area', 'work_area'],
-              ['Referred By', 'referred_by'],
-            ].map(([label, fieldName]) => (
-              <label key={fieldName} className="space-y-2">
-                <span className="text-sm font-medium text-[#0F172A]">{label}</span>
-                <input
-                  type={fieldName.includes('date') ? 'date' : fieldName.includes('email') ? 'email' : 'text'}
-                  value={customerForm[fieldName as keyof CustomerFormState] as string}
-                  onChange={(event) => updateCustomerField(fieldName as CustomerFormField, event.target.value)}
-                  className={getCustomerFieldClass(Boolean(customerFieldErrors[fieldName as CustomerFormField]))}
-                />
-                {customerFieldErrors[fieldName as CustomerFormField] && (
-                  <p className="text-xs text-red-600">{customerFieldErrors[fieldName as CustomerFormField]}</p>
-                )}
-              </label>
-            ))}
-
             <label className="space-y-2">
-              <span className="text-sm font-medium text-[#0F172A]">Customer Category</span>
-              <select
-                value={customerForm.customer_category_id}
-                onChange={(event) => updateCustomerField('customer_category_id', event.target.value)}
-                className={getCustomerFieldClass(Boolean(customerFieldErrors.customer_category_id))}
-              >
-                <option value="">Select category</option>
-                {(customerOptions?.customer_category_items || []).map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name}
-                  </option>
-                ))}
-              </select>
-              {customerFieldErrors.customer_category_id && (
-                <p className="text-xs text-red-600">{customerFieldErrors.customer_category_id}</p>
-              )}
+              <span className="text-sm font-medium text-[#0F172A]">Customer Name</span>
+              <input
+                value={customerForm.full_name}
+                onChange={(event) => updateCustomerField('full_name', event.target.value)}
+                className={getCustomerFieldClass(Boolean(customerFieldErrors.full_name))}
+              />
+              {customerFieldErrors.full_name && <p className="text-xs text-red-600">{customerFieldErrors.full_name}</p>}
             </label>
 
             <label className="space-y-2">
-              <span className="text-sm font-medium text-[#0F172A]">Customer Source</span>
-              <select
+              <span className="text-sm font-medium text-[#0F172A]">Phone Number</span>
+              <input
+                value={customerForm.phone_number}
+                onChange={(event) => updateCustomerField('phone_number', event.target.value)}
+                className={getCustomerFieldClass(Boolean(customerFieldErrors.phone_number))}
+              />
+              {customerFieldErrors.phone_number && <p className="text-xs text-red-600">{customerFieldErrors.phone_number}</p>}
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-[#0F172A]">Location / Area</span>
+              <input
+                value={customerForm.residential_area}
+                onChange={(event) => updateCustomerField('residential_area', event.target.value)}
+                className={getCustomerFieldClass(Boolean(customerFieldErrors.residential_area))}
+              />
+              {customerFieldErrors.residential_area && <p className="text-xs text-red-600">{customerFieldErrors.residential_area}</p>}
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-[#0F172A]">Customer Type</span>
+              <SearchableSelect
+                value={customerForm.customer_category_id}
+                onChange={(value) => updateCustomerField('customer_category_id', value)}
+                options={(customerOptions?.customer_category_items || []).map((item) => ({ value: item.id, label: item.name }))}
+                placeholder="Select customer type"
+                searchPlaceholder="Search customer types..."
+                emptyLabel="No customer types found."
+                triggerClassName={getCustomerFieldClass(Boolean(customerFieldErrors.customer_category_id))}
+              />
+              {customerFieldErrors.customer_category_id && <p className="text-xs text-red-600">{customerFieldErrors.customer_category_id}</p>}
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-[#0F172A]">Organization / Business Name</span>
+              <input
+                value={customerForm.organization_name}
+                onChange={(event) => updateCustomerField('organization_name', event.target.value)}
+                className={getCustomerFieldClass(Boolean(customerFieldErrors.organization_name))}
+              />
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-[#0F172A]">Email</span>
+              <input
+                type="email"
+                value={customerForm.email_address}
+                onChange={(event) => updateCustomerField('email_address', event.target.value)}
+                className={getCustomerFieldClass(Boolean(customerFieldErrors.email_address))}
+              />
+              {customerFieldErrors.email_address && <p className="text-xs text-red-600">{customerFieldErrors.email_address}</p>}
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-[#0F172A]">Alternative Phone</span>
+              <input
+                value={customerForm.alternate_phone}
+                onChange={(event) => updateCustomerField('alternate_phone', event.target.value)}
+                className={getCustomerFieldClass(Boolean(customerFieldErrors.alternate_phone))}
+              />
+              {customerFieldErrors.alternate_phone && <p className="text-xs text-red-600">{customerFieldErrors.alternate_phone}</p>}
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-[#0F172A]">Occupation</span>
+              <input
+                list="customer-occupation-suggestions"
+                value={customerForm.occupation}
+                onChange={(event) => updateCustomerField('occupation', event.target.value)}
+                className={getCustomerFieldClass(Boolean(customerFieldErrors.occupation))}
+              />
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-[#0F172A]">Source</span>
+              <SearchableSelect
                 value={customerForm.source}
-                onChange={(event) => updateCustomerField('source', event.target.value)}
-                className={getCustomerFieldClass(Boolean(customerFieldErrors.source))}
-              >
-                <option value="">Select source</option>
-                {(customerOptions?.source_options || []).map((item) => (
-                  <option key={item.value} value={item.value}>
-                    {item.label}
-                  </option>
-                ))}
-              </select>
+                onChange={(value) => updateCustomerField('source', value)}
+                options={(customerOptions?.source_options || []).map((item) => ({ value: item.value, label: item.label }))}
+                placeholder="Select source"
+                searchPlaceholder="Search sources..."
+                emptyLabel="No sources found."
+                allowClear
+                clearLabel="Use default source"
+                triggerClassName={getCustomerFieldClass(Boolean(customerFieldErrors.source))}
+              />
               {customerFieldErrors.source && <p className="text-xs text-red-600">{customerFieldErrors.source}</p>}
             </label>
 
-            <label className="space-y-2">
-              <span className="text-sm font-medium text-[#0F172A]">Organization Type</span>
-              <select
-                value={customerForm.organization_type_id}
-                onChange={(event) => updateCustomerField('organization_type_id', event.target.value)}
-                className={getCustomerFieldClass(Boolean(customerFieldErrors.organization_type_id))}
-              >
-                <option value="">Select organization type</option>
-                {(customerOptions?.organization_type_items || []).map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name}
-                  </option>
-                ))}
-              </select>
-              {customerFieldErrors.organization_type_id && (
-                <p className="text-xs text-red-600">{customerFieldErrors.organization_type_id}</p>
-              )}
-            </label>
+            {editingCustomer && (
+              <>
+                <label className="space-y-2">
+                  <span className="text-sm font-medium text-[#0F172A]">Organization Type</span>
+                  <SearchableSelect
+                    value={customerForm.organization_type_id}
+                    onChange={(value) => updateCustomerField('organization_type_id', value)}
+                    options={(customerOptions?.organization_type_items || []).map((item) => ({ value: item.id, label: item.name }))}
+                    placeholder="Select organization type"
+                    searchPlaceholder="Search organization types..."
+                    emptyLabel="No organization types found."
+                    allowClear
+                    clearLabel="No organization type"
+                    triggerClassName={getCustomerFieldClass(Boolean(customerFieldErrors.organization_type_id))}
+                  />
+                </label>
 
-            <label className="space-y-2">
-              <span className="text-sm font-medium text-[#0F172A]">Industry</span>
-              <select
-                value={customerForm.industry_id}
-                onChange={(event) => updateCustomerField('industry_id', event.target.value)}
-                className={getCustomerFieldClass(Boolean(customerFieldErrors.industry_id))}
-              >
-                <option value="">Select industry</option>
-                {(customerOptions?.industry_items || []).map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name}
-                  </option>
-                ))}
-              </select>
-              {customerFieldErrors.industry_id && <p className="text-xs text-red-600">{customerFieldErrors.industry_id}</p>}
-            </label>
+                <label className="space-y-2">
+                  <span className="text-sm font-medium text-[#0F172A]">Preferred Driver</span>
+                  <SearchableSelect
+                    value={customerForm.preferred_driver_id}
+                    onChange={(value) => updateCustomerField('preferred_driver_id', value)}
+                    options={(customerOptions?.drivers || []).map((driver) => ({ value: driver.id, label: driver.full_name }))}
+                    placeholder="Select driver"
+                    searchPlaceholder="Search drivers..."
+                    emptyLabel="No drivers found."
+                    allowClear
+                    clearLabel="No preferred driver"
+                    triggerClassName={getCustomerFieldClass(Boolean(customerFieldErrors.preferred_driver_id))}
+                  />
+                </label>
 
-            <label className="space-y-2">
-              <span className="text-sm font-medium text-[#0F172A]">Relationship Category</span>
-              <select
-                value={customerForm.relationship_category_id}
-                onChange={(event) => updateCustomerField('relationship_category_id', event.target.value)}
-                className={getCustomerFieldClass(Boolean(customerFieldErrors.relationship_category_id))}
-              >
-                <option value="">Select relationship category</option>
-                {(customerOptions?.relationship_category_items || []).map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name}
-                  </option>
-                ))}
-              </select>
-              {customerFieldErrors.relationship_category_id && (
-                <p className="text-xs text-red-600">{customerFieldErrors.relationship_category_id}</p>
-              )}
-            </label>
-
-            <label className="space-y-2">
-              <span className="text-sm font-medium text-[#0F172A]">Opportunity Level</span>
-              <select
-                value={customerForm.opportunity_level_id}
-                onChange={(event) => updateCustomerField('opportunity_level_id', event.target.value)}
-                className={getCustomerFieldClass(Boolean(customerFieldErrors.opportunity_level_id))}
-              >
-                <option value="">Select opportunity level</option>
-                {(customerOptions?.opportunity_level_items || []).map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name}
-                  </option>
-                ))}
-              </select>
-              {customerFieldErrors.opportunity_level_id && (
-                <p className="text-xs text-red-600">{customerFieldErrors.opportunity_level_id}</p>
-              )}
-            </label>
-
-            <label className="space-y-2">
-              <span className="text-sm font-medium text-[#0F172A]">Network Value</span>
-              <select
-                value={customerForm.network_value_id}
-                onChange={(event) => updateCustomerField('network_value_id', event.target.value)}
-                className={getCustomerFieldClass(Boolean(customerFieldErrors.network_value_id))}
-              >
-                <option value="">Select network value</option>
-                {(customerOptions?.network_value_items || []).map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name}
-                  </option>
-                ))}
-              </select>
-              {customerFieldErrors.network_value_id && (
-                <p className="text-xs text-red-600">{customerFieldErrors.network_value_id}</p>
-              )}
-            </label>
-
-            <label className="space-y-2">
-              <span className="text-sm font-medium text-[#0F172A]">Lead Status</span>
-              <select
-                value={customerForm.lead_status_id}
-                onChange={(event) => updateCustomerField('lead_status_id', event.target.value)}
-                className={getCustomerFieldClass(Boolean(customerFieldErrors.lead_status_id))}
-              >
-                <option value="">Select lead status</option>
-                {(customerOptions?.lead_status_items || []).map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name}
-                  </option>
-                ))}
-              </select>
-              {customerFieldErrors.lead_status_id && (
-                <p className="text-xs text-red-600">{customerFieldErrors.lead_status_id}</p>
-              )}
-            </label>
-
-            <label className="space-y-2">
-              <span className="text-sm font-medium text-[#0F172A]">Potential Service</span>
-              <select
-                value={customerForm.potential_service_id}
-                onChange={(event) => updateCustomerField('potential_service_id', event.target.value)}
-                className={getCustomerFieldClass(Boolean(customerFieldErrors.potential_service_id))}
-              >
-                <option value="">Select potential service</option>
-                {(customerOptions?.potential_service_items || []).map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name}
-                  </option>
-                ))}
-              </select>
-              {customerFieldErrors.potential_service_id && (
-                <p className="text-xs text-red-600">{customerFieldErrors.potential_service_id}</p>
-              )}
-            </label>
-
-            <label className="space-y-2">
-              <span className="text-sm font-medium text-[#0F172A]">Lead Value Estimate</span>
-              <input
-                type="number"
-                min="0"
-                value={customerForm.lead_value_estimate}
-                onChange={(event) => updateCustomerField('lead_value_estimate', event.target.value)}
-                className={getCustomerFieldClass(Boolean(customerFieldErrors.lead_value_estimate))}
-              />
-              {customerFieldErrors.lead_value_estimate && (
-                <p className="text-xs text-red-600">{customerFieldErrors.lead_value_estimate}</p>
-              )}
-            </label>
-
-            <label className="space-y-2">
-              <span className="text-sm font-medium text-[#0F172A]">Follow-Up Date</span>
-              <input
-                type="date"
-                value={customerForm.follow_up_date}
-                onChange={(event) => updateCustomerField('follow_up_date', event.target.value)}
-                className={getCustomerFieldClass(Boolean(customerFieldErrors.follow_up_date))}
-              />
-              {customerFieldErrors.follow_up_date && (
-                <p className="text-xs text-red-600">{customerFieldErrors.follow_up_date}</p>
-              )}
-            </label>
-
-            <label className="space-y-2">
-              <span className="text-sm font-medium text-[#0F172A]">Next Follow-Up Date</span>
-              <input
-                type="date"
-                value={customerForm.next_follow_up_date}
-                onChange={(event) => updateCustomerField('next_follow_up_date', event.target.value)}
-                className={getCustomerFieldClass(Boolean(customerFieldErrors.next_follow_up_date))}
-              />
-              {customerFieldErrors.next_follow_up_date && (
-                <p className="text-xs text-red-600">{customerFieldErrors.next_follow_up_date}</p>
-              )}
-            </label>
-
-            <label className="space-y-2">
-              <span className="text-sm font-medium text-[#0F172A]">Follow-Up Priority</span>
-              <select
-                value={customerForm.follow_up_priority}
-                onChange={(event) => updateCustomerField('follow_up_priority', event.target.value)}
-                className={getCustomerFieldClass(Boolean(customerFieldErrors.follow_up_priority))}
-              >
-                {(customerOptions?.follow_up_priorities || ['low', 'medium', 'high']).map((priority) => (
-                  <option key={priority} value={priority}>
-                    {priority}
-                  </option>
-                ))}
-              </select>
-              {customerFieldErrors.follow_up_priority && (
-                <p className="text-xs text-red-600">{customerFieldErrors.follow_up_priority}</p>
-              )}
-            </label>
-
-            <label className="space-y-2">
-              <span className="text-sm font-medium text-[#0F172A]">Preferred Driver</span>
-              <select
-                value={customerForm.preferred_driver_id}
-                onChange={(event) => updateCustomerField('preferred_driver_id', event.target.value)}
-                className={getCustomerFieldClass(Boolean(customerFieldErrors.preferred_driver_id))}
-              >
-                <option value="">Select driver</option>
-                {(customerOptions?.drivers || []).map((driver) => (
-                  <option key={driver.id} value={driver.id}>
-                    {driver.full_name}
-                  </option>
-                ))}
-              </select>
-              {customerFieldErrors.preferred_driver_id && (
-                <p className="text-xs text-red-600">{customerFieldErrors.preferred_driver_id}</p>
-              )}
-            </label>
-
-            <label className="space-y-2">
-              <span className="text-sm font-medium text-[#0F172A]">Status</span>
-              <select
-                value={customerForm.status}
-                onChange={(event) => updateCustomerField('status', event.target.value)}
-                className={getCustomerFieldClass(Boolean(customerFieldErrors.status))}
-              >
-                {(customerOptions?.statuses || ['active', 'inactive']).map((status) => (
-                  <option key={status} value={status}>
-                    {status}
-                  </option>
-                ))}
-              </select>
-              {customerFieldErrors.status && <p className="text-xs text-red-600">{customerFieldErrors.status}</p>}
-            </label>
-          </div>
-
-          <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
-            <label className="flex items-center justify-between rounded-xl border border-gray-200 px-4 py-3">
-              <div>
-                <div className="text-sm font-medium text-[#0F172A]">Transport Customer</div>
-                <div className="text-xs text-gray-500">Keep this on for active transport riders.</div>
-              </div>
-              <input
-                type="checkbox"
-                checked={customerForm.is_transport_customer}
-                onChange={(event) => updateCustomerField('is_transport_customer', event.target.checked)}
-                className="h-4 w-4 rounded border-gray-300 text-[#2563EB] focus:ring-[#2563EB]"
-              />
-            </label>
-
-            <label className="flex items-center justify-between rounded-xl border border-gray-200 px-4 py-3">
-              <div>
-                <div className="text-sm font-medium text-[#0F172A]">Business Lead</div>
-                <div className="text-xs text-gray-500">Use this for leads, partners, investors, and strategic contacts.</div>
-              </div>
-              <input
-                type="checkbox"
-                checked={customerForm.is_business_lead}
-                onChange={(event) => updateCustomerField('is_business_lead', event.target.checked)}
-                className="h-4 w-4 rounded border-gray-300 text-[#2563EB] focus:ring-[#2563EB]"
-              />
-            </label>
+                <label className="space-y-2">
+                  <span className="text-sm font-medium text-[#0F172A]">Status</span>
+                  <SearchableSelect
+                    value={customerForm.status}
+                    onChange={(value) => updateCustomerField('status', value)}
+                    options={(customerOptions?.statuses || ['active', 'inactive']).map((status) => ({ value: status, label: status }))}
+                    placeholder="Select status"
+                    searchPlaceholder="Search statuses..."
+                    emptyLabel="No statuses found."
+                    triggerClassName={getCustomerFieldClass(Boolean(customerFieldErrors.status))}
+                  />
+                </label>
+              </>
+            )}
           </div>
 
           <div className="mt-4 grid grid-cols-1 gap-4">
-            {[
-              ['Notes', 'notes'],
-              ['Relationship Notes', 'relationship_notes'],
-              ['Lead Notes', 'lead_notes'],
-              ['Important Notes', 'important_notes'],
-            ].map(([label, fieldName]) => (
-              <label key={fieldName} className="space-y-2">
-                <span className="text-sm font-medium text-[#0F172A]">{label}</span>
-                <textarea
-                  rows={3}
-                  value={customerForm[fieldName as keyof CustomerFormState] as string}
-                  onChange={(event) => updateCustomerField(fieldName as CustomerFormField, event.target.value)}
-                  className={getCustomerFieldClass(Boolean(customerFieldErrors[fieldName as CustomerFormField]), { multiline: true })}
-                />
-                {customerFieldErrors[fieldName as CustomerFormField] && (
-                  <p className="text-xs text-red-600">{customerFieldErrors[fieldName as CustomerFormField]}</p>
-                )}
-              </label>
-            ))}
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-[#0F172A]">Notes</span>
+              <textarea
+                rows={3}
+                value={customerForm.notes}
+                onChange={(event) => updateCustomerField('notes', event.target.value)}
+                className={getCustomerFieldClass(Boolean(customerFieldErrors.notes), { multiline: true })}
+              />
+            </label>
           </div>
 
           <div className="sticky bottom-0 mt-6 flex justify-end border-t border-gray-200 bg-white pt-4">
@@ -2551,18 +2414,19 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <label className="space-y-2">
               <span className="text-sm font-medium text-[#0F172A]">Customer</span>
-              <select
+              <SearchableSelect
                 value={bookingForm.customer_id}
-                onChange={(event) => setBookingForm((current) => ({ ...current, customer_id: event.target.value }))}
-                className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm"
-              >
-                <option value="">Select customer</option>
-                {customers.map((customer) => (
-                  <option key={customer.id} value={customer.id}>
-                    {customer.full_name}
-                  </option>
-                ))}
-              </select>
+                onChange={(value) => setBookingForm((current) => ({ ...current, customer_id: value }))}
+                options={customers.map((customer) => ({
+                  value: customer.id,
+                  label: customer.full_name,
+                  description: [customer.phone_number, customer.organization_name || customer.company_name || customer.residential_area].filter(Boolean).join(' • '),
+                }))}
+                placeholder="Select customer"
+                searchPlaceholder="Search customers..."
+                emptyLabel="No customers found."
+                triggerClassName="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm"
+              />
             </label>
 
             <label className="space-y-2">
@@ -2607,34 +2471,40 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
 
             <label className="space-y-2">
               <span className="text-sm font-medium text-[#0F172A]">Driver</span>
-              <select
+              <SearchableSelect
                 value={bookingForm.driver_id}
-                onChange={(event) => setBookingForm((current) => ({ ...current, driver_id: event.target.value }))}
-                className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm"
-              >
-                <option value="">Assign later</option>
-                {(bookingOptions?.drivers || []).map((driver) => (
-                  <option key={driver.id} value={driver.id}>
-                    {driver.full_name}
-                  </option>
-                ))}
-              </select>
+                onChange={(value) => setBookingForm((current) => ({ ...current, driver_id: value }))}
+                options={(bookingOptions?.drivers || []).map((driver) => ({
+                  value: driver.id,
+                  label: driver.full_name,
+                  description: driver.role,
+                }))}
+                placeholder="Assign later"
+                searchPlaceholder="Search drivers..."
+                emptyLabel="No drivers found."
+                allowClear
+                clearLabel="Assign later"
+                triggerClassName="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm"
+              />
             </label>
 
             <label className="space-y-2">
               <span className="text-sm font-medium text-[#0F172A]">Vehicle</span>
-              <select
+              <SearchableSelect
                 value={bookingForm.vehicle_id}
-                onChange={(event) => setBookingForm((current) => ({ ...current, vehicle_id: event.target.value }))}
-                className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm"
-              >
-                <option value="">Assign later</option>
-                {(bookingOptions?.vehicles || []).map((vehicle) => (
-                  <option key={vehicle.id} value={vehicle.id}>
-                    {vehicle.registration_number}
-                  </option>
-                ))}
-              </select>
+                onChange={(value) => setBookingForm((current) => ({ ...current, vehicle_id: value }))}
+                options={(bookingOptions?.vehicles || []).map((vehicle) => ({
+                  value: vehicle.id,
+                  label: vehicle.registration_number,
+                  description: [vehicle.make, vehicle.model, vehicle.vehicle_type].filter(Boolean).join(' • '),
+                }))}
+                placeholder="Assign later"
+                searchPlaceholder="Search vehicles..."
+                emptyLabel="No vehicles found."
+                allowClear
+                clearLabel="Assign later"
+                triggerClassName="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm"
+              />
             </label>
 
             <label className="space-y-2">

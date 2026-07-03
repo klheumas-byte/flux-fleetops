@@ -33,7 +33,12 @@ import {
 } from '../../lib/auth-session';
 import type { DriverActiveAssignment, DriverDashboardSummary } from '../../lib/driver-api';
 import { apiRequestSafe } from '../../lib/api';
-import type { BookingSummary } from '../../lib/customer-booking-api';
+import {
+  createCustomer,
+  fetchCustomerOptions,
+  type BookingSummary,
+  type CustomerOptionsResponse,
+} from '../../lib/customer-booking-api';
 import { setDriverQuickActionIntent } from '../../lib/driver-quick-actions';
 import {
   convertBookingToRide,
@@ -44,6 +49,7 @@ import {
   type TripOptions,
   type TripRecord,
 } from '../../lib/ride-masterdata-api';
+import { SearchableSelect, type SearchableSelectOption } from '../ui/searchable-select';
 
 interface DriverDashboardProps {
   currentUser: SessionUser | null;
@@ -62,6 +68,40 @@ function nowTimeValue() {
 
 function todayValue() {
   return new Date().toISOString().slice(0, 10);
+}
+
+function buildBookingOptions(options: TripOptions | null): SearchableSelectOption[] {
+  return (options?.bookings || []).map((booking) => ({
+    value: booking.id,
+    label: `${booking.booking_id} - ${booking.pickup_date} ${booking.pickup_time}`,
+    description: `${booking.pickup_location} to ${booking.destination}`,
+    keywords: [booking.status, booking.booking_type],
+  }));
+}
+
+function buildCustomerOptions(options: TripOptions | null): SearchableSelectOption[] {
+  return (options?.customers || []).map((customer) => ({
+    value: customer.id,
+    label: customer.full_name,
+    description: [customer.phone_number, customer.residential_area || customer.work_area || customer.organization_name || customer.company_name]
+      .filter(Boolean)
+      .join(' • '),
+    keywords: [
+      customer.phone_number,
+      customer.organization_name || '',
+      customer.company_name || '',
+      customer.customer_category || '',
+      customer.residential_area || '',
+      customer.work_area || '',
+    ],
+  }));
+}
+
+function buildCustomerCategoryOptions(options: CustomerOptionsResponse | null): SearchableSelectOption[] {
+  return (options?.customer_category_items || []).map((item) => ({
+    value: item.id,
+    label: item.name,
+  }));
 }
 
 function useVisibilityOnce<T extends HTMLElement>() {
@@ -112,14 +152,20 @@ export default function DriverDashboard({
   const [showLocationModal, setShowLocationModal] = useState(false);
   const [showEmergencyPanel, setShowEmergencyPanel] = useState(false);
   const [rideOptions, setRideOptions] = useState<TripOptions | null>(null);
+  const [customerOptions, setCustomerOptions] = useState<CustomerOptionsResponse | null>(null);
   const [activeRide, setActiveRide] = useState<TripRecord | null>(null);
   const [isLoadingRideWorkspace, setIsLoadingRideWorkspace] = useState(false);
   const [isSubmittingTripAction, setIsSubmittingTripAction] = useState(false);
+  const [isLoadingCustomerOptions, setIsLoadingCustomerOptions] = useState(false);
+  const [isQuickAddingCustomer, setIsQuickAddingCustomer] = useState(false);
   const [isCapturingLocation, setIsCapturingLocation] = useState(false);
   const [locationValue, setLocationValue] = useState('');
   const [locationAccuracy, setLocationAccuracy] = useState('');
+  const [showQuickAddCustomer, setShowQuickAddCustomer] = useState(false);
+  const [quickAddCustomerError, setQuickAddCustomerError] = useState('');
   const [startTripForm, setStartTripForm] = useState({
     booking_id: '',
+    customer_id: '',
     trip_date: todayValue(),
     start_time: nowTimeValue(),
     pickup_area: '',
@@ -130,7 +176,14 @@ export default function DriverDashboard({
   const [endTripForm, setEndTripForm] = useState({
     end_time: nowTimeValue(),
     odometer_end: '',
+    amount_charged: '',
     notes: '',
+  });
+  const [quickAddCustomerForm, setQuickAddCustomerForm] = useState({
+    full_name: '',
+    phone_number: '',
+    residential_area: '',
+    customer_category_id: '',
   });
 
   const loadBookingSummary = async () => {
@@ -159,6 +212,9 @@ export default function DriverDashboard({
     () => rideOptions?.bookings.find((booking) => booking.id === startTripForm.booking_id) || null,
     [rideOptions?.bookings, startTripForm.booking_id],
   );
+  const bookingSelectOptions = useMemo(() => buildBookingOptions(rideOptions), [rideOptions]);
+  const customerSelectOptions = useMemo(() => buildCustomerOptions(rideOptions), [rideOptions]);
+  const customerCategorySelectOptions = useMemo(() => buildCustomerCategoryOptions(customerOptions), [customerOptions]);
 
   useEffect(() => {
     if (!selectedBooking) {
@@ -166,12 +222,27 @@ export default function DriverDashboard({
     }
     setStartTripForm((current) => ({
       ...current,
+      customer_id: selectedBooking.customer_id || current.customer_id,
       pickup_area: selectedBooking.pickup_location || current.pickup_area,
       destination_area: selectedBooking.destination || current.destination_area,
       trip_date: selectedBooking.pickup_date || current.trip_date,
       start_time: selectedBooking.pickup_time || current.start_time,
     }));
   }, [selectedBooking]);
+
+  const ensureCustomerOptionsLoaded = async () => {
+    if (customerOptions) {
+      return customerOptions;
+    }
+    setIsLoadingCustomerOptions(true);
+    try {
+      const response = await fetchCustomerOptions();
+      setCustomerOptions(response);
+      return response;
+    } finally {
+      setIsLoadingCustomerOptions(false);
+    }
+  };
 
   const stats = {
     weeklyTarget: dashboardSummary?.weekly_target || 0,
@@ -222,12 +293,14 @@ export default function DriverDashboard({
       setActiveRide(nextActiveRide);
       setStartTripForm((current) => ({
         ...current,
+        customer_id: '',
         trip_date: todayValue(),
         start_time: nowTimeValue(),
       }));
       setEndTripForm((current) => ({
         ...current,
         end_time: nowTimeValue(),
+        amount_charged: '',
       }));
       if (ridesResult.status === 'rejected') {
         toast.error('Trip history is temporarily unavailable, but you can still start a new trip.');
@@ -273,6 +346,8 @@ export default function DriverDashboard({
       toast.info(`Finish ${workspace.activeRide.trip_id} before starting another trip.`);
       return;
     }
+    setShowQuickAddCustomer(false);
+    setQuickAddCustomerError('');
     setShowStartTripModal(true);
   };
 
@@ -283,6 +358,56 @@ export default function DriverDashboard({
       return;
     }
     setShowEndTripModal(true);
+  };
+
+  const handleQuickAddCustomer = async () => {
+    if (!quickAddCustomerForm.full_name || !quickAddCustomerForm.phone_number || !quickAddCustomerForm.residential_area || !quickAddCustomerForm.customer_category_id) {
+      setQuickAddCustomerError('Name, phone number, location / area, and customer type are required.');
+      return;
+    }
+
+    setIsQuickAddingCustomer(true);
+    setQuickAddCustomerError('');
+    try {
+      const savedCustomer = await createCustomer({
+        full_name: quickAddCustomerForm.full_name,
+        phone_number: quickAddCustomerForm.phone_number,
+        residential_area: quickAddCustomerForm.residential_area,
+        customer_category_id: quickAddCustomerForm.customer_category_id,
+        source: 'manual_entry',
+        status: 'active',
+        is_transport_customer: true,
+      });
+      setRideOptions((current) => {
+        if (!current) {
+          return current;
+        }
+        const nextCustomers = [savedCustomer, ...(current.customers || [])]
+          .filter((customer, index, items) => items.findIndex((item) => item.id === customer.id) === index)
+          .sort((left, right) => left.full_name.localeCompare(right.full_name));
+        return {
+          ...current,
+          customers: nextCustomers,
+        };
+      });
+      setStartTripForm((current) => ({
+        ...current,
+        customer_id: savedCustomer.id,
+        pickup_area: current.pickup_area || savedCustomer.residential_area || '',
+      }));
+      setQuickAddCustomerForm({
+        full_name: '',
+        phone_number: '',
+        residential_area: '',
+        customer_category_id: '',
+      });
+      setShowQuickAddCustomer(false);
+      toast.success('Customer added and linked to this trip.');
+    } catch (error) {
+      setQuickAddCustomerError(error instanceof Error ? error.message : 'Unable to add that customer right now.');
+    } finally {
+      setIsQuickAddingCustomer(false);
+    }
   };
 
   const handleStartTrip = async () => {
@@ -302,6 +427,7 @@ export default function DriverDashboard({
     setIsSubmittingTripAction(true);
     try {
       const payload = {
+        customer_id: startTripForm.customer_id || undefined,
         driver_id: currentUser?.id || undefined,
         vehicle_id: activeAssignment.vehicle_id,
         trip_source_id: rideOptions.trip_sources[0].id,
@@ -319,6 +445,7 @@ export default function DriverDashboard({
         : await createRide(payload);
       setActiveRide(trip);
       setShowStartTripModal(false);
+      setShowQuickAddCustomer(false);
       toast.success(`Trip ${trip.trip_id} started successfully.`);
       await loadRideWorkspace();
     } catch (error) {
@@ -338,6 +465,7 @@ export default function DriverDashboard({
       const trip = await updateRide(activeRide.id, {
         end_time: endTripForm.end_time,
         odometer_end: endTripForm.odometer_end ? Number(endTripForm.odometer_end) : undefined,
+        actual_fare: endTripForm.amount_charged ? Number(endTripForm.amount_charged) : undefined,
         notes: endTripForm.notes || undefined,
       });
       setActiveRide(trip.status === 'Completed' ? null : trip);
@@ -821,14 +949,94 @@ export default function DriverDashboard({
               <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5 text-sm text-gray-700">{assignedVehicleLabel}</div>
             </FieldBlock>
             <FieldBlock label="Linked Booking">
-              <select value={startTripForm.booking_id} onChange={(event) => setStartTripForm((current) => ({ ...current, booking_id: event.target.value }))} className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm">
-                <option value="">No linked booking</option>
-                {(rideOptions?.bookings || []).map((booking) => (
-                  <option key={booking.id} value={booking.id}>
-                    {booking.booking_id} - {booking.pickup_date} {booking.pickup_time}
-                  </option>
-                ))}
-              </select>
+              <SearchableSelect
+                value={startTripForm.booking_id}
+                onChange={(value) => setStartTripForm((current) => ({ ...current, booking_id: value }))}
+                options={bookingSelectOptions}
+                placeholder="No linked booking"
+                searchPlaceholder="Search bookings..."
+                emptyLabel="No bookings found."
+                allowClear
+                clearLabel="No linked booking"
+                triggerClassName="rounded-lg"
+              />
+            </FieldBlock>
+            <FieldBlock label="Customer">
+              <div className="space-y-2">
+                <SearchableSelect
+                  value={startTripForm.customer_id}
+                  onChange={(value) => setStartTripForm((current) => ({ ...current, customer_id: value }))}
+                  options={customerSelectOptions}
+                  placeholder="Optional customer"
+                  searchPlaceholder="Search customers..."
+                  emptyLabel="No customers found."
+                  allowClear
+                  clearLabel="No linked customer"
+                  triggerClassName="rounded-lg"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowQuickAddCustomer((current) => !current);
+                    setQuickAddCustomerError('');
+                    if (!customerOptions) {
+                      void ensureCustomerOptionsLoaded().catch((error) => {
+                        setQuickAddCustomerError(error instanceof Error ? error.message : 'Unable to load customer setup right now.');
+                      });
+                    }
+                  }}
+                  className="text-sm font-medium text-[#2563EB] hover:text-[#1d4ed8]"
+                >
+                  + Quick Add Customer
+                </button>
+                {showQuickAddCustomer && (
+                  <div className="rounded-xl border border-blue-100 bg-blue-50/60 p-4">
+                    <div className="grid grid-cols-1 gap-3">
+                      <input
+                        value={quickAddCustomerForm.full_name}
+                        onChange={(event) => setQuickAddCustomerForm((current) => ({ ...current, full_name: event.target.value }))}
+                        placeholder="Customer name"
+                        className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm"
+                      />
+                      <input
+                        value={quickAddCustomerForm.phone_number}
+                        onChange={(event) => setQuickAddCustomerForm((current) => ({ ...current, phone_number: event.target.value }))}
+                        placeholder="Phone number"
+                        className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm"
+                      />
+                      <input
+                        value={quickAddCustomerForm.residential_area}
+                        onChange={(event) => setQuickAddCustomerForm((current) => ({ ...current, residential_area: event.target.value }))}
+                        placeholder="Location / area"
+                        className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm"
+                      />
+                      <SearchableSelect
+                        value={quickAddCustomerForm.customer_category_id}
+                        onChange={(value) => setQuickAddCustomerForm((current) => ({ ...current, customer_category_id: value }))}
+                        options={customerCategorySelectOptions}
+                        placeholder={isLoadingCustomerOptions ? 'Loading customer types...' : 'Select customer type'}
+                        searchPlaceholder="Search customer types..."
+                        emptyLabel="No customer types found."
+                        triggerClassName="rounded-lg"
+                      />
+                    </div>
+                    {quickAddCustomerError && (
+                      <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                        {quickAddCustomerError}
+                      </div>
+                    )}
+                    <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:justify-end">
+                      <button type="button" onClick={() => setShowQuickAddCustomer(false)} className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-white">
+                        Cancel
+                      </button>
+                      <button type="button" onClick={() => void handleQuickAddCustomer()} disabled={isQuickAddingCustomer} className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#2563EB] px-3 py-2 text-sm font-medium text-white disabled:opacity-60">
+                        {isQuickAddingCustomer ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                        Add Customer
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
             </FieldBlock>
             <FieldBlock label="Trip Date">
               <input type="date" value={startTripForm.trip_date} onChange={(event) => setStartTripForm((current) => ({ ...current, trip_date: event.target.value }))} className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm" />
@@ -874,6 +1082,9 @@ export default function DriverDashboard({
             </FieldBlock>
             <FieldBlock label="Odometer End">
               <input type="number" value={endTripForm.odometer_end} onChange={(event) => setEndTripForm((current) => ({ ...current, odometer_end: event.target.value }))} placeholder="Optional" className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm" />
+            </FieldBlock>
+            <FieldBlock label="Amount Charged">
+              <input type="number" value={endTripForm.amount_charged} onChange={(event) => setEndTripForm((current) => ({ ...current, amount_charged: event.target.value }))} placeholder="Optional" className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm" />
             </FieldBlock>
             <FieldBlock label="Completion Notes">
               <textarea value={endTripForm.notes} onChange={(event) => setEndTripForm((current) => ({ ...current, notes: event.target.value }))} placeholder="Add any drop-off, issue, or handover notes." className="min-h-[96px] w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm" />

@@ -47,7 +47,7 @@ export default function Rides() {
   const filteredRides = useMemo(
     () =>
       rides.filter((trip) => {
-        const matchesSearch = [trip.trip_id, trip.customer?.full_name, trip.driver?.full_name, trip.pickup_area, trip.destination_area]
+        const matchesSearch = [trip.trip_id, trip.customer?.full_name, trip.customer_name_snapshot, trip.driver?.full_name, trip.pickup_area, trip.destination_area]
           .filter(Boolean)
           .some((value) => value?.toLowerCase().includes(debouncedSearch.toLowerCase()));
         const matchesStatus = statusFilter === 'all' || trip.status === statusFilter;
@@ -176,7 +176,7 @@ export default function Rides() {
                     <div className="text-xs text-gray-500">{trip.status}</div>
                   </td>
                   <td className="px-5 py-4">
-                    <div className="font-medium text-gray-900">{trip.customer?.full_name || 'No customer'}</div>
+                    <div className="font-medium text-gray-900">{trip.customer?.full_name || trip.customer_name_snapshot || 'No customer'}</div>
                     <div className="text-xs text-gray-500">{trip.trip_source}</div>
                   </td>
                   <td className="px-5 py-4">

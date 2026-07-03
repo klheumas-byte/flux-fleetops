@@ -325,10 +325,12 @@ def _resolve_trip_purpose(value: str | None):
 
 def _normalized_ride_payload(payload: dict, *, partial: bool = False) -> dict:
     normalized: dict[str, Any] = {}
+    customer_document = None
 
     if "customer_id" in payload or not partial:
-        customer = _get_customer_document(payload.get("customer_id"))
-        normalized["customer_id"] = customer["_id"] if customer else None
+        customer_document = _get_customer_document(payload.get("customer_id"))
+        normalized["customer_id"] = customer_document["_id"] if customer_document else None
+        normalized["customer_name_snapshot"] = customer_document.get("full_name") if customer_document else None
 
     if "driver_id" in payload:
         driver = _get_driver_document(payload.get("driver_id"))
@@ -374,6 +376,14 @@ def _normalized_ride_payload(payload: dict, *, partial: bool = False) -> dict:
             normalized[field_name] = _validate_number(payload.get(field_name), field_name)
         elif not partial:
             normalized[field_name] = None
+
+    if "actual_fare" in payload or "amount_charged" in payload:
+        normalized["actual_fare"] = _validate_number(
+            payload.get("actual_fare") if "actual_fare" in payload else payload.get("amount_charged"),
+            "actual_fare",
+        )
+    elif not partial:
+        normalized["actual_fare"] = None
 
     if "status" in payload or not partial:
         normalized["status"] = _validate_status(payload.get("status"))
@@ -456,6 +466,7 @@ def create_ride(payload: dict, current_user_id: str, current_role: str) -> dict:
         "trip_id": trip_identifier,
         "ride_id": trip_identifier,
         "customer_id": normalized.get("customer_id"),
+        "customer_name_snapshot": normalized.get("customer_name_snapshot"),
         "driver_id": normalized.get("driver_id"),
         "vehicle_id": normalized["vehicle_id"],
         "trip_source_id": normalized["trip_source_id"],
@@ -469,6 +480,7 @@ def create_ride(payload: dict, current_user_id: str, current_role: str) -> dict:
         "destination_area": normalized["destination_area"],
         "odometer_start": normalized.get("odometer_start"),
         "odometer_end": normalized.get("odometer_end"),
+        "actual_fare": normalized.get("actual_fare"),
         "notes": normalized.get("notes"),
         "status": normalized.get("status", "Logged"),
         "created_by": _to_object_id(current_user_id, "current_user_id"),
@@ -514,6 +526,7 @@ def convert_booking_to_ride(booking_id: str, payload: dict, current_user_id: str
         "pickup_area": payload.get("pickup_area") or payload.get("pickup_location") or booking_document.get("pickup_location"),
         "destination_area": payload.get("destination_area") or payload.get("destination") or booking_document.get("destination"),
         "notes": payload.get("notes") or booking_document.get("notes"),
+        "actual_fare": payload.get("actual_fare") if "actual_fare" in payload else payload.get("amount_charged"),
         "status": payload.get("status") or "Scheduled",
         "source_booking_id": booking_id,
         "odometer_start": payload.get("odometer_start"),

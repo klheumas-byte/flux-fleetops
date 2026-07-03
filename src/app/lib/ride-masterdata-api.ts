@@ -51,6 +51,7 @@ export interface TripRecord {
   trip_id: string;
   ride_id: string;
   customer_id?: string | null;
+  customer_name_snapshot?: string | null;
   driver_id?: string | null;
   vehicle_id?: string | null;
   trip_source_id: string;
@@ -85,6 +86,7 @@ export interface TripRecord {
   scheduled_time?: string | null;
   estimated_fare?: number | null;
   actual_fare?: number | null;
+  amount_charged?: number | null;
   payment_method?: string | null;
 }
 

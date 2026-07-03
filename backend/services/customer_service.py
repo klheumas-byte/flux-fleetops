@@ -649,11 +649,71 @@ def _serialize_customer_summary(customer_document: dict) -> dict:
 
 
 def _extract_datetime(value):
-    if value:
+    if not value:
+        return None
+
+    if isinstance(value, datetime):
         if value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
+
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time(), tzinfo=timezone.utc)
+
+    if isinstance(value, str):
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if normalized.endswith("Z"):
+            normalized = f"{normalized[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            try:
+                parsed_date = date.fromisoformat(normalized)
+            except ValueError:
+                return None
+            return datetime.combine(parsed_date, datetime.min.time(), tzinfo=timezone.utc)
+
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
     return None
+
+
+def _load_active_master_data_groups(*data_types: str) -> dict[str, list[dict]]:
+    if not data_types:
+        return {}
+
+    documents = list(
+        get_collection("master_data").find(
+            {
+                "data_type": {"$in": list(data_types)},
+                "active": True,
+                "archived": {"$ne": True},
+            }
+        ).sort([("data_type", ASCENDING), ("sort_order", ASCENDING), ("name", ASCENDING)])
+    )
+    grouped: dict[str, list[dict]] = {data_type: [] for data_type in data_types}
+    for document in documents:
+        grouped.setdefault(document.get("data_type"), []).append(
+            {
+                "id": str(document.get("_id")),
+                "data_type": document.get("data_type"),
+                "name": document.get("name"),
+                "active": bool(document.get("active")),
+                "archived": bool(document.get("archived", False)),
+                "admin_editable": bool(document.get("admin_editable", True)),
+                "description": document.get("description"),
+                "sort_order": document.get("sort_order"),
+                "created_by": str(document.get("created_by")) if document.get("created_by") else None,
+                "updated_by": str(document.get("updated_by")) if document.get("updated_by") else None,
+                "created_at": document.get("created_at").isoformat() if document.get("created_at") else None,
+                "updated_at": document.get("updated_at").isoformat() if document.get("updated_at") else None,
+            }
+        )
+    return grouped
 
 
 def _resolve_master_data_selection(
@@ -1113,21 +1173,45 @@ def list_customer_options(current_user_id: str, current_role: str) -> dict:
     )
     log_db_duration("customers.options.drivers", query_started_at)
 
+    master_data_started_at = perf_counter()
+    master_data_groups = _load_active_master_data_groups(
+        "customer_categories",
+        "customer_sources",
+        "industries",
+        "organization_types",
+        "relationship_categories",
+        "opportunity_levels",
+        "network_values",
+        "lead_statuses",
+        "potential_services",
+    )
+    log_db_duration("customers.options.master_data_bulk", master_data_started_at)
+
+    customer_category_items = master_data_groups.get("customer_categories", [])
+    customer_source_items = master_data_groups.get("customer_sources", [])
+    industry_items = master_data_groups.get("industries", [])
+    organization_type_items = master_data_groups.get("organization_types", [])
+    relationship_category_items = master_data_groups.get("relationship_categories", [])
+    opportunity_level_items = master_data_groups.get("opportunity_levels", [])
+    network_value_items = master_data_groups.get("network_values", [])
+    lead_status_items = master_data_groups.get("lead_statuses", [])
+    potential_service_items = master_data_groups.get("potential_services", [])
+
     result = {
         "drivers": [serialize_user(driver) for driver in drivers],
-        "customer_categories": get_active_master_data_values("customer_categories"),
-        "customer_category_items": get_active_master_data_items("customer_categories"),
-        "customer_sources": get_active_master_data_values("customer_sources"),
-        "customer_source_items": get_active_master_data_items("customer_sources"),
-        "company_industries": get_active_master_data_values("industries"),
-        "industry_items": get_active_master_data_items("industries"),
-        "organization_types": get_active_master_data_values("organization_types"),
-        "organization_type_items": get_active_master_data_items("organization_types"),
-        "relationship_category_items": get_active_master_data_items("relationship_categories"),
-        "opportunity_level_items": get_active_master_data_items("opportunity_levels"),
-        "network_value_items": get_active_master_data_items("network_values"),
-        "lead_status_items": get_active_master_data_items("lead_statuses"),
-        "potential_service_items": get_active_master_data_items("potential_services"),
+        "customer_categories": [item["name"] for item in customer_category_items],
+        "customer_category_items": customer_category_items,
+        "customer_sources": [item["name"] for item in customer_source_items],
+        "customer_source_items": customer_source_items,
+        "company_industries": [item["name"] for item in industry_items],
+        "industry_items": industry_items,
+        "organization_types": [item["name"] for item in organization_type_items],
+        "organization_type_items": organization_type_items,
+        "relationship_category_items": relationship_category_items,
+        "opportunity_level_items": opportunity_level_items,
+        "network_value_items": network_value_items,
+        "lead_status_items": lead_status_items,
+        "potential_service_items": potential_service_items,
         "follow_up_priorities": sorted(FOLLOW_UP_PRIORITIES),
         "statuses": sorted(CUSTOMER_STATUSES),
         "source_options": [{"value": key, "label": value} for key, value in SOURCE_OPTIONS.items()],

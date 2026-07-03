@@ -51,7 +51,7 @@ export default function RideHistory() {
   const filteredRides = useMemo(
     () =>
       rides.filter((trip) => {
-        const matchesSearch = [trip.trip_id, trip.customer?.full_name, trip.pickup_area, trip.destination_area]
+        const matchesSearch = [trip.trip_id, trip.customer?.full_name, trip.customer_name_snapshot, trip.pickup_area, trip.destination_area]
           .filter(Boolean)
           .some((value) => value?.toLowerCase().includes(debouncedSearch.toLowerCase()));
         const matchesStatus = statusFilter === 'all' || trip.status === statusFilter;
@@ -143,7 +143,7 @@ export default function RideHistory() {
                     </span>
                   </div>
                   <div className="text-sm text-gray-600">
-                    {trip.customer?.full_name || 'No customer'} - {trip.trip_source} - {trip.trip_purpose}
+                    {trip.customer?.full_name || trip.customer_name_snapshot || 'No customer'} - {trip.trip_source} - {trip.trip_purpose}
                   </div>
                   <div className="grid grid-cols-1 gap-1 text-sm text-gray-500">
                     <div className="flex items-center gap-2">

@@ -55,6 +55,7 @@ def ensure_indexes():
             {"keys": [("phone", ASCENDING)], "options": {"unique": True, "sparse": True}},
             {"keys": [("role", ASCENDING)]},
             {"keys": [("status", ASCENDING)]},
+            {"keys": [("role", ASCENDING), ("status", ASCENDING), ("full_name", ASCENDING)]},
             {"keys": [("created_at", ASCENDING)]},
             {"keys": [("updated_at", ASCENDING)]},
             {"keys": [("driver_profile.approval_status", ASCENDING)]},

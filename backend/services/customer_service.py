@@ -1,12 +1,14 @@
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 from time import perf_counter
 from typing import Any
+import re
 
 from bson import ObjectId
 from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import DuplicateKeyError
 from flask import current_app
+from pymongo.read_preferences import ReadPreference
 
 from extensions import get_collection
 from models.booking import serialize_booking
@@ -68,6 +70,10 @@ def rides_collection():
 
 def users_collection():
     return get_collection("users")
+
+
+def users_read_collection():
+    return users_collection().with_options(read_preference=ReadPreference.SECONDARY_PREFERRED)
 
 
 def ensure_customer_indexes():
@@ -630,11 +636,24 @@ def _assert_customer_access(customer_document: dict, *, current_user_id: str, cu
         raise ApiError("You do not have permission to access this customer.", status_code=403)
 
 
-def _serialize_customer_summary(customer_document: dict) -> dict:
+def _serialize_customer_summary(customer_document: dict, *, user_lookup: dict[str, dict] | None = None) -> dict:
     customer = serialize_customer(customer_document)
-    preferred_driver = users_collection().find_one({"_id": customer_document.get("preferred_driver_id")})
+    preferred_driver_id = customer_document.get("preferred_driver_id")
+    preferred_driver = (
+        (user_lookup or {}).get(str(preferred_driver_id))
+        if preferred_driver_id
+        else None
+    )
+    if preferred_driver is None and preferred_driver_id:
+        preferred_driver = users_collection().find_one({"_id": preferred_driver_id})
     created_by_user_id = customer_document.get("created_by_user_id") or customer_document.get("created_by")
-    created_by_user = users_collection().find_one({"_id": created_by_user_id}) if created_by_user_id else None
+    created_by_user = (
+        (user_lookup or {}).get(str(created_by_user_id))
+        if created_by_user_id
+        else None
+    )
+    if created_by_user is None and created_by_user_id:
+        created_by_user = users_collection().find_one({"_id": created_by_user_id})
     customer["preferred_driver"] = serialize_user(preferred_driver) if preferred_driver else None
     customer["created_by_user"] = serialize_user(created_by_user) if created_by_user else None
     customer["assigned_driver"] = customer["preferred_driver"]
@@ -646,6 +665,42 @@ def _serialize_customer_summary(customer_document: dict) -> dict:
         customer["created_by_driver_id"] = str(created_by_user["_id"])
     customer["source_label"] = _source_label(customer.get("source")) or customer.get("customer_source") or "Other"
     return customer
+
+
+def _serialize_option_driver(user_document: dict) -> dict:
+    created_at = _extract_datetime(user_document.get("created_at"))
+    updated_at = _extract_datetime(user_document.get("updated_at"))
+    last_login = _extract_datetime(user_document.get("last_login"))
+    return {
+        "id": str(user_document.get("_id")),
+        "full_name": user_document.get("full_name"),
+        "email": user_document.get("email"),
+        "phone": user_document.get("phone"),
+        "role": (str(user_document.get("role")).strip().lower() if user_document.get("role") is not None else None),
+        "status": user_document.get("status"),
+        "last_login": last_login.isoformat() if last_login else None,
+        "created_at": created_at.isoformat() if created_at else None,
+        "updated_at": updated_at.isoformat() if updated_at else None,
+        "driver_profile": None,
+    }
+
+
+def _serialize_option_customer(customer_document: dict) -> dict:
+    return {
+        "id": str(customer_document.get("_id")),
+        "customer_id": customer_document.get("customer_id"),
+        "full_name": customer_document.get("full_name"),
+        "phone_number": customer_document.get("phone_number"),
+        "customer_category_id": str(customer_document.get("customer_category_id")) if customer_document.get("customer_category_id") else None,
+        "customer_category": customer_document.get("customer_category"),
+        "organization_name": customer_document.get("organization_name") or customer_document.get("company_name"),
+        "company_name": customer_document.get("company_name"),
+        "residential_area": customer_document.get("residential_area"),
+        "work_area": customer_document.get("work_area"),
+        "source": customer_document.get("source"),
+        "source_label": _source_label(customer_document.get("source")) or customer_document.get("customer_source") or "Other",
+        "status": customer_document.get("status"),
+    }
 
 
 def _extract_datetime(value):
@@ -1043,13 +1098,103 @@ def _customer_analytics_available_filters(customer_documents: list[dict], *, cur
     }
 
 
-def _customer_booking_stats(customer_document: dict) -> dict:
-    customer_id = customer_document.get("_id")
+def _customer_activity_maps(customer_documents: list[dict]) -> tuple[dict[str, list[dict]], dict[str, list[dict]], dict[str, ObjectId | None], set[ObjectId]]:
+    customer_ids = [
+        customer_document.get("_id")
+        for customer_document in customer_documents
+        if isinstance(customer_document.get("_id"), ObjectId)
+    ]
+    if not customer_ids:
+        return {}, {}, {}, set()
+
+    bookings_by_customer: dict[str, list[dict]] = defaultdict(list)
     booking_documents = list(
-        bookings_collection().find({"customer_id": customer_id}).sort(
-            [("pickup_at", DESCENDING), ("created_at", DESCENDING)]
-        )
+        bookings_collection().find(
+            {"customer_id": {"$in": customer_ids}}
+        ).sort([("pickup_at", DESCENDING), ("created_at", DESCENDING)])
     )
+    for booking_document in booking_documents:
+        customer_id = booking_document.get("customer_id")
+        if isinstance(customer_id, ObjectId):
+            bookings_by_customer[str(customer_id)].append(booking_document)
+
+    rides_by_customer: dict[str, list[dict]] = defaultdict(list)
+    ride_documents = list(
+        rides_collection().find(
+            {"customer_id": {"$in": customer_ids}}
+        ).sort([("end_time", DESCENDING), ("created_at", DESCENDING)])
+    )
+    for ride_document in ride_documents:
+        customer_id = ride_document.get("customer_id")
+        if isinstance(customer_id, ObjectId):
+            rides_by_customer[str(customer_id)].append(ride_document)
+
+    derived_preferred_driver_by_customer: dict[str, ObjectId | None] = {}
+    derived_preferred_driver_ids: set[ObjectId] = set()
+    for customer_document in customer_documents:
+        customer_id = customer_document.get("_id")
+        if not isinstance(customer_id, ObjectId):
+            continue
+        customer_key = str(customer_id)
+        if customer_document.get("preferred_driver_id"):
+            derived_preferred_driver_by_customer[customer_key] = customer_document.get("preferred_driver_id")
+            continue
+        completed_rides = [
+            ride for ride in rides_by_customer.get(customer_key, [])
+            if (ride.get("status") or "").lower() == "completed"
+        ]
+        driver_counts = Counter(
+            ride.get("driver_id")
+            for ride in completed_rides
+            if isinstance(ride.get("driver_id"), ObjectId)
+        )
+        derived_preferred_driver_id = driver_counts.most_common(1)[0][0] if driver_counts else None
+        derived_preferred_driver_by_customer[customer_key] = derived_preferred_driver_id
+        if derived_preferred_driver_id:
+            derived_preferred_driver_ids.add(derived_preferred_driver_id)
+
+    return bookings_by_customer, rides_by_customer, derived_preferred_driver_by_customer, derived_preferred_driver_ids
+
+
+def _build_customer_user_lookup(customer_documents: list[dict], *, additional_user_ids: set[ObjectId] | None = None) -> dict[str, dict]:
+    user_ids = {
+        customer_document.get("preferred_driver_id")
+        for customer_document in customer_documents
+        if isinstance(customer_document.get("preferred_driver_id"), ObjectId)
+    } | {
+        customer_document.get("created_by_user_id") or customer_document.get("created_by")
+        for customer_document in customer_documents
+        if isinstance(customer_document.get("created_by_user_id") or customer_document.get("created_by"), ObjectId)
+    }
+    if additional_user_ids:
+        user_ids |= {
+            user_id
+            for user_id in additional_user_ids
+            if isinstance(user_id, ObjectId)
+        }
+    if not user_ids:
+        return {}
+    return {
+        str(user_document["_id"]): user_document
+        for user_document in users_read_collection().find({"_id": {"$in": list(user_ids)}})
+    }
+
+
+def _customer_booking_stats(
+    customer_document: dict,
+    *,
+    booking_documents: list[dict] | None = None,
+    ride_documents: list[dict] | None = None,
+    user_lookup: dict[str, dict] | None = None,
+    derived_preferred_driver_id: ObjectId | None = None,
+) -> dict:
+    customer_id = customer_document.get("_id")
+    if booking_documents is None:
+        booking_documents = list(
+            bookings_collection().find({"customer_id": customer_id}).sort(
+            [("pickup_at", DESCENDING), ("created_at", DESCENDING)]
+            )
+        )
     now = now_utc()
 
     upcoming_bookings = [
@@ -1075,11 +1220,12 @@ def _customer_booking_stats(customer_document: dict) -> dict:
         and not booking.get("is_recurring_template")
     ]
 
-    ride_documents = list(
-        rides_collection().find({"customer_id": customer_id}).sort(
+    if ride_documents is None:
+        ride_documents = list(
+            rides_collection().find({"customer_id": customer_id}).sort(
             [("end_time", DESCENDING), ("created_at", DESCENDING)]
+            )
         )
-    )
     completed_rides = [
         ride for ride in ride_documents if (ride.get("status") or "").lower() == "completed"
     ]
@@ -1090,14 +1236,20 @@ def _customer_booking_stats(customer_document: dict) -> dict:
         last_ride_date = last_completed_ride.isoformat() if last_completed_ride else None
 
     driver_counts = Counter(
-        str(ride.get("driver_id"))
+        ride.get("driver_id")
         for ride in completed_rides
-        if ride.get("driver_id")
+        if isinstance(ride.get("driver_id"), ObjectId)
     )
-    preferred_driver_id = customer_document.get("preferred_driver_id")
+    preferred_driver_id = customer_document.get("preferred_driver_id") or derived_preferred_driver_id
     if not preferred_driver_id and driver_counts:
-        preferred_driver_id = ObjectId(driver_counts.most_common(1)[0][0])
-    preferred_driver = users_collection().find_one({"_id": preferred_driver_id}) if preferred_driver_id else None
+        preferred_driver_id = driver_counts.most_common(1)[0][0]
+    preferred_driver = (
+        (user_lookup or {}).get(str(preferred_driver_id))
+        if preferred_driver_id
+        else None
+    )
+    if preferred_driver is None and preferred_driver_id:
+        preferred_driver = users_collection().find_one({"_id": preferred_driver_id})
 
     ride_frequency = "New"
     rides_completed = len(completed_rides)
@@ -1153,8 +1305,70 @@ def _enrich_customer(customer_document: dict) -> dict:
     return customer
 
 
-def list_customer_options(current_user_id: str, current_role: str) -> dict:
-    cache_key = build_cache_key("customer_options", current_user_id=current_user_id, current_role=current_role)
+def _enrich_customers(customer_documents: list[dict]) -> list[dict]:
+    if not customer_documents:
+        return []
+
+    bookings_by_customer, rides_by_customer, derived_preferred_driver_by_customer, derived_preferred_driver_ids = _customer_activity_maps(customer_documents)
+    user_lookup = _build_customer_user_lookup(customer_documents, additional_user_ids=derived_preferred_driver_ids)
+
+    enriched_customers: list[dict] = []
+    for customer_document in customer_documents:
+        customer_id = customer_document.get("_id")
+        customer_key = str(customer_id) if isinstance(customer_id, ObjectId) else None
+        customer = _serialize_customer_summary(customer_document, user_lookup=user_lookup)
+        stats = _customer_booking_stats(
+            customer_document,
+            booking_documents=bookings_by_customer.get(customer_key, []) if customer_key else [],
+            ride_documents=rides_by_customer.get(customer_key, []) if customer_key else [],
+            user_lookup=user_lookup,
+            derived_preferred_driver_id=derived_preferred_driver_by_customer.get(customer_key) if customer_key else None,
+        )
+        follow_up = _follow_up_flags(customer_document)
+        customer.update(stats)
+        customer.update(follow_up)
+        customer["profile_summary"] = {
+            "full_name": customer.get("full_name"),
+            "phone_number": customer.get("phone_number"),
+            "occupation": customer.get("occupation"),
+            "position": customer.get("position_title"),
+            "organization": customer.get("organization_name") or customer.get("company_name"),
+            "category": customer.get("customer_category"),
+            "relationship_category": customer.get("relationship_category"),
+            "opportunity_level": customer.get("opportunity_level"),
+            "network_value": customer.get("network_value"),
+            "lead_status": customer.get("lead_status"),
+            "preferred_driver": stats.get("preferred_driver"),
+            "total_rides": stats.get("total_rides"),
+            "last_ride_date": stats.get("last_ride_date"),
+            "upcoming_bookings": stats.get("upcoming_bookings_count"),
+            "completed_bookings": stats.get("completed_bookings_count"),
+            "missed_bookings": stats.get("missed_bookings_count"),
+            "follow_up_date": follow_up.get("active_follow_up_date"),
+        }
+        enriched_customers.append(customer)
+
+    return enriched_customers
+
+
+def list_customer_options(
+    current_user_id: str,
+    current_role: str,
+    *,
+    search_query: str | None = None,
+    limit: int = 50,
+    include_customers: bool = False,
+) -> dict:
+    normalized_search_query = _normalize_text(search_query)
+    normalized_limit = max(1, min(int(limit or 50), 100))
+    cache_key = build_cache_key(
+        "customer_options",
+        current_user_id=current_user_id,
+        current_role=current_role,
+        q=normalized_search_query or "",
+        limit=normalized_limit,
+        include_customers="1" if include_customers else "0",
+    )
     cached = get_ttl_cached(cache_key)
     if cached is not None:
         return cached
@@ -1166,9 +1380,9 @@ def list_customer_options(current_user_id: str, current_role: str) -> dict:
 
     query_started_at = perf_counter()
     drivers = list(
-        users_collection().find(
+        users_read_collection().find(
             driver_filter,
-            {"full_name": 1, "email": 1, "phone": 1, "role": 1, "status": 1, "created_at": 1},
+            {"full_name": 1, "email": 1, "phone": 1, "role": 1, "status": 1},
         ).sort("full_name", ASCENDING)
     )
     log_db_duration("customers.options.drivers", query_started_at)
@@ -1197,8 +1411,49 @@ def list_customer_options(current_user_id: str, current_role: str) -> dict:
     lead_status_items = master_data_groups.get("lead_statuses", [])
     potential_service_items = master_data_groups.get("potential_services", [])
 
+    customers: list[dict] = []
+    if include_customers:
+        customer_query = _customer_scope_query(current_user_id, current_role)
+        if normalized_search_query:
+            escaped = re.escape(normalized_search_query)
+            customer_query = _merge_queries(
+                customer_query,
+                {
+                    "$or": [
+                        {"full_name": {"$regex": escaped, "$options": "i"}},
+                        {"phone_number": {"$regex": escaped, "$options": "i"}},
+                        {"organization_name": {"$regex": escaped, "$options": "i"}},
+                        {"company_name": {"$regex": escaped, "$options": "i"}},
+                        {"residential_area": {"$regex": escaped, "$options": "i"}},
+                        {"work_area": {"$regex": escaped, "$options": "i"}},
+                    ]
+                },
+            )
+        customers_query_started_at = perf_counter()
+        customers = [
+            _serialize_option_customer(customer)
+            for customer in customers_collection().find(
+                customer_query,
+                {
+                    "customer_id": 1,
+                    "full_name": 1,
+                    "phone_number": 1,
+                    "customer_category_id": 1,
+                    "customer_category": 1,
+                    "organization_name": 1,
+                    "company_name": 1,
+                    "residential_area": 1,
+                    "work_area": 1,
+                    "source": 1,
+                    "customer_source": 1,
+                    "status": 1,
+                },
+            ).sort("full_name", ASCENDING).limit(normalized_limit)
+        ]
+        log_db_duration("customers.options.customers", customers_query_started_at)
+
     result = {
-        "drivers": [serialize_user(driver) for driver in drivers],
+        "drivers": [_serialize_option_driver(driver) for driver in drivers],
         "customer_categories": [item["name"] for item in customer_category_items],
         "customer_category_items": customer_category_items,
         "customer_sources": [item["name"] for item in customer_source_items],
@@ -1217,9 +1472,13 @@ def list_customer_options(current_user_id: str, current_role: str) -> dict:
         "source_options": [{"value": key, "label": value} for key, value in SOURCE_OPTIONS.items()],
         "creator_roles": sorted(CREATOR_ROLES),
     }
+    if include_customers:
+        result["customers"] = customers
     current_app.logger.info(
-        "[Flux Customers] options role=%s duration_ms=%.2f",
+        "[Flux Customers] options role=%s include_customers=%s limit=%s duration_ms=%.2f",
         current_role,
+        include_customers,
+        normalized_limit,
         (perf_counter() - request_started_at) * 1000,
     )
     total_duration_ms = (perf_counter() - request_started_at) * 1000
@@ -1233,8 +1492,27 @@ def list_customer_options(current_user_id: str, current_role: str) -> dict:
 
 
 def list_customers(current_user_id: str, current_role: str) -> list[dict]:
-    customers = customers_collection().find(_customer_scope_query(current_user_id, current_role)).sort([("created_at", DESCENDING)])
-    return [_enrich_customer(customer_document) for customer_document in customers]
+    request_started_at = perf_counter()
+    customer_documents = list(
+        customers_collection().find(
+            _customer_scope_query(current_user_id, current_role)
+        ).sort([("created_at", DESCENDING)])
+    )
+    enriched_customers = _enrich_customers(customer_documents)
+    total_duration_ms = (perf_counter() - request_started_at) * 1000
+    current_app.logger.info(
+        "[Flux Customers] list role=%s count=%s duration_ms=%.2f",
+        current_role,
+        len(enriched_customers),
+        total_duration_ms,
+    )
+    if total_duration_ms > 2000:
+        current_app.logger.warning(
+            "SLOW API WARNING endpoint=/api/customers role=%s duration_ms=%.2f",
+            current_role,
+            total_duration_ms,
+        )
+    return enriched_customers
 
 
 def get_customer_by_id(customer_id: str, current_user_id: str, current_role: str) -> dict:

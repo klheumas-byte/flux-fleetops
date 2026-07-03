@@ -27,6 +27,15 @@ def _summary_filters() -> dict:
     }
 
 
+def _options_filters() -> dict:
+    raw_limit = request.args.get("limit", type=int)
+    return {
+        "q": request.args.get("q"),
+        "limit": raw_limit if raw_limit is not None else 50,
+        "include_customers": request.args.get("include_customers", "").strip().lower() in {"1", "true", "yes"},
+    }
+
+
 @customers_bp.get("")
 @role_required("owner", "admin", "driver")
 def get_customers_route():
@@ -43,10 +52,14 @@ def get_customers_route():
 @customers_bp.get("/options")
 @role_required("owner", "admin", "driver")
 def get_customer_options_route():
+    filters = _options_filters()
     return success_response(
         data=list_customer_options(
             get_jwt_identity(),
             get_jwt().get("role"),
+            search_query=filters["q"],
+            limit=filters["limit"],
+            include_customers=filters["include_customers"],
         )
     )
 

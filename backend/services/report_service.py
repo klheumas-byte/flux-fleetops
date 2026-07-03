@@ -223,6 +223,15 @@ def now_utc():
 
 def ensure_report_indexes():
     ensure_indexes_for_collection(
+        collections_collection(),
+        [
+            {"keys": [("status", ASCENDING), ("collection_date", DESCENDING), ("created_at", DESCENDING)]},
+            {"keys": [("driver_id", ASCENDING), ("status", ASCENDING), ("collection_date", DESCENDING)]},
+            {"keys": [("vehicle_id", ASCENDING), ("status", ASCENDING), ("collection_date", DESCENDING)]},
+        ],
+        collection_name="collections_reports",
+    )
+    ensure_indexes_for_collection(
         deposits_collection(),
         [
             {"keys": [("finance_account_snapshot.branch", ASCENDING), ("deposit_date", DESCENDING)]},
@@ -807,12 +816,11 @@ def _build_driver_performance_report(*, current_user_id: str, current_role: str,
         current_role=current_role,
         start_date=filters["date_from"].isoformat() if filters["date_from"] else None,
         end_date=filters["date_to"].isoformat() if filters["date_to"] else None,
+        driver_id=filters["driver_id"],
         vehicle_id=filters["vehicle_id"],
         branch=filters["branch"],
     )
     records = analytics.get("drivers") or []
-    if filters["driver_id"]:
-        records = [record for record in records if (record.get("driver") or {}).get("id") == filters["driver_id"]]
     validation = {
         "total_records": len(records),
         "total_amount": round(sum(_safe_float(record.get("amount_collected")) for record in records), 2),
@@ -885,6 +893,69 @@ def _build_vehicle_performance_report(ride_documents: list[dict], vehicle_docume
             "active_filters": active_filters,
         },
     }
+
+
+def _load_report_driver_options() -> list[dict]:
+    cache_key = "reports:drivers"
+    cached = get_ttl_cached(cache_key)
+    if cached is not None:
+        return cached
+    return set_ttl_cached(
+        cache_key,
+        _fetch_documents(
+            users_collection(),
+            {"role": "driver"},
+            REPORT_DRIVER_PROJECTION,
+            sort_fields=[("full_name", ASCENDING)],
+        ),
+        ttl_seconds=60,
+    )
+
+
+def _load_report_vehicle_options() -> list[dict]:
+    cache_key = "reports:vehicles"
+    cached = get_ttl_cached(cache_key)
+    if cached is not None:
+        return cached
+    return set_ttl_cached(
+        cache_key,
+        _fetch_documents(
+            vehicles_collection(),
+            {},
+            REPORT_VEHICLE_PROJECTION,
+            sort_fields=[("registration_number", ASCENDING)],
+        ),
+        ttl_seconds=60,
+    )
+
+
+def _load_report_filter_options() -> dict:
+    cache_key = "reports:filter_options"
+    cached = get_ttl_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    payload = {
+        "branches": _sorted_distinct_strings(finance_accounts_collection(), "branch"),
+        "creator_roles": _sorted_distinct_strings(customers_collection(), "created_by_role"),
+        "customer_categories": _sorted_distinct_strings(customers_collection(), "customer_category"),
+        "sources": _sorted_distinct_strings(customers_collection(), "source"),
+        "customer_category_items": sorted(
+            [
+                {"id": _id_string(item["_id"]["id"]), "name": item["_id"]["name"]}
+                for item in customers_collection().aggregate(
+                    [
+                        {"$match": {"customer_category_id": {"$ne": None}, "customer_category": {"$ne": None}}},
+                        {"$group": {"_id": {"id": "$customer_category_id", "name": "$customer_category"}}},
+                        {"$sort": {"_id.name": 1}},
+                    ]
+                )
+                if item["_id"].get("id") and item["_id"].get("name")
+            ],
+            key=lambda item: item["name"],
+        ),
+    }
+    return set_ttl_cached(cache_key, payload, ttl_seconds=60)
 
 
 def _filter_economics_dashboard(dashboard: dict, *, vehicle_id: str | None, asset_owner_name: str | None):
@@ -1169,18 +1240,8 @@ def get_finance_reports(
     if cached is not None:
         return cached
 
-    driver_documents = _fetch_documents(
-        users_collection(),
-        {"role": "driver"},
-        REPORT_DRIVER_PROJECTION,
-        sort_fields=[("full_name", ASCENDING)],
-    )
-    vehicle_documents = _fetch_documents(
-        vehicles_collection(),
-        {},
-        REPORT_VEHICLE_PROJECTION,
-        sort_fields=[("registration_number", ASCENDING)],
-    )
+    driver_documents = _load_report_driver_options()
+    vehicle_documents = _load_report_vehicle_options()
     current_user = (
         users_collection().find_one({"_id": ObjectId(current_user_id)})
         if current_user_id and ObjectId.is_valid(current_user_id)
@@ -1199,7 +1260,7 @@ def get_finance_reports(
         }
         for document in vehicle_documents
     }
-    branches = _sorted_distinct_strings(finance_accounts_collection(), "branch")
+    filter_options = _load_report_filter_options()
     active_filters = _active_filters_labels(filters, drivers_by_id=drivers_by_id, vehicles_by_id=vehicles_by_id)
 
     selected_categories = (
@@ -1438,24 +1499,6 @@ def get_finance_reports(
         }
         reports["vehicle_economics"] = vehicle_economics_dashboard
 
-    customer_creator_roles = _sorted_distinct_strings(customers_collection(), "created_by_role")
-    customer_categories = _sorted_distinct_strings(customers_collection(), "customer_category")
-    customer_sources = _sorted_distinct_strings(customers_collection(), "source")
-    customer_category_items = sorted(
-        [
-            {"id": _id_string(item["_id"]["id"]), "name": item["_id"]["name"]}
-            for item in customers_collection().aggregate(
-                [
-                    {"$match": {"customer_category_id": {"$ne": None}, "customer_category": {"$ne": None}}},
-                    {"$group": {"_id": {"id": "$customer_category_id", "name": "$customer_category"}}},
-                    {"$sort": {"_id.name": 1}},
-                ]
-            )
-            if item["_id"].get("id") and item["_id"].get("name")
-        ],
-        key=lambda item: item["name"],
-    )
-
     result = {
         "generated_by": serialize_user(current_user) if current_user else None,
         "generated_at": now_utc().isoformat(),
@@ -1470,11 +1513,11 @@ def get_finance_reports(
                     if (owner_name := _normalize_string(document.get("asset_owner_name")))
                 }
             ),
-            "branches": branches,
-            "creator_roles": customer_creator_roles,
-            "customer_categories": customer_categories,
-            "customer_category_items": customer_category_items,
-            "sources": customer_sources,
+            "branches": filter_options["branches"],
+            "creator_roles": filter_options["creator_roles"],
+            "customer_categories": filter_options["customer_categories"],
+            "customer_category_items": filter_options["customer_category_items"],
+            "sources": filter_options["sources"],
         },
         "reports": reports,
     }

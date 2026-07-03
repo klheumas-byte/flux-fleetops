@@ -216,11 +216,12 @@ def _datetime_in_range(value, start_dt: datetime, end_dt: datetime) -> bool:
     return start_dt <= candidate <= end_dt
 
 
-def _resolve_driver_scope(current_user_id: str, current_role: str) -> list[dict]:
+def _resolve_driver_scope(current_user_id: str, current_role: str, *, driver_id: ObjectId | None = None) -> list[dict]:
     if current_role == "driver":
-        driver = users_collection().find_one(
-            {"_id": _to_object_id(current_user_id, "current_user_id", required=True), "role": "driver"}
-        )
+        current_driver_id = _to_object_id(current_user_id, "current_user_id", required=True)
+        if driver_id and driver_id != current_driver_id:
+            raise ApiError("You do not have permission to view this driver analytics record.", status_code=403)
+        driver = users_collection().find_one({"_id": current_driver_id, "role": "driver"})
         if not driver:
             raise ApiError("Driver not found.", status_code=404)
         return [driver]
@@ -228,7 +229,10 @@ def _resolve_driver_scope(current_user_id: str, current_role: str) -> list[dict]
     if current_role not in {"owner", "admin"}:
         raise ApiError("You do not have permission to view driver analytics.", status_code=403)
 
-    return list(users_collection().find({"role": "driver"}).sort("full_name", 1))
+    query = {"role": "driver"}
+    if driver_id:
+        query["_id"] = driver_id
+    return list(users_collection().find(query).sort("full_name", 1))
 
 
 def _get_admin_vehicle_ids(admin_object_id: ObjectId) -> set[ObjectId]:
@@ -595,6 +599,7 @@ def list_driver_analytics(
     current_role: str,
     start_date: str | None = None,
     end_date: str | None = None,
+    driver_id: str | None = None,
     vehicle_id: str | None = None,
     admin_id: str | None = None,
     branch: str | None = None,
@@ -606,7 +611,8 @@ def list_driver_analytics(
         admin_id=admin_id,
         branch=branch,
     )
-    drivers = _resolve_driver_scope(current_user_id, current_role)
+    selected_driver_id = _to_object_id(driver_id, "driver_id", required=False) if driver_id else None
+    drivers = _resolve_driver_scope(current_user_id, current_role, driver_id=selected_driver_id)
     global_avg_cost = _global_average_cost_per_km(drivers, filters)
     records = [
         _serialize_driver_analytics(

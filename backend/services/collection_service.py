@@ -3,6 +3,7 @@ from math import ceil
 from time import perf_counter
 
 from bson import ObjectId
+from flask import current_app
 from pymongo import ASCENDING, DESCENDING
 
 from extensions import get_collection
@@ -25,6 +26,44 @@ from utils.performance import log_db_duration
 
 ALLOWED_COLLECTION_STATUSES = {"pending", "submitted", "received", "approved", "rejected", "reversed"}
 ALLOWED_PAYMENT_METHODS = {"cash", "momo", "bank", "other"}
+COLLECTION_LIST_PROJECTION = {
+    "driver_id": 1,
+    "vehicle_id": 1,
+    "assignment_id": 1,
+    "amount": 1,
+    "submitted_amount": 1,
+    "admin_received_amount": 1,
+    "collection_date": 1,
+    "payment_method": 1,
+    "reference_number": 1,
+    "notes": 1,
+    "driver_note": 1,
+    "admin_approval_note": 1,
+    "status": 1,
+    "cycle_key": 1,
+    "week_start": 1,
+    "week_end": 1,
+    "payment_deadline": 1,
+    "rejection_reason": 1,
+    "is_late": 1,
+    "received_by_admin_id": 1,
+    "approved_by_admin_id": 1,
+    "created_at": 1,
+    "updated_at": 1,
+}
+USER_SUMMARY_PROJECTION = {"full_name": 1, "email": 1, "phone": 1, "role": 1, "status": 1}
+VEHICLE_SUMMARY_PROJECTION = {"registration_number": 1, "make": 1, "model": 1, "status": 1}
+ASSIGNMENT_SUMMARY_PROJECTION = {
+    "driver_id": 1,
+    "vehicle_id": 1,
+    "status": 1,
+    "weekly_target": 1,
+    "daily_target": 1,
+    "start_date": 1,
+    "end_date": 1,
+    "created_at": 1,
+    "updated_at": 1,
+}
 
 
 def now_utc():
@@ -67,6 +106,16 @@ def ensure_collection_indexes():
             {"keys": [("vehicle_id", ASCENDING), ("status", ASCENDING), ("collection_date", DESCENDING)]},
             {"keys": [("driver_id", ASCENDING), ("status", ASCENDING), ("collection_date", DESCENDING)]},
             {"keys": [("assignment_id", ASCENDING), ("status", ASCENDING), ("created_at", DESCENDING)]},
+            {"keys": [("status", ASCENDING), ("collection_date", DESCENDING), ("created_at", DESCENDING)]},
+            {
+                "keys": [
+                    ("driver_id", ASCENDING),
+                    ("assignment_id", ASCENDING),
+                    ("cycle_key", ASCENDING),
+                    ("status", ASCENDING),
+                    ("collection_date", DESCENDING),
+                ]
+            },
             {"keys": [("cycle_key", ASCENDING)]},
             {"keys": [("week_start", ASCENDING)]},
             {"keys": [("payment_deadline", ASCENDING)]},
@@ -133,13 +182,77 @@ def _get_assignment_document(assignment_id):
     return assignment
 
 
-def _enrich_collection(collection_document: dict) -> dict:
+def _build_document_lookup(collection, ids: set[ObjectId], projection: dict) -> dict[ObjectId, dict]:
+    if not ids:
+        return {}
+    return {
+        document["_id"]: document
+        for document in collection.find({"_id": {"$in": list(ids)}}, projection)
+    }
+
+
+def _load_collection_related_maps(collection_documents: list[dict]) -> dict[str, dict[ObjectId, dict]]:
+    user_ids = {
+        value
+        for document in collection_documents
+        for value in (
+            document.get("driver_id"),
+            document.get("received_by_admin_id"),
+            document.get("approved_by_admin_id"),
+        )
+        if isinstance(value, ObjectId)
+    }
+    vehicle_ids = {
+        document.get("vehicle_id")
+        for document in collection_documents
+        if isinstance(document.get("vehicle_id"), ObjectId)
+    }
+    assignment_ids = {
+        document.get("assignment_id")
+        for document in collection_documents
+        if isinstance(document.get("assignment_id"), ObjectId)
+    }
+    return {
+        "users": _build_document_lookup(users_collection(), user_ids, USER_SUMMARY_PROJECTION),
+        "vehicles": _build_document_lookup(vehicles_collection(), vehicle_ids, VEHICLE_SUMMARY_PROJECTION),
+        "assignments": _build_document_lookup(assignments_collection(), assignment_ids, ASSIGNMENT_SUMMARY_PROJECTION),
+    }
+
+
+def _enrich_collection(
+    collection_document: dict,
+    *,
+    user_lookup: dict[ObjectId, dict] | None = None,
+    vehicle_lookup: dict[ObjectId, dict] | None = None,
+    assignment_lookup: dict[ObjectId, dict] | None = None,
+) -> dict:
     collection = serialize_collection(collection_document)
-    driver = users_collection().find_one({"_id": collection_document.get("driver_id")})
-    vehicle = vehicles_collection().find_one({"_id": collection_document.get("vehicle_id")})
-    assignment = assignments_collection().find_one({"_id": collection_document.get("assignment_id")})
-    received_by = users_collection().find_one({"_id": collection_document.get("received_by_admin_id")})
-    approved_by = users_collection().find_one({"_id": collection_document.get("approved_by_admin_id")})
+    driver = (user_lookup or {}).get(collection_document.get("driver_id")) or users_collection().find_one(
+        {"_id": collection_document.get("driver_id")},
+        USER_SUMMARY_PROJECTION,
+    )
+    vehicle = (vehicle_lookup or {}).get(collection_document.get("vehicle_id")) or vehicles_collection().find_one(
+        {"_id": collection_document.get("vehicle_id")},
+        VEHICLE_SUMMARY_PROJECTION,
+    )
+    assignment = (assignment_lookup or {}).get(
+        collection_document.get("assignment_id")
+    ) or assignments_collection().find_one(
+        {"_id": collection_document.get("assignment_id")},
+        ASSIGNMENT_SUMMARY_PROJECTION,
+    )
+    received_by = (user_lookup or {}).get(
+        collection_document.get("received_by_admin_id")
+    ) or users_collection().find_one(
+        {"_id": collection_document.get("received_by_admin_id")},
+        USER_SUMMARY_PROJECTION,
+    )
+    approved_by = (user_lookup or {}).get(
+        collection_document.get("approved_by_admin_id")
+    ) or users_collection().find_one(
+        {"_id": collection_document.get("approved_by_admin_id")},
+        USER_SUMMARY_PROJECTION,
+    )
 
     collection["driver"] = serialize_user(driver) if driver else None
     collection["vehicle"] = serialize_vehicle(vehicle) if vehicle else None
@@ -166,6 +279,28 @@ def _enrich_collection(collection_document: dict) -> dict:
     collection["driver_note"] = collection_document.get("driver_note") or collection_document.get("notes")
     collection["admin_approval_note"] = collection_document.get("admin_approval_note")
     return collection
+
+
+def _batch_enrich_collections(collection_documents: list[dict]) -> list[dict]:
+    if not collection_documents:
+        return []
+    related_maps = _load_collection_related_maps(collection_documents)
+    return [
+        _enrich_collection(
+            collection_document,
+            user_lookup=related_maps["users"],
+            vehicle_lookup=related_maps["vehicles"],
+            assignment_lookup=related_maps["assignments"],
+        )
+        for collection_document in collection_documents
+    ]
+
+
+def _log_slow_collection_section(label: str, started_at: float, *, threshold_ms: float = 1000) -> float:
+    duration_ms = (perf_counter() - started_at) * 1000
+    if duration_ms >= threshold_ms:
+        current_app.logger.warning("[Flux Collections] slow_section=%s duration_ms=%.2f", label, duration_ms)
+    return duration_ms
 
 
 def _create_wallet_credit_for_collection(collection_document: dict, *, current_user_id: str):
@@ -247,6 +382,7 @@ def list_collections(
     collection_date: str | None = None,
     search: str | None = None,
 ) -> dict:
+    request_started_at = perf_counter()
     query = {}
     if status and status != "all":
         if status == "pending":
@@ -307,39 +443,19 @@ def list_collections(
         collections_collection()
         .find(
             query,
-            {
-                "driver_id": 1,
-                "vehicle_id": 1,
-                "assignment_id": 1,
-                "amount": 1,
-                "submitted_amount": 1,
-                "admin_received_amount": 1,
-                "collection_date": 1,
-                "payment_method": 1,
-                "reference_number": 1,
-                "notes": 1,
-                "driver_note": 1,
-                "admin_approval_note": 1,
-                "status": 1,
-                "cycle_key": 1,
-                "week_start": 1,
-                "week_end": 1,
-                "payment_deadline": 1,
-                "rejection_reason": 1,
-                "is_late": 1,
-                "received_by_admin_id": 1,
-                "approved_by_admin_id": 1,
-                "created_at": 1,
-            },
+            COLLECTION_LIST_PROJECTION,
         )
         .sort([("collection_date", DESCENDING), ("created_at", DESCENDING)])
         .skip(skip)
         .limit(page_size)
     )
     log_db_duration("collections.find_page", find_started_at)
+    enrich_started_at = perf_counter()
+    enriched_collections = _batch_enrich_collections(documents)
+    _log_slow_collection_section("list_collections.enrich_page", enrich_started_at, threshold_ms=250)
 
-    return {
-        "collections": [_enrich_collection(collection_document) for collection_document in documents],
+    response = {
+        "collections": enriched_collections,
         "pagination": {
             "page": page,
             "page_size": page_size,
@@ -355,11 +471,13 @@ def list_collections(
             "reversed_count": int(summary.get("reversed_count") or 0),
         },
     }
+    _log_slow_collection_section("list_collections.total", request_started_at)
+    return response
 
 
 def get_collection_by_id(collection_id: str) -> dict:
     collection_object_id = _to_object_id(collection_id, "collection_id")
-    collection_document = collections_collection().find_one({"_id": collection_object_id})
+    collection_document = collections_collection().find_one({"_id": collection_object_id}, COLLECTION_LIST_PROJECTION)
     if not collection_document:
         raise ApiError("Collection not found.", status_code=404)
     return _enrich_collection(collection_document)
@@ -560,18 +678,35 @@ def update_collection_status(
 
 
 def list_pending_payment_submissions() -> list[dict]:
-    submissions = collections_collection().find(
-        {"status": {"$in": list(PENDING_PAYMENT_STATUSES)}}
-    ).sort([("collection_date", DESCENDING), ("created_at", DESCENDING)])
-    return [_enrich_collection(collection_document) for collection_document in submissions]
+    submissions = list(
+        collections_collection()
+        .find({"status": {"$in": list(PENDING_PAYMENT_STATUSES)}}, COLLECTION_LIST_PROJECTION)
+        .sort([("collection_date", DESCENDING), ("created_at", DESCENDING)])
+    )
+    return _batch_enrich_collections(submissions)
 
 
 def list_driver_weekly_statuses() -> list[dict]:
-    assignments = assignments_collection().find({"status": {"$in": ["active", "suspended"]}})
+    assignments = list(
+        assignments_collection().find(
+            {"status": {"$in": ["active", "suspended"]}},
+            ASSIGNMENT_SUMMARY_PROJECTION,
+        )
+    )
+    driver_lookup = _build_document_lookup(
+        users_collection(),
+        {assignment.get("driver_id") for assignment in assignments if isinstance(assignment.get("driver_id"), ObjectId)},
+        USER_SUMMARY_PROJECTION,
+    )
+    vehicle_lookup = _build_document_lookup(
+        vehicles_collection(),
+        {assignment.get("vehicle_id") for assignment in assignments if isinstance(assignment.get("vehicle_id"), ObjectId)},
+        VEHICLE_SUMMARY_PROJECTION,
+    )
     weekly_statuses = []
     for assignment in assignments:
-        driver = users_collection().find_one({"_id": assignment.get("driver_id")})
-        vehicle = vehicles_collection().find_one({"_id": assignment.get("vehicle_id")})
+        driver = driver_lookup.get(assignment.get("driver_id"))
+        vehicle = vehicle_lookup.get(assignment.get("vehicle_id"))
         current_cycle = get_current_cycle_for_assignment(assignment)
         weekly_statuses.append(
             {
@@ -593,16 +728,32 @@ def list_driver_weekly_statuses() -> list[dict]:
 
 
 def list_collection_options() -> dict:
-    assignments = assignments_collection().find(
-        {"status": {"$in": ["active", "suspended"]}}
-    ).sort("created_at", DESCENDING)
-    admins = users_collection().find({"role": {"$in": ["owner", "admin"]}}).sort("full_name", ASCENDING)
+    assignments = list(
+        assignments_collection()
+        .find({"status": {"$in": ["active", "suspended"]}}, ASSIGNMENT_SUMMARY_PROJECTION)
+        .sort("created_at", DESCENDING)
+    )
+    admins = list(
+        users_collection()
+        .find({"role": {"$in": ["owner", "admin"]}}, USER_SUMMARY_PROJECTION)
+        .sort("full_name", ASCENDING)
+    )
+    driver_lookup = _build_document_lookup(
+        users_collection(),
+        {assignment.get("driver_id") for assignment in assignments if isinstance(assignment.get("driver_id"), ObjectId)},
+        USER_SUMMARY_PROJECTION,
+    )
+    vehicle_lookup = _build_document_lookup(
+        vehicles_collection(),
+        {assignment.get("vehicle_id") for assignment in assignments if isinstance(assignment.get("vehicle_id"), ObjectId)},
+        VEHICLE_SUMMARY_PROJECTION,
+    )
 
     assignment_options = []
     for assignment in assignments:
         option = serialize_assignment(assignment)
-        driver = users_collection().find_one({"_id": assignment.get("driver_id")})
-        vehicle = vehicles_collection().find_one({"_id": assignment.get("vehicle_id")})
+        driver = driver_lookup.get(assignment.get("driver_id"))
+        vehicle = vehicle_lookup.get(assignment.get("vehicle_id"))
         option["driver"] = serialize_user(driver) if driver else None
         option["vehicle"] = serialize_vehicle(vehicle) if vehicle else None
         assignment_options.append(option)
@@ -624,6 +775,7 @@ def _parse_collection_date(value: str | None) -> datetime | None:
 
 
 def get_driver_dashboard_summary(driver_user_id: str) -> dict:
+    request_started_at = perf_counter()
     driver = _get_driver_document(driver_user_id)
 
     active_assignment = assignments_collection().find_one(
@@ -653,42 +805,64 @@ def get_driver_dashboard_summary(driver_user_id: str) -> dict:
 
     current_cycle = get_current_cycle_for_assignment(active_assignment)
     week_window = get_weekly_cycle_window()
-    week_start = week_window["week_start_dt"]
-    week_end = week_window["week_end_dt"] + timedelta(seconds=1)
+    week_start = week_window["week_start_dt"].date().isoformat()
+    week_end = week_window["week_end_dt"].date().isoformat()
     today_iso = now_utc().date().isoformat()
 
-    matching_collections = []
-    for collection_document in collections_collection().find(
-        {
-            "driver_id": driver["_id"],
-            "assignment_id": active_assignment["_id"],
-            "cycle_key": current_cycle["cycle_key"],
-            "status": {"$in": ["submitted", "received", "approved"]},
-        }
-    ).sort([("collection_date", DESCENDING), ("created_at", DESCENDING)]):
-        collection_date = _parse_collection_date(collection_document.get("collection_date"))
-        if not collection_date:
-            continue
-        collection_date = collection_date.replace(tzinfo=timezone.utc) if collection_date.tzinfo is None else collection_date.astimezone(timezone.utc)
-        if week_start <= collection_date < week_end:
-            matching_collections.append(collection_document)
-
-    submitted_total = round(
-        sum(
-            float(collection.get("amount") or 0)
-            for collection in matching_collections
-            if (collection.get("status") or "").strip().lower() in {"submitted", "received", "approved"}
-        ),
-        2,
+    summary_started_at = perf_counter()
+    collection_summary = list(
+        collections_collection().aggregate(
+            [
+                {
+                    "$match": {
+                        "driver_id": driver["_id"],
+                        "assignment_id": active_assignment["_id"],
+                        "cycle_key": current_cycle["cycle_key"],
+                        "status": {"$in": ["submitted", "received", "approved"]},
+                        "collection_date": {"$gte": week_start, "$lte": week_end},
+                    }
+                },
+                {
+                    "$facet": {
+                        "totals": [
+                            {
+                                "$group": {
+                                    "_id": None,
+                                    "submitted_total": {"$sum": {"$ifNull": ["$amount", 0]}},
+                                    "approved_total": {
+                                        "$sum": {
+                                            "$cond": [{"$eq": ["$status", "approved"]}, {"$ifNull": ["$amount", 0]}, 0]
+                                        }
+                                    },
+                                    "total_collections": {"$sum": 1},
+                                    "today_total": {
+                                        "$sum": {
+                                            "$cond": [
+                                                {"$eq": ["$collection_date", today_iso]},
+                                                {"$ifNull": ["$amount", 0]},
+                                                0,
+                                            ]
+                                        }
+                                    },
+                                }
+                            }
+                        ],
+                        "latest": [
+                            {"$sort": {"collection_date": -1, "created_at": -1}},
+                            {"$limit": 5},
+                            {"$project": COLLECTION_LIST_PROJECTION},
+                        ],
+                    }
+                },
+            ]
+        )
     )
-    amount_paid_this_week = round(
-        sum(
-            float(collection.get("amount") or 0)
-            for collection in matching_collections
-            if (collection.get("status") or "").strip().lower() == "approved"
-        ),
-        2,
-    )
+    log_db_duration("driver_dashboard_summary.collections_aggregate", summary_started_at)
+    summary_payload = collection_summary[0] if collection_summary else {}
+    totals = (summary_payload.get("totals") or [{}])[0]
+    latest_collection_documents = summary_payload.get("latest") or []
+    submitted_total = round(float(totals.get("submitted_total") or 0), 2)
+    amount_paid_this_week = round(float(totals.get("approved_total") or 0), 2)
     weekly_target = float(active_assignment.get("weekly_target") or 0)
     daily_target = float(active_assignment.get("daily_target") or 0)
     outstanding_balance = round(max(weekly_target - amount_paid_this_week, 0), 2)
@@ -696,19 +870,10 @@ def get_driver_dashboard_summary(driver_user_id: str) -> dict:
         (amount_paid_this_week / weekly_target * 100) if weekly_target > 0 else 0,
         2,
     )
-    latest_collections = [
-        serialize_collection(collection_document) for collection_document in matching_collections[:5]
-    ]
-    today_collection_total = round(
-        sum(
-            float(collection.get("amount") or 0)
-            for collection in matching_collections
-            if collection.get("collection_date") == today_iso
-        ),
-        2,
-    )
+    latest_collections = [serialize_collection(collection_document) for collection_document in latest_collection_documents]
+    today_collection_total = round(float(totals.get("today_total") or 0), 2)
 
-    return {
+    summary = {
         "driver_id": str(driver["_id"]),
         "active_assignment": serialized_assignment,
         "vehicle": serialized_vehicle,
@@ -720,7 +885,9 @@ def get_driver_dashboard_summary(driver_user_id: str) -> dict:
         "approved_total_this_week": amount_paid_this_week,
         "outstanding_balance": outstanding_balance,
         "achievement_percentage": achievement_percentage,
-        "total_collections_this_week": len(matching_collections),
+        "total_collections_this_week": int(totals.get("total_collections") or 0),
         "latest_collections": latest_collections,
         "today_collection_total": today_collection_total,
     }
+    _log_slow_collection_section("driver_dashboard_summary.total", request_started_at, threshold_ms=800)
+    return summary

@@ -91,6 +91,14 @@ def ensure_dashboard_indexes():
         ],
         collection_name="vehicle_compliance_records_dashboard",
     )
+    ensure_indexes_for_collection(
+        maintenance_jobs_collection(),
+        [
+            {"keys": [("created_at", DESCENDING)]},
+            {"keys": [("start_date", DESCENDING), ("vehicle_id", ASCENDING)]},
+        ],
+        collection_name="maintenance_jobs_dashboard",
+    )
 
 
 def _safe_float(value) -> float:
@@ -505,6 +513,66 @@ def _dashboard_compliance_summary_rows(today_iso: str):
                                     "compliance_item_name": 1,
                                     "expiry_date": 1,
                                     "status": 1,
+                                }
+                            },
+                        ],
+                    }
+                }
+            ]
+        )
+    )
+    return set_ttl_cached(cache_key, rows, ttl_seconds=60)
+
+
+def _dashboard_maintenance_summary_rows(week_window: dict):
+    cache_key = build_cache_key(
+        "dashboard:maintenance_summary_rows",
+        week_start=week_window.get("week_start"),
+        week_end=week_window.get("week_end"),
+    )
+    cached = get_ttl_cached(cache_key)
+    if cached is not None:
+        return cached
+    rows = list(
+        maintenance_jobs_collection().aggregate(
+            [
+                {
+                    "$facet": {
+                        "recent": [
+                            {"$sort": {"created_at": -1}},
+                            {"$limit": 40},
+                            {
+                                "$project": {
+                                    "vehicle_id": 1,
+                                    "title": 1,
+                                    "maintenance_type": 1,
+                                    "priority": 1,
+                                    "status": 1,
+                                    "target_completion_date": 1,
+                                    "current_stage": 1,
+                                    "actual_cost": 1,
+                                    "estimated_cost": 1,
+                                    "start_date": 1,
+                                    "created_at": 1,
+                                    "updated_at": 1,
+                                }
+                            },
+                        ],
+                        "weekly_totals": [
+                            {
+                                "$match": {
+                                    "start_date": {
+                                        "$gte": week_window["week_start_dt"].date().isoformat(),
+                                        "$lte": week_window["week_end_dt"].date().isoformat(),
+                                    }
+                                }
+                            },
+                            {
+                                "$group": {
+                                    "_id": None,
+                                    "weekly_maintenance_cost": {
+                                        "$sum": {"$ifNull": ["$actual_cost", {"$ifNull": ["$estimated_cost", 0]}]}
+                                    }
                                 }
                             },
                         ],
@@ -1413,35 +1481,11 @@ def get_dashboard_summary_fast(*, current_role: str) -> dict:
         if record.get("vehicle_id"):
             vehicle_ids.add(record.get("vehicle_id"))
 
-    maintenance_payload = run_section(
-        "maintenance summary",
-        lambda: list(
-            maintenance_jobs_collection().find(
-                {},
-                {
-                    "vehicle_id": 1,
-                    "title": 1,
-                    "maintenance_type": 1,
-                    "priority": 1,
-                    "status": 1,
-                    "target_completion_date": 1,
-                    "current_stage": 1,
-                    "actual_cost": 1,
-                    "estimated_cost": 1,
-                    "start_date": 1,
-                    "created_at": 1,
-                    "updated_at": 1,
-                },
-            ).sort([("created_at", -1)]).limit(40)
-        ),
-    ) or []
-    maintenance_jobs = maintenance_payload
+    maintenance_payload = run_section("maintenance summary", lambda: _dashboard_maintenance_summary_rows(week_window)) or []
+    maintenance_summary = maintenance_payload[0] if maintenance_payload else {}
+    maintenance_jobs = maintenance_summary.get("recent") or []
     revenue_context["weekly_maintenance_cost"] = round(
-        sum(
-            _safe_float(job.get("actual_cost") or job.get("estimated_cost"))
-            for job in maintenance_jobs
-            if (_parse_iso_date(job.get("start_date")) or today) >= week_start.date()
-        ),
+        _safe_float(((maintenance_summary.get("weekly_totals") or [{}])[0]).get("weekly_maintenance_cost")),
         2,
     )
     for job in maintenance_jobs:

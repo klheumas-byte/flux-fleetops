@@ -17,6 +17,7 @@ from services.system_settings_service import (
 )
 from utils.api_error import ApiError
 from utils.mongo_indexes import ensure_indexes_for_collection
+from utils.performance import build_cache_key, get_ttl_cached, set_ttl_cached
 
 
 ALLOWED_VEHICLE_TYPES = {"saloon", "suv", "pickup", "van", "truck", "motorcycle"}
@@ -1700,6 +1701,11 @@ def create_vehicle_cost_item(vehicle_id: str, payload: dict, *, current_user_id:
 
 
 def get_vehicle_economics_dashboard(*, current_role: str) -> dict:
+    cache_key = build_cache_key("vehicle_economics_dashboard", current_role=current_role)
+    cached = get_ttl_cached(cache_key)
+    if cached is not None:
+        return cached
+
     vehicles = list(vehicles_collection().find({}))
     serialized_vehicles = []
     for vehicle in vehicles:
@@ -1771,23 +1777,29 @@ def get_vehicle_economics_dashboard(*, current_role: str) -> dict:
         grouped_portfolio.append(entry)
     grouped_portfolio.sort(key=lambda item: item["asset_owner_name"])
 
-    return {
-        "operating_fleet_name": DEFAULT_OPERATING_FLEET_NAME,
-        "total_managed_fleet": len(serialized_vehicles),
-        "total_active_vehicles": len(
-            [vehicle for vehicle in serialized_vehicles if vehicle.get("status") in {"available", "assigned", "active"}]
-        ),
-        "total_managed_fleet_value": total_managed_fleet_value,
-        "total_fleet_investment": total_fleet_investment,
-        "total_recovered": total_recovered,
-        "remaining_recovery_balance": remaining_recovery_balance,
-        "net_fleet_profit": net_fleet_profit,
-        "fleet_roi_percent": round((net_fleet_profit / total_fleet_investment) * 100, 2) if total_fleet_investment > 0 else 0.0,
-        "vehicles_recovering": len(recovering),
-        "vehicles_fully_recovered": len(recovered),
-        "vehicles_profit_generating": len(with_profit),
-        "most_profitable_vehicle": profitability_ranked[0] if profitability_ranked else None,
-        "least_profitable_vehicle": profitability_ranked[-1] if profitability_ranked else None,
-        "portfolio_breakdown": grouped_portfolio,
-        "vehicles": serialized_vehicles,
-    }
+    return set_ttl_cached(
+        cache_key,
+        {
+            "operating_fleet_name": DEFAULT_OPERATING_FLEET_NAME,
+            "total_managed_fleet": len(serialized_vehicles),
+            "total_active_vehicles": len(
+                [vehicle for vehicle in serialized_vehicles if vehicle.get("status") in {"available", "assigned", "active"}]
+            ),
+            "total_managed_fleet_value": total_managed_fleet_value,
+            "total_fleet_investment": total_fleet_investment,
+            "total_recovered": total_recovered,
+            "remaining_recovery_balance": remaining_recovery_balance,
+            "net_fleet_profit": net_fleet_profit,
+            "fleet_roi_percent": round((net_fleet_profit / total_fleet_investment) * 100, 2)
+            if total_fleet_investment > 0
+            else 0.0,
+            "vehicles_recovering": len(recovering),
+            "vehicles_fully_recovered": len(recovered),
+            "vehicles_profit_generating": len(with_profit),
+            "most_profitable_vehicle": profitability_ranked[0] if profitability_ranked else None,
+            "least_profitable_vehicle": profitability_ranked[-1] if profitability_ranked else None,
+            "portfolio_breakdown": grouped_portfolio,
+            "vehicles": serialized_vehicles,
+        },
+        ttl_seconds=30,
+    )

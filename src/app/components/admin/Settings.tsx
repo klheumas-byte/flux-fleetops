@@ -76,6 +76,7 @@ const typeLabels: Record<string, string> = {
   relationship_roles: 'Relationship Roles',
   opportunity_levels: 'Opportunity Levels',
   opportunity_stages: 'Opportunity Stages',
+  opportunity_types: 'Opportunity Types',
   network_values: 'Network Values',
   influence_levels: 'Influence Levels',
   ride_types: 'Ride Types',

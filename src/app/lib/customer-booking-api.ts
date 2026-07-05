@@ -278,6 +278,7 @@ export interface CustomerOptionsResponse {
   organization_types: string[];
   organization_type_items: MasterDataOption[];
   opportunity_stage_items: MasterDataOption[];
+  opportunity_type_items: MasterDataOption[];
   position_title_items: MasterDataOption[];
   relationship_category_items: MasterDataOption[];
   relationship_role_items: MasterDataOption[];
@@ -423,6 +424,7 @@ function normalizeCustomerOptions(value: unknown): CustomerOptionsResponse {
     organization_types: [],
     organization_type_items: [],
     opportunity_stage_items: [],
+    opportunity_type_items: [],
     position_title_items: [],
     relationship_category_items: [],
     relationship_role_items: [],
@@ -439,6 +441,7 @@ function normalizeCustomerOptions(value: unknown): CustomerOptionsResponse {
 
   const legacyPositionItems = ensureArray<MasterDataOption>(normalized.position_or_occupation_items);
   const occupationItems = ensureArray<MasterDataOption>(normalized.occupation_items);
+  const opportunityTypeItems = ensureArray<MasterDataOption>(normalized.opportunity_type_items);
   const positionTitleItems = ensureArray<MasterDataOption>(normalized.position_title_items);
 
   return {
@@ -456,6 +459,7 @@ function normalizeCustomerOptions(value: unknown): CustomerOptionsResponse {
     organization_types: ensureArray<string>(normalized.organization_types),
     organization_type_items: ensureArray<MasterDataOption>(normalized.organization_type_items),
     opportunity_stage_items: ensureArray<MasterDataOption>(normalized.opportunity_stage_items),
+    opportunity_type_items: opportunityTypeItems.length ? opportunityTypeItems : ensureArray<MasterDataOption>(normalized.potential_service_items),
     position_title_items: positionTitleItems.length ? positionTitleItems : legacyPositionItems,
     relationship_category_items: ensureArray<MasterDataOption>(normalized.relationship_category_items),
     relationship_role_items: ensureArray<MasterDataOption>(normalized.relationship_role_items),

@@ -41,6 +41,7 @@ def register_blueprints(app: Flask) -> None:
     app.register_blueprint(collections_bp, url_prefix="/api/collections")
     app.register_blueprint(company_funds_bp, url_prefix="/api/company-funds")
     app.register_blueprint(customers_bp, url_prefix="/api/customers")
+    app.register_blueprint(customers_bp, url_prefix="/customers", name="customers_legacy")
     app.register_blueprint(dashboard_bp, url_prefix="/api/dashboard")
     app.register_blueprint(deposits_bp, url_prefix="/api/deposits")
     app.register_blueprint(driver_portal_bp, url_prefix="/api/driver")

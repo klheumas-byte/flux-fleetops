@@ -132,6 +132,10 @@ function firstOptionValue(options: SearchableSelectOption[]): string {
   return options[0]?.value || '';
 }
 
+function preferredOptionValue(options: SearchableSelectOption[], preferredLabel: string): string {
+  return options.find((option) => option.label === preferredLabel)?.value || firstOptionValue(options);
+}
+
 function formatOptionalCount(value?: number | null) {
   return typeof value === 'number' ? String(value) : '-';
 }
@@ -906,6 +910,7 @@ function Modal({
             <p className="mt-1 text-sm text-gray-500">{subtitle}</p>
           </div>
           <button
+            type="button"
             onClick={onClose}
             className="rounded-lg px-3 py-2 text-sm font-medium text-gray-500 hover:bg-gray-100"
           >
@@ -1032,6 +1037,10 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
   const [isBookingDataLoading, setIsBookingDataLoading] = useState(true);
   const [pageError, setPageError] = useState('');
   const [pageNotice, setPageNotice] = useState('');
+  const [loadedOpportunitiesCustomerId, setLoadedOpportunitiesCustomerId] = useState<string | null>(null);
+  const [loadedContactsCustomerId, setLoadedContactsCustomerId] = useState<string | null>(null);
+  const [opportunitiesLoadError, setOpportunitiesLoadError] = useState('');
+  const [contactsLoadError, setContactsLoadError] = useState('');
   const [bookingLoadError, setBookingLoadError] = useState('');
   const [duplicateCustomer, setDuplicateCustomer] = useState<CustomerRecord | null>(null);
   const [customerFormError, setCustomerFormError] = useState('');
@@ -1167,6 +1176,10 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
     setNewNote('');
     setOpportunities([]);
     setContacts([]);
+    setLoadedOpportunitiesCustomerId(null);
+    setLoadedContactsCustomerId(null);
+    setOpportunitiesLoadError('');
+    setContactsLoadError('');
     setCustomerNotes([]);
     setCustomerTimeline([]);
     void loadCustomerProfile(selectedCustomerId).catch((error) => {
@@ -1187,14 +1200,14 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
         setPageError(getErrorMessage(error, 'Unable to load customer setup options right now.'));
       });
     }
-    if (activeProfileTab === 'opportunities' && !opportunities.length && !isLoadingOpportunities) {
+    if (activeProfileTab === 'opportunities' && loadedOpportunitiesCustomerId !== selectedCustomerId && !isLoadingOpportunities) {
       void loadCustomerOpportunities(selectedCustomerId).catch((error) => {
-        setPageError(getErrorMessage(error, 'Unable to load customer opportunities right now.'));
+        setOpportunitiesLoadError(getErrorMessage(error, 'Unable to load customer opportunities right now.'));
       });
     }
-    if (activeProfileTab === 'contacts' && !contacts.length && !isLoadingContacts) {
+    if (activeProfileTab === 'contacts' && loadedContactsCustomerId !== selectedCustomerId && !isLoadingContacts) {
       void loadCustomerContacts(selectedCustomerId).catch((error) => {
-        setPageError(getErrorMessage(error, 'Unable to load customer contacts right now.'));
+        setContactsLoadError(getErrorMessage(error, 'Unable to load customer contacts right now.'));
       });
     }
     if (activeProfileTab === 'notes' && !customerTimeline.length && !isLoadingNotes) {
@@ -1202,7 +1215,23 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
         setPageError(getErrorMessage(error, 'Unable to load customer notes right now.'));
       });
     }
-  }, [activeProfileTab, selectedCustomerId, opportunities.length, contacts.length, customerTimeline.length, isLoadingOpportunities, isLoadingContacts, isLoadingNotes, customerOptions, isLoadingCustomerOptions]);
+  }, [activeProfileTab, selectedCustomerId, loadedOpportunitiesCustomerId, loadedContactsCustomerId, customerTimeline.length, isLoadingOpportunities, isLoadingContacts, isLoadingNotes, customerOptions, isLoadingCustomerOptions]);
+
+  useEffect(() => {
+    if (!showCustomerModal || !editingCustomer) {
+      return;
+    }
+    if (loadedOpportunitiesCustomerId !== editingCustomer.id && !isLoadingOpportunities) {
+      void loadCustomerOpportunities(editingCustomer.id).catch((error) => {
+        setOpportunitiesLoadError(getErrorMessage(error, 'Unable to load customer opportunities right now.'));
+      });
+    }
+    if (loadedContactsCustomerId !== editingCustomer.id && !isLoadingContacts) {
+      void loadCustomerContacts(editingCustomer.id).catch((error) => {
+        setContactsLoadError(getErrorMessage(error, 'Unable to load customer contacts right now.'));
+      });
+    }
+  }, [showCustomerModal, editingCustomer, loadedOpportunitiesCustomerId, loadedContactsCustomerId, isLoadingOpportunities, isLoadingContacts]);
 
   const ensureCustomerOptionsLoaded = async (includeDrivers = false) => {
     if (customerOptions && (!includeDrivers || (customerOptions.drivers || []).length > 0)) {
@@ -1300,8 +1329,14 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
 
   const loadCustomerOpportunities = async (customerId: string) => {
     setIsLoadingOpportunities(true);
+    setOpportunitiesLoadError('');
     try {
       setOpportunities(await fetchCustomerOpportunities(customerId));
+      setLoadedOpportunitiesCustomerId(customerId);
+    } catch (error) {
+      setOpportunities([]);
+      setLoadedOpportunitiesCustomerId(customerId);
+      throw error;
     } finally {
       setIsLoadingOpportunities(false);
     }
@@ -1309,8 +1344,14 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
 
   const loadCustomerContacts = async (customerId: string) => {
     setIsLoadingContacts(true);
+    setContactsLoadError('');
     try {
       setContacts(await fetchCustomerContacts(customerId));
+      setLoadedContactsCustomerId(customerId);
+    } catch (error) {
+      setContacts([]);
+      setLoadedContactsCustomerId(customerId);
+      throw error;
     } finally {
       setIsLoadingContacts(false);
     }
@@ -1440,6 +1481,20 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
     () => buildMasterDataSelectOptions(customerOptions?.potential_service_items),
     [customerOptions?.potential_service_items],
   );
+  const opportunityTypeSelectOptions = useMemo(
+    () =>
+      buildMasterDataSelectOptions(
+        (customerOptions?.opportunity_type_items || []).length
+          ? customerOptions?.opportunity_type_items
+          : customerOptions?.potential_service_items,
+      ),
+    [customerOptions?.opportunity_type_items, customerOptions?.potential_service_items],
+  );
+  const buildOpportunityFormDefaults = (): OpportunityFormState => ({
+    ...emptyOpportunityForm,
+    opportunity_type_id: preferredOptionValue(opportunityTypeSelectOptions, 'Fleet Service'),
+    opportunity_stage_id: preferredOptionValue(opportunityStageSelectOptions, 'New'),
+  });
   const profileDisplayCustomer = profileCustomer || selectedCustomer;
 
   const filteredCustomers = useMemo(
@@ -1575,6 +1630,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
     clearCustomerFormErrors();
     setPageError('');
     const options = await ensureCustomerOptionsLoaded(true).catch(() => null);
+    setSelectedCustomerId(customer.id);
     setEditingCustomer(customer);
     setCustomerForm({
       full_name: customer.full_name || '',
@@ -1850,10 +1906,10 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
     setPageError('');
     try {
       const payload = {
-        opportunity_type_id: opportunityForm.opportunity_type_id || undefined,
+        opportunity_type_id: opportunityForm.opportunity_type_id || opportunityTypeSelectOptions[0]?.value || undefined,
         specific_product_or_service: opportunityForm.specific_product_or_service || undefined,
         estimated_budget: opportunityForm.estimated_budget ? Number(opportunityForm.estimated_budget) : null,
-        opportunity_stage_id: opportunityForm.opportunity_stage_id || undefined,
+        opportunity_stage_id: opportunityForm.opportunity_stage_id || opportunityStageSelectOptions[0]?.value || undefined,
         probability: opportunityForm.probability ? Number(opportunityForm.probability) : null,
         expected_purchase_date: opportunityForm.expected_purchase_date || undefined,
         follow_up_date: opportunityForm.follow_up_date || undefined,
@@ -1869,7 +1925,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
         }
         return [saved, ...current];
       });
-      setOpportunityForm(emptyOpportunityForm);
+      setOpportunityForm(buildOpportunityFormDefaults());
       setShowOpportunityForm(false);
       setPageNotice(opportunityForm.id ? 'Opportunity updated.' : 'Opportunity added.');
     } catch (error) {
@@ -1981,6 +2037,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
         </div>
         <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row">
           <button
+            type="button"
             onClick={() => void openCreateCustomer()}
             className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-medium text-[#0F172A] hover:bg-gray-50 sm:w-auto"
           >
@@ -1988,6 +2045,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
             Add Customer
           </button>
           <button
+            type="button"
             onClick={() => void openCreateBooking()}
             className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#2563EB] px-4 py-2.5 text-sm font-medium text-white hover:bg-[#1d4ed8] sm:w-auto"
           >
@@ -1995,6 +2053,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
             Schedule Booking
           </button>
           <button
+            type="button"
             onClick={() => void openCreateReminder()}
             className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-purple-200 bg-purple-50 px-4 py-2.5 text-sm font-medium text-purple-700 hover:bg-purple-100 sm:w-auto"
           >
@@ -2002,6 +2061,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
             Create Reminder
           </button>
           <button
+            type="button"
             onClick={() => void openCreateFollowUpBooking()}
             className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm font-medium text-amber-700 hover:bg-amber-100 sm:w-auto"
           >
@@ -2020,6 +2080,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
             </div>
             <div className="flex flex-col gap-2 sm:flex-row">
               <button
+                type="button"
                 onClick={() => {
                   setSelectedCustomerId(recentlyCreatedCustomerId);
                   setActiveProfileTab('overview');
@@ -2030,6 +2091,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                 View Profile
               </button>
               <button
+                type="button"
                 onClick={() => {
                   setRecentlyCreatedCustomerId(null);
                   void openCreateCustomer();
@@ -2215,6 +2277,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
           <div className="max-h-[820px] overflow-y-auto">
             {filteredCustomers.map((customer) => (
               <button
+                type="button"
                 key={customer.id}
                 onClick={() => setSelectedCustomerId(customer.id)}
                 className={`w-full border-b border-gray-100 px-4 py-4 text-left transition-all hover:bg-gray-50 ${
@@ -2304,6 +2367,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                   </div>
                   <div className="flex flex-col gap-2 sm:flex-row">
                     <button
+                      type="button"
                       onClick={() => {
                         setActiveProfileTab('overview');
                         void loadCustomerProfile(selectedCustomer.id);
@@ -2313,6 +2377,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                       View Profile
                     </button>
                     <button
+                      type="button"
                       onClick={() => void openEditCustomer(profileDisplayCustomer || selectedCustomer)}
                       className="inline-flex items-center justify-center gap-2 rounded-xl bg-white/15 px-4 py-2.5 text-sm font-medium text-white hover:bg-white/25"
                     >
@@ -2349,6 +2414,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                   ['notes', 'Notes / Timeline'],
                 ].map(([id, label]) => (
                   <button
+                    type="button"
                     key={id}
                     onClick={() => setActiveProfileTab(id as CustomerProfileTab)}
                     className={`rounded-xl px-4 py-2 text-sm font-medium ${
@@ -2371,6 +2437,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                   <div className="flex items-center justify-between">
                     <h3 className="text-lg font-semibold text-[#0F172A]">Overview</h3>
                     <button
+                      type="button"
                       onClick={() => void openEditCustomer(profileDisplayCustomer)}
                       className="rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
                     >
@@ -2404,6 +2471,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                     <h3 className="text-lg font-semibold text-[#0F172A]">Relationship Details</h3>
                     {canEditProfileIntelligence && (
                       <button
+                        type="button"
                         onClick={() => void handleSaveRelationship()}
                         disabled={isSavingRelationship}
                         className="rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-medium text-white hover:bg-[#1d4ed8] disabled:opacity-60"
@@ -2444,16 +2512,16 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                       <p className="mt-1 text-sm text-gray-500">Track products, services, estimated value, stage, and follow-up for this customer.</p>
                     </div>
                     {canEditProfileIntelligence && (
-                      <button onClick={() => { setOpportunityForm(emptyOpportunityForm); setShowOpportunityForm((current) => !current); }} disabled={!customerOptions || isLoadingCustomerOptions} className="rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-medium text-white hover:bg-[#1d4ed8] disabled:cursor-not-allowed disabled:opacity-60">Add Opportunity</button>
+                      <button type="button" onClick={() => { setOpportunityForm(buildOpportunityFormDefaults()); setShowOpportunityForm((current) => !current); }} className="rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-medium text-white hover:bg-[#1d4ed8]">Add Opportunity</button>
                     )}
                   </div>
-                  {isLoadingCustomerOptions && !customerOptions ? (
+                  {isLoadingCustomerOptions && !customerOptions && !showOpportunityForm ? (
                     <div className="mt-4 rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">Loading opportunity options...</div>
                   ) : null}
                   {showOpportunityForm && canEditProfileIntelligence && (
                     <div className="mt-4 grid grid-cols-1 gap-4 rounded-xl border border-gray-200 p-4 md:grid-cols-2">
-                      <SearchableSelect value={opportunityForm.opportunity_type_id} onChange={(value) => setOpportunityForm((current) => ({ ...current, opportunity_type_id: value }))} options={potentialServiceSelectOptions} placeholder="Select opportunity type" searchPlaceholder="Search opportunity types..." emptyLabel={opportunityTypeEmptyLabel} />
-                      <SearchableSelect value={opportunityForm.opportunity_stage_id} onChange={(value) => setOpportunityForm((current) => ({ ...current, opportunity_stage_id: value }))} options={opportunityStageSelectOptions} placeholder="Select opportunity stage" searchPlaceholder="Search opportunity stages..." emptyLabel="No opportunity stages found." allowClear clearLabel="No stage" />
+                      <SearchableSelect value={opportunityForm.opportunity_type_id} onChange={(value) => setOpportunityForm((current) => ({ ...current, opportunity_type_id: value }))} options={opportunityTypeSelectOptions} placeholder="Select opportunity type" searchPlaceholder="Search opportunity types..." emptyLabel={opportunityTypeEmptyLabel} />
+                      <SearchableSelect value={opportunityForm.opportunity_stage_id} onChange={(value) => setOpportunityForm((current) => ({ ...current, opportunity_stage_id: value }))} options={opportunityStageSelectOptions} placeholder="Select opportunity stage" searchPlaceholder="Search opportunity stages..." emptyLabel="No opportunity stages found. Add stages in Master Data." allowClear clearLabel="No stage" />
                       <input value={opportunityForm.specific_product_or_service} onChange={(event) => setOpportunityForm((current) => ({ ...current, specific_product_or_service: event.target.value }))} placeholder="Specific product or service" className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
                       <input type="number" min="0" value={opportunityForm.estimated_budget} onChange={(event) => setOpportunityForm((current) => ({ ...current, estimated_budget: event.target.value }))} placeholder="Estimated budget" className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
                       <input type="number" min="0" max="100" value={opportunityForm.probability} onChange={(event) => setOpportunityForm((current) => ({ ...current, probability: event.target.value }))} placeholder="Probability %" className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
@@ -2462,14 +2530,16 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                       <input type="date" value={opportunityForm.follow_up_date} onChange={(event) => setOpportunityForm((current) => ({ ...current, follow_up_date: event.target.value }))} className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
                       <textarea value={opportunityForm.notes} onChange={(event) => setOpportunityForm((current) => ({ ...current, notes: event.target.value }))} rows={3} placeholder="Notes" className="md:col-span-2 w-full rounded-xl border border-gray-300 px-4 py-3 text-sm" />
                       <div className="md:col-span-2 flex justify-end gap-2">
-                        <button onClick={() => { setShowOpportunityForm(false); setOpportunityForm(emptyOpportunityForm); }} className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">Cancel</button>
-                        <button onClick={() => void handleSaveOpportunity()} disabled={isSavingOpportunity} className="rounded-lg bg-[#2563EB] px-3 py-2 text-sm text-white hover:bg-[#1d4ed8] disabled:opacity-60">{isSavingOpportunity ? 'Saving...' : opportunityForm.id ? 'Update Opportunity' : 'Save Opportunity'}</button>
+                        <button type="button" onClick={() => { setShowOpportunityForm(false); setOpportunityForm(buildOpportunityFormDefaults()); }} className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">Cancel</button>
+                        <button type="button" onClick={() => void handleSaveOpportunity()} disabled={isSavingOpportunity} className="rounded-lg bg-[#2563EB] px-3 py-2 text-sm text-white hover:bg-[#1d4ed8] disabled:opacity-60">{isSavingOpportunity ? 'Saving...' : opportunityForm.id ? 'Update Opportunity' : 'Save Opportunity'}</button>
                       </div>
                     </div>
                   )}
                   <div className="mt-4 space-y-3">
                     {isLoadingOpportunities ? (
                       <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">Loading opportunities...</div>
+                    ) : opportunitiesLoadError ? (
+                      <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-6 text-sm text-amber-800">{opportunitiesLoadError}</div>
                     ) : opportunities.length ? opportunities.map((opportunity) => (
                       <div key={opportunity.id} className="rounded-xl border border-gray-200 p-4">
                         <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
@@ -2479,12 +2549,12 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                             <div className="mt-2 text-xs text-gray-500">{opportunity.opportunity_stage || 'No stage'}{opportunity.estimated_budget ? ` • ${formatCurrency(opportunity.estimated_budget)}` : ''}</div>
                           </div>
                           {canEditProfileIntelligence && (
-                            <button onClick={() => { setOpportunityForm({ id: opportunity.id, opportunity_type_id: opportunity.opportunity_type_id || '', specific_product_or_service: opportunity.specific_product_or_service || '', estimated_budget: opportunity.estimated_budget ? String(opportunity.estimated_budget) : '', opportunity_stage_id: opportunity.opportunity_stage_id || '', probability: opportunity.probability ? String(opportunity.probability) : '', expected_purchase_date: opportunity.expected_purchase_date || '', follow_up_date: opportunity.follow_up_date || '', notes: opportunity.notes || '', status: opportunity.status || 'open' }); setShowOpportunityForm(true); }} className="rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50">Edit</button>
+                            <button type="button" onClick={() => { setOpportunityForm({ id: opportunity.id, opportunity_type_id: opportunity.opportunity_type_id || '', specific_product_or_service: opportunity.specific_product_or_service || '', estimated_budget: opportunity.estimated_budget ? String(opportunity.estimated_budget) : '', opportunity_stage_id: opportunity.opportunity_stage_id || '', probability: opportunity.probability ? String(opportunity.probability) : '', expected_purchase_date: opportunity.expected_purchase_date || '', follow_up_date: opportunity.follow_up_date || '', notes: opportunity.notes || '', status: opportunity.status || 'open' }); setShowOpportunityForm(true); }} className="rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50">Edit</button>
                           )}
                         </div>
                       </div>
                     )) : (
-                      <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">No opportunities yet. Add opportunity.</div>
+                      <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">No opportunities yet.</div>
                     )}
                   </div>
                 </section>
@@ -2498,10 +2568,10 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                       <p className="mt-1 text-sm text-gray-500">Add separate people linked to this customer. This is different from the customer&apos;s alternate phone number.</p>
                     </div>
                     {canEditProfileIntelligence && (
-                      <button onClick={() => { setContactForm(emptyContactForm); setShowContactForm((current) => !current); }} disabled={!customerOptions || isLoadingCustomerOptions} className="rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-medium text-white hover:bg-[#1d4ed8] disabled:cursor-not-allowed disabled:opacity-60">Add Contact</button>
+                      <button type="button" onClick={() => { setContactForm(emptyContactForm); setShowContactForm((current) => !current); }} className="rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-medium text-white hover:bg-[#1d4ed8]">Add Contact</button>
                     )}
                   </div>
-                  {isLoadingCustomerOptions && !customerOptions ? (
+                  {isLoadingCustomerOptions && !customerOptions && !showContactForm ? (
                     <div className="mt-4 rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">Loading contact options...</div>
                   ) : null}
                   {showContactForm && canEditProfileIntelligence && (
@@ -2513,14 +2583,16 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                       <SearchableSelect value={contactForm.relationship_role_id} onChange={(value) => setContactForm((current) => ({ ...current, relationship_role_id: value }))} options={relationshipRoleSelectOptions} placeholder="Select relationship role" searchPlaceholder="Search relationship roles..." emptyLabel="No relationship roles found." allowClear clearLabel="No relationship role" />
                       <textarea value={contactForm.notes} onChange={(event) => setContactForm((current) => ({ ...current, notes: event.target.value }))} rows={3} placeholder="Notes" className="w-full rounded-xl border border-gray-300 px-4 py-3 text-sm" />
                       <div className="md:col-span-2 flex justify-end gap-2">
-                        <button onClick={() => { setShowContactForm(false); setContactForm(emptyContactForm); }} className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">Cancel</button>
-                        <button onClick={() => void handleSaveContact()} disabled={isSavingContact} className="rounded-lg bg-[#2563EB] px-3 py-2 text-sm text-white hover:bg-[#1d4ed8] disabled:opacity-60">{isSavingContact ? 'Saving...' : contactForm.id ? 'Update Contact' : 'Save Contact'}</button>
+                        <button type="button" onClick={() => { setShowContactForm(false); setContactForm(emptyContactForm); }} className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">Cancel</button>
+                        <button type="button" onClick={() => void handleSaveContact()} disabled={isSavingContact} className="rounded-lg bg-[#2563EB] px-3 py-2 text-sm text-white hover:bg-[#1d4ed8] disabled:opacity-60">{isSavingContact ? 'Saving...' : contactForm.id ? 'Update Contact' : 'Save Contact'}</button>
                       </div>
                     </div>
                   )}
                   <div className="mt-4 space-y-3">
                     {isLoadingContacts ? (
                       <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">Loading contacts...</div>
+                    ) : contactsLoadError ? (
+                      <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-6 text-sm text-amber-800">{contactsLoadError}</div>
                     ) : contacts.length ? contacts.map((contact) => (
                       <div key={contact.id} className="rounded-xl border border-gray-200 p-4">
                         <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
@@ -2530,12 +2602,12 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                             <div className="mt-1 text-xs text-gray-500">{contact.phone || 'No phone'}{contact.email ? ` • ${contact.email}` : ''}</div>
                           </div>
                           {canEditProfileIntelligence && (
-                            <button onClick={() => { setContactForm({ id: contact.id, contact_name: contact.contact_name, phone: contact.phone || '', email: contact.email || '', position_or_role: contact.position_or_role || '', relationship_role_id: contact.relationship_role_id || '', notes: contact.notes || '' }); setShowContactForm(true); }} className="rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50">Edit</button>
+                            <button type="button" onClick={() => { setContactForm({ id: contact.id, contact_name: contact.contact_name, phone: contact.phone || '', email: contact.email || '', position_or_role: contact.position_or_role || '', relationship_role_id: contact.relationship_role_id || '', notes: contact.notes || '' }); setShowContactForm(true); }} className="rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50">Edit</button>
                           )}
                         </div>
                       </div>
                     )) : (
-                      <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">No additional contacts yet. Add contact.</div>
+                      <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">No additional contacts yet.</div>
                     )}
                   </div>
                 </section>
@@ -2547,8 +2619,8 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                     <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4">
                       <h3 className="text-lg font-semibold text-[#0F172A]">Trips / Bookings</h3>
                       <div className="flex gap-2">
-                        <button onClick={openCreateBooking} className="rounded-lg bg-[#2563EB] px-3 py-2 text-xs font-medium text-white hover:bg-[#1d4ed8]">Add Booking</button>
-                        <button onClick={openCreateFollowUpBooking} className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700 hover:bg-amber-100">Add Follow-Up</button>
+                        <button type="button" onClick={openCreateBooking} className="rounded-lg bg-[#2563EB] px-3 py-2 text-xs font-medium text-white hover:bg-[#1d4ed8]">Add Booking</button>
+                        <button type="button" onClick={openCreateFollowUpBooking} className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700 hover:bg-amber-100">Add Follow-Up</button>
                       </div>
                     </div>
                     <div className="space-y-4 p-5">
@@ -2611,7 +2683,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                     </div>
                     <textarea value={newNote} onChange={(event) => setNewNote(event.target.value)} rows={4} placeholder="Add a note for this customer" className="mt-4 w-full rounded-xl border border-gray-300 px-4 py-3 text-sm" />
                     <div className="mt-3 flex justify-end">
-                      <button onClick={() => void handleAddNote()} disabled={isSavingNote || !newNote.trim()} className="rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-medium text-white hover:bg-[#1d4ed8] disabled:opacity-60">{isSavingNote ? 'Saving...' : 'Add Note'}</button>
+                      <button type="button" onClick={() => void handleAddNote()} disabled={isSavingNote || !newNote.trim()} className="rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-medium text-white hover:bg-[#1d4ed8] disabled:opacity-60">{isSavingNote ? 'Saving...' : 'Add Note'}</button>
                     </div>
                     <div className="mt-4 space-y-3">
                       {isLoadingNotes ? <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">Loading notes...</div> : customerNotes.length ? customerNotes.map((note) => (
@@ -2665,6 +2737,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
               {bookingQueueFilters.map((filter) => (
                 <button
                   key={filter}
+                  type="button"
                   onClick={() => setBookingQueueFilter(filter)}
                   className={`rounded-full border px-3 py-1.5 text-xs font-medium transition ${
                     bookingQueueFilter === filter
@@ -3074,8 +3147,149 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
             </label>
           </div>
 
+          {editingCustomer && (
+            <div className="mt-8 space-y-6 border-t border-gray-200 pt-6">
+              <div className="flex flex-wrap gap-2 rounded-2xl border border-gray-200 bg-gray-50 p-3">
+                {[
+                  ['overview', 'Overview'],
+                  ['relationship', 'Relationship Details'],
+                  ['opportunities', 'Opportunities'],
+                  ['contacts', 'Additional Contacts'],
+                  ['trips', 'Trips / Bookings'],
+                  ['notes', 'Notes / Timeline'],
+                ].map(([id, label]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => {
+                      closeCustomerModal();
+                      setActiveProfileTab(id as CustomerProfileTab);
+                    }}
+                    className={`rounded-xl px-4 py-2 text-sm font-medium ${
+                      activeProfileTab === id ? 'bg-[#2563EB] text-white' : 'bg-white text-gray-700 hover:bg-gray-100'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+                <section className="rounded-2xl border border-gray-200 bg-white p-5">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-lg font-semibold text-[#0F172A]">Opportunities</h3>
+                      <p className="mt-1 text-sm text-gray-500">Add and manage opportunities for this customer directly from the profile.</p>
+                    </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setOpportunityForm(buildOpportunityFormDefaults());
+                          setShowOpportunityForm((current) => !current);
+                        }}
+                        className="rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-medium text-white hover:bg-[#1d4ed8]"
+                    >
+                      Add Opportunity
+                    </button>
+                  </div>
+                  {showOpportunityForm && (
+                    <div className="mt-4 grid grid-cols-1 gap-4 rounded-xl border border-gray-200 p-4 md:grid-cols-2">
+                      <SearchableSelect value={opportunityForm.opportunity_type_id} onChange={(value) => setOpportunityForm((current) => ({ ...current, opportunity_type_id: value }))} options={opportunityTypeSelectOptions} placeholder="Opportunity Type" searchPlaceholder="Search opportunity types..." emptyLabel={opportunityTypeEmptyLabel} />
+                      <SearchableSelect value={opportunityForm.opportunity_stage_id} onChange={(value) => setOpportunityForm((current) => ({ ...current, opportunity_stage_id: value }))} options={opportunityStageSelectOptions} placeholder="Opportunity Stage" searchPlaceholder="Search opportunity stages..." emptyLabel="No opportunity stages found. Add stages in Master Data." allowClear clearLabel="No stage" />
+                      <input value={opportunityForm.specific_product_or_service} onChange={(event) => setOpportunityForm((current) => ({ ...current, specific_product_or_service: event.target.value }))} placeholder="Specific Product / Service" className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
+                      <input type="number" min="0" value={opportunityForm.estimated_budget} onChange={(event) => setOpportunityForm((current) => ({ ...current, estimated_budget: event.target.value }))} placeholder="Estimated Budget" className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
+                      <input type="number" min="0" max="100" value={opportunityForm.probability} onChange={(event) => setOpportunityForm((current) => ({ ...current, probability: event.target.value }))} placeholder="Probability" className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
+                      <input value={opportunityForm.status} onChange={(event) => setOpportunityForm((current) => ({ ...current, status: event.target.value }))} placeholder="Status" className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
+                      <input type="date" value={opportunityForm.expected_purchase_date} onChange={(event) => setOpportunityForm((current) => ({ ...current, expected_purchase_date: event.target.value }))} className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
+                      <input type="date" value={opportunityForm.follow_up_date} onChange={(event) => setOpportunityForm((current) => ({ ...current, follow_up_date: event.target.value }))} className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
+                      <textarea value={opportunityForm.notes} onChange={(event) => setOpportunityForm((current) => ({ ...current, notes: event.target.value }))} rows={3} placeholder="Notes" className="md:col-span-2 w-full rounded-xl border border-gray-300 px-4 py-3 text-sm" />
+                      <div className="md:col-span-2 flex justify-end gap-2">
+                        <button type="button" onClick={() => { setShowOpportunityForm(false); setOpportunityForm(buildOpportunityFormDefaults()); }} className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">Cancel</button>
+                        <button type="button" onClick={() => void handleSaveOpportunity()} disabled={isSavingOpportunity} className="rounded-lg bg-[#2563EB] px-3 py-2 text-sm text-white hover:bg-[#1d4ed8] disabled:opacity-60">{isSavingOpportunity ? 'Saving...' : opportunityForm.id ? 'Update Opportunity' : 'Save Opportunity'}</button>
+                      </div>
+                    </div>
+                  )}
+                  <div className="mt-4 space-y-3">
+                    {isLoadingOpportunities ? (
+                      <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">Loading opportunities...</div>
+                    ) : opportunitiesLoadError ? (
+                      <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-6 text-sm text-amber-800">{opportunitiesLoadError}</div>
+                    ) : opportunities.length ? opportunities.map((opportunity) => (
+                      <div key={opportunity.id} className="rounded-xl border border-gray-200 p-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-semibold text-[#0F172A]">{opportunity.opportunity_type || 'Opportunity'}</div>
+                            <div className="mt-1 text-xs text-gray-500">{opportunity.specific_product_or_service || 'No product/service specified'}</div>
+                            <div className="mt-2 text-xs text-gray-500">{opportunity.opportunity_stage || 'No stage'}{opportunity.estimated_budget ? ` • ${formatCurrency(opportunity.estimated_budget)}` : ''}</div>
+                          </div>
+                          <button type="button" onClick={() => { setOpportunityForm({ id: opportunity.id, opportunity_type_id: opportunity.opportunity_type_id || '', specific_product_or_service: opportunity.specific_product_or_service || '', estimated_budget: opportunity.estimated_budget ? String(opportunity.estimated_budget) : '', opportunity_stage_id: opportunity.opportunity_stage_id || '', probability: opportunity.probability ? String(opportunity.probability) : '', expected_purchase_date: opportunity.expected_purchase_date || '', follow_up_date: opportunity.follow_up_date || '', notes: opportunity.notes || '', status: opportunity.status || 'open' }); setShowOpportunityForm(true); }} className="rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50">Edit</button>
+                        </div>
+                      </div>
+                    )) : (
+                      <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">No opportunities yet.</div>
+                    )}
+                  </div>
+                </section>
+
+                <section className="rounded-2xl border border-gray-200 bg-white p-5">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-lg font-semibold text-[#0F172A]">Additional Contacts</h3>
+                      <p className="mt-1 text-sm text-gray-500">This is separate from the customer&apos;s alternative phone number.</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setContactForm(emptyContactForm);
+                        setShowContactForm((current) => !current);
+                      }}
+                      className="rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-medium text-white hover:bg-[#1d4ed8]"
+                    >
+                      Add Contact
+                    </button>
+                  </div>
+                  {showContactForm && (
+                    <div className="mt-4 grid grid-cols-1 gap-4 rounded-xl border border-gray-200 p-4 md:grid-cols-2">
+                      <input value={contactForm.contact_name} onChange={(event) => setContactForm((current) => ({ ...current, contact_name: event.target.value }))} placeholder="Contact Name" className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
+                      <SearchableSelect value={contactForm.position_or_role} onChange={(value) => setContactForm((current) => ({ ...current, position_or_role: value }))} options={buildStringValueOptions(positionTitleFieldOptions, contactForm.position_or_role)} placeholder="Position / Role" searchPlaceholder="Search positions or roles..." emptyLabel={positionTitleEmptyLabel} allowClear clearLabel="No position" />
+                      <input value={contactForm.phone} onChange={(event) => setContactForm((current) => ({ ...current, phone: event.target.value }))} placeholder="Phone" className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
+                      <input type="email" value={contactForm.email} onChange={(event) => setContactForm((current) => ({ ...current, email: event.target.value }))} placeholder="Email" className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
+                      <SearchableSelect value={contactForm.relationship_role_id} onChange={(value) => setContactForm((current) => ({ ...current, relationship_role_id: value }))} options={relationshipRoleSelectOptions} placeholder="Relationship Role" searchPlaceholder="Search relationship roles..." emptyLabel="No relationship roles found." allowClear clearLabel="No relationship role" />
+                      <textarea value={contactForm.notes} onChange={(event) => setContactForm((current) => ({ ...current, notes: event.target.value }))} rows={3} placeholder="Notes" className="w-full rounded-xl border border-gray-300 px-4 py-3 text-sm" />
+                      <div className="md:col-span-2 flex justify-end gap-2">
+                        <button type="button" onClick={() => { setShowContactForm(false); setContactForm(emptyContactForm); }} className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">Cancel</button>
+                        <button type="button" onClick={() => void handleSaveContact()} disabled={isSavingContact} className="rounded-lg bg-[#2563EB] px-3 py-2 text-sm text-white hover:bg-[#1d4ed8] disabled:opacity-60">{isSavingContact ? 'Saving...' : contactForm.id ? 'Update Contact' : 'Save Contact'}</button>
+                      </div>
+                    </div>
+                  )}
+                  <div className="mt-4 space-y-3">
+                    {isLoadingContacts ? (
+                      <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">Loading contacts...</div>
+                    ) : contactsLoadError ? (
+                      <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-6 text-sm text-amber-800">{contactsLoadError}</div>
+                    ) : contacts.length ? contacts.map((contact) => (
+                      <div key={contact.id} className="rounded-xl border border-gray-200 p-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-semibold text-[#0F172A]">{contact.contact_name}</div>
+                            <div className="mt-1 text-xs text-gray-500">{contact.position_or_role || 'No position'}{contact.relationship_role ? ` • ${contact.relationship_role}` : ''}</div>
+                            <div className="mt-1 text-xs text-gray-500">{contact.phone || 'No phone'}{contact.email ? ` • ${contact.email}` : ''}</div>
+                          </div>
+                          <button type="button" onClick={() => { setContactForm({ id: contact.id, contact_name: contact.contact_name, phone: contact.phone || '', email: contact.email || '', position_or_role: contact.position_or_role || '', relationship_role_id: contact.relationship_role_id || '', notes: contact.notes || '' }); setShowContactForm(true); }} className="rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50">Edit</button>
+                        </div>
+                      </div>
+                    )) : (
+                      <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">No additional contacts yet.</div>
+                    )}
+                  </div>
+                </section>
+              </div>
+            </div>
+          )}
+
           <div className="sticky bottom-0 mt-6 flex justify-end border-t border-gray-200 bg-white pt-4">
             <button
+              type="button"
               onClick={() => void handleSaveCustomer()}
               disabled={isSavingCustomer}
               className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#2563EB] px-4 py-2.5 text-sm font-medium text-white disabled:opacity-60 sm:w-auto"
@@ -3405,6 +3619,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
 
           <div className="sticky bottom-0 mt-6 flex justify-end border-t border-gray-200 bg-white pt-4">
             <button
+              type="button"
               onClick={() => void handleSaveBooking()}
               disabled={isSavingBooking}
               className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#2563EB] px-4 py-2.5 text-sm font-medium text-white disabled:opacity-60 sm:w-auto"

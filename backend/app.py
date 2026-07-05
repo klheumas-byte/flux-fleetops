@@ -2,7 +2,7 @@ from threading import Thread
 from time import perf_counter
 from datetime import datetime, timezone
 
-from flask import Flask, g
+from flask import Flask, g, request
 
 from config import get_config
 from extensions import get_database_connection_status, get_mongo_client, init_extensions
@@ -136,6 +136,11 @@ def create_app(config_name: str | None = None) -> Flask:
     def _start_request_timer():
         g.request_started_at = perf_counter()
         g.request_started_at_utc = datetime.now(timezone.utc)
+
+    @app.before_request
+    def _handle_api_preflight():
+        if request.method == "OPTIONS" and request.path.startswith("/api/"):
+            return "", 200
 
     @app.after_request
     def _log_request_timing(response):

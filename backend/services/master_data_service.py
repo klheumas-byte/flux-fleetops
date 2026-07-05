@@ -54,13 +54,15 @@ MASTER_DATA_DEFAULTS: dict[str, list[str]] = {
         "Other",
     ],
     "relationship_roles": [
-        "Primary Contact",
+        "Customer",
         "Decision Maker",
-        "Approver",
-        "Influencer",
         "Gatekeeper",
-        "Referrer",
-        "Stakeholder",
+        "Influencer",
+        "Finance Contact",
+        "Technical Contact",
+        "Partner",
+        "Investor",
+        "Strategic Contact",
         "Other",
     ],
     "opportunity_levels": [
@@ -70,13 +72,15 @@ MASTER_DATA_DEFAULTS: dict[str, list[str]] = {
         "Strategic",
     ],
     "opportunity_stages": [
-        "Identified",
+        "New",
+        "Open",
+        "Interested",
         "Qualified",
         "Proposal Sent",
         "Negotiation",
         "Won",
         "Lost",
-        "On Hold",
+        "Follow-up Later",
     ],
     "network_values": [
         "Potential Client",
@@ -187,14 +191,25 @@ MASTER_DATA_DEFAULTS: dict[str, list[str]] = {
         "Follow Up Later",
     ],
     "potential_services": [
-        "Business Operating System",
-        "Website Development",
-        "CRM System",
-        "Fleet Management System",
-        "Inventory System",
-        "Business Consulting",
-        "Business Training",
-        "Digital Transformation",
+        "Fleet Service",
+        "Special Booking Service",
+        "Software Development",
+        "ERP System",
+        "Appliances",
+        "Farming / Agric Products",
+        "Investment",
+        "Partnership",
+        "Other",
+    ],
+    "opportunity_types": [
+        "Fleet Service",
+        "Special Booking Service",
+        "Software Development",
+        "ERP System",
+        "Appliances",
+        "Farming / Agric Products",
+        "Investment",
+        "Partnership",
         "Other",
     ],
     "occupations": [
@@ -235,15 +250,16 @@ MASTER_DATA_DEFAULTS: dict[str, list[str]] = {
         "Operations Manager",
         "Finance Officer",
         "Procurement Officer",
-        "Driver",
-        "Teacher",
-        "Student",
         "Customer Service Officer",
         "Client Experience Officer",
         "Accountant",
         "Engineer",
+        "Driver",
+        "Student",
+        "Teacher",
         "Pastor",
         "Business Owner",
+        "Other",
     ],
     "payment_methods": [
         "Cash",
@@ -377,8 +393,6 @@ def safe_seed_master_data():
 
     for attempt in range(1, retries + 1):
         try:
-            if not _master_data_defaults_missing():
-                return
             seed_default_master_data()
             normalize_trip_master_data_defaults()
             current_app.logger.info(

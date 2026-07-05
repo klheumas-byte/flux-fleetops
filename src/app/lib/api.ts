@@ -1,3 +1,19 @@
+function buildLocalApiBaseCandidates(hostname: string, protocol: string) {
+  const candidates = new Set<string>(['/api']);
+  const normalizedProtocol = protocol || 'http:';
+  const add = (host: string) => candidates.add(`${normalizedProtocol}//${host}:5000/api`);
+
+  add(hostname);
+  if (hostname === 'localhost') {
+    add('127.0.0.1');
+  }
+  if (hostname === '127.0.0.1') {
+    add('localhost');
+  }
+
+  return Array.from(candidates);
+}
+
 function resolveApiBaseUrl() {
   const configured = import.meta.env.VITE_API_BASE_URL?.trim();
   if (configured) {
@@ -15,15 +31,34 @@ function resolveApiBaseUrl() {
     if (!isLocalhost) {
       return `${origin}/api`;
     }
-
-    const protocol = window.location.protocol || 'http:';
-    return `${protocol}//${hostname}:5000/api`;
+    return '/api';
   }
 
   return '/api';
 }
 
 const API_BASE_URL = resolveApiBaseUrl();
+const API_BASE_URL_CANDIDATES =
+  typeof window !== 'undefined'
+    ? (() => {
+        const configured = import.meta.env.VITE_API_BASE_URL?.trim();
+        if (configured) {
+          return [configured.replace(/\/+$/, '')];
+        }
+        const { origin, hostname, protocol } = window.location;
+        const normalizedHostname = hostname.toLowerCase();
+        const isLocalhost =
+          normalizedHostname === 'localhost' ||
+          normalizedHostname === '127.0.0.1' ||
+          normalizedHostname === '0.0.0.0';
+
+        if (!isLocalhost) {
+          return [`${origin}/api`];
+        }
+
+        return buildLocalApiBaseCandidates(hostname, protocol);
+      })()
+    : [API_BASE_URL];
 
 type ApiRequestOptions = Omit<RequestInit, 'headers'> & {
   headers?: Record<string, string>;
@@ -147,13 +182,41 @@ function normalizeErrorMessage(status: number, data: any, fallback?: string) {
   return fallback || 'Unable to complete the request right now.';
 }
 
+function isLikelyHtmlPayload(response: Response, responseText: string) {
+  const contentType = response.headers.get('content-type') || '';
+  if (contentType.toLowerCase().includes('text/html')) {
+    return true;
+  }
+
+  const trimmed = responseText.trim().toLowerCase();
+  return trimmed.startsWith('<!doctype html') || trimmed.startsWith('<html');
+}
+
+function shouldRetryWithNextCandidate(response: Response, responseText: string, candidateUrl: string, candidateUrls: string[]) {
+  if (candidateUrls.length <= 1 || candidateUrl !== candidateUrls[0]) {
+    return false;
+  }
+
+  const status = response.status;
+  if (!isLikelyHtmlPayload(response, responseText)) {
+    return false;
+  }
+
+  return status === 404 || status === 502 || status === 503 || status === 504;
+}
+
 export async function apiRequest<T>(
   path: string,
   options: ApiRequestOptions = {},
 ): Promise<T> {
   const token = localStorage.getItem('flux_token')?.trim() || null;
+  const method = options.method || 'GET';
+  const hasJsonBody =
+    options.body !== undefined
+    && options.body !== null
+    && !(typeof FormData !== 'undefined' && options.body instanceof FormData);
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
+    ...(hasJsonBody ? { 'Content-Type': 'application/json' } : {}),
     ...(options.headers || {}),
   };
 
@@ -169,7 +232,6 @@ export async function apiRequest<T>(
     requestLabel: options.requestLabel || null,
   });
 
-  const method = options.method || 'GET';
   const requestUrl = `${API_BASE_URL}${path}`;
   const requestKey = options.dedupeKey || `${method}:${requestUrl}`;
   const cacheTtlMs = options.cacheTtlMs ?? 0;
@@ -213,13 +275,55 @@ export async function apiRequest<T>(
   }
 
   const requestPromise = (async () => {
-    let response: Response;
+    let response: Response | null = null;
+    let responseText = '';
+    let data: any = null;
+    let activeRequestUrl = requestUrl;
+    const candidateUrls = API_BASE_URL_CANDIDATES.map((baseUrl) => `${baseUrl}${path}`);
     try {
-      response = await fetch(requestUrl, {
-        ...options,
-        headers,
-        signal: controller?.signal,
-      });
+      let lastError: unknown = null;
+      for (const candidateUrl of candidateUrls) {
+        activeRequestUrl = candidateUrl;
+        try {
+          response = await fetch(candidateUrl, {
+            ...options,
+            headers,
+            signal: controller?.signal,
+          });
+          responseText = await response.text();
+          if (responseText) {
+            try {
+              data = JSON.parse(responseText);
+            } catch {
+              data = { message: responseText };
+            }
+          } else {
+            data = null;
+          }
+          if (shouldRetryWithNextCandidate(response, responseText, candidateUrl, candidateUrls)) {
+            console.warn('[Flux API] Retrying next candidate after HTML/local-proxy miss', {
+              path,
+              method,
+              status: response.status,
+              requestUrl: candidateUrl,
+              nextCandidateUrl: candidateUrls[candidateUrls.indexOf(candidateUrl) + 1] || null,
+            });
+            response = null;
+            responseText = '';
+            data = null;
+            continue;
+          }
+          break;
+        } catch (error) {
+          lastError = error;
+          if (controller?.signal.aborted) {
+            throw error;
+          }
+        }
+      }
+      if (!response) {
+        throw lastError instanceof Error ? lastError : new Error('Failed to fetch');
+      }
     } catch (error) {
       const durationMs =
         (typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt;
@@ -238,7 +342,7 @@ export async function apiRequest<T>(
         componentName: options.componentName || null,
         requestLabel: options.requestLabel || null,
         durationMs: Number(durationMs.toFixed(2)),
-        requestUrl,
+        requestUrl: activeRequestUrl,
         abortReason: abortReason || null,
       });
       throw new ApiRequestError(
@@ -254,17 +358,6 @@ export async function apiRequest<T>(
     } finally {
       if (timeoutHandle !== null) {
         window.clearTimeout(timeoutHandle);
-      }
-    }
-
-    const responseText = await response.text();
-    let data: any = null;
-
-    if (responseText) {
-      try {
-        data = JSON.parse(responseText);
-      } catch {
-        data = { message: responseText };
       }
     }
 

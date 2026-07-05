@@ -17,6 +17,21 @@ def configure_backend_logging(app) -> None:
 
     app_logger = app.logger
     app_logger.setLevel(log_level)
+    app_logger.handlers.clear()
+    app_logger.propagate = False
+
+    root_logger = logging.getLogger()
+    for handler in list(root_logger.handlers):
+        if getattr(handler, "name", "").startswith("flux-"):
+            root_logger.removeHandler(handler)
+
+    if app.config.get("DEBUG") or app.config.get("ENV_NAME") == "development":
+        console_handler = logging.StreamHandler()
+        console_handler.name = "flux-console"
+        console_handler.setLevel(log_level)
+        console_handler.setFormatter(formatter)
+        app_logger.addHandler(console_handler)
+        return
 
     _add_rotating_handler(
         app_logger,
@@ -38,7 +53,7 @@ def _add_rotating_handler(logger, *, handler_name: str, file_path: Path, formatt
     if any(getattr(handler, "name", None) == handler_name for handler in logger.handlers):
         return
 
-    handler = RotatingFileHandler(
+    handler = _SafeRotatingFileHandler(
         file_path,
         maxBytes=MAX_LOG_BYTES,
         backupCount=BACKUP_COUNT,
@@ -49,3 +64,12 @@ def _add_rotating_handler(logger, *, handler_name: str, file_path: Path, formatt
     handler.setLevel(level)
     handler.setFormatter(formatter)
     logger.addHandler(handler)
+
+
+class _SafeRotatingFileHandler(RotatingFileHandler):
+    def emit(self, record):
+        try:
+            super().emit(record)
+        except PermissionError:
+            # Skip locked-file rollover/write errors quietly in local Windows environments.
+            return

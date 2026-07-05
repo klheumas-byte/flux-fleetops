@@ -47,6 +47,31 @@ def _is_debug_enabled(env_name: str) -> bool:
     return env_name == "development"
 
 
+def _normalize_cors_origins(env_name: str) -> list[str]:
+    configured_origins = [
+        origin.strip().rstrip("/")
+        for origin in os.getenv("CORS_ORIGINS", DEVELOPMENT_DEFAULT_CORS_ORIGIN).split(",")
+        if origin.strip()
+    ]
+    if env_name != "development":
+        return configured_origins
+
+    expanded_origins: list[str] = []
+    seen: set[str] = set()
+    for origin in configured_origins:
+        variants = {origin}
+        if "localhost" in origin:
+            variants.add(origin.replace("localhost", "127.0.0.1"))
+        if "127.0.0.1" in origin:
+            variants.add(origin.replace("127.0.0.1", "localhost"))
+        for variant in variants:
+            normalized = variant.rstrip("/")
+            if normalized not in seen:
+                seen.add(normalized)
+                expanded_origins.append(normalized)
+    return expanded_origins
+
+
 class BaseConfig:
     ENV_NAME = _get_env_name()
     DEBUG = _is_debug_enabled(ENV_NAME)
@@ -67,11 +92,7 @@ class BaseConfig:
     MASTER_DATA_SEED_RETRY_DELAY_SECONDS = float(
         os.getenv("MASTER_DATA_SEED_RETRY_DELAY_SECONDS", "1.5")
     )
-    CORS_ORIGINS = [
-        origin.strip()
-        for origin in os.getenv("CORS_ORIGINS", DEVELOPMENT_DEFAULT_CORS_ORIGIN).split(",")
-        if origin.strip()
-    ]
+    CORS_ORIGINS = _normalize_cors_origins(ENV_NAME)
     SEED_DEMO_ON_STARTUP = os.getenv("SEED_DEMO_ON_STARTUP", "false").lower() == "true"
 
     @classmethod

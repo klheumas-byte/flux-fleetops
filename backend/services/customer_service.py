@@ -82,6 +82,44 @@ def users_read_collection():
     return users_collection().with_options(read_preference=ReadPreference.SECONDARY_PREFERRED)
 
 
+CUSTOMER_OPPORTUNITY_PROJECTION = {
+    "opportunity_type_id": 1,
+    "opportunity_type": 1,
+    "specific_product_or_service": 1,
+    "estimated_budget": 1,
+    "opportunity_stage_id": 1,
+    "opportunity_stage": 1,
+    "probability": 1,
+    "expected_purchase_date": 1,
+    "follow_up_date": 1,
+    "notes": 1,
+    "status": 1,
+    "created_by_name": 1,
+    "created_at": 1,
+    "updated_at": 1,
+}
+
+CUSTOMER_CONTACT_PROJECTION = {
+    "contact_name": 1,
+    "phone": 1,
+    "email": 1,
+    "position_or_role": 1,
+    "relationship_role_id": 1,
+    "relationship_role": 1,
+    "notes": 1,
+    "created_by_name": 1,
+    "created_at": 1,
+    "updated_at": 1,
+}
+
+CUSTOMER_NOTE_PROJECTION = {
+    "note": 1,
+    "created_by_name": 1,
+    "created_by_role": 1,
+    "created_at": 1,
+}
+
+
 def ensure_customer_indexes():
     ensure_indexes_for_collection(
         customers_collection(),
@@ -434,7 +472,11 @@ def _normalize_customer_filters(filters: dict | None):
 
 
 def _get_customer_document(customer_id: str) -> dict:
-    customer = customers_collection().find_one({"_id": _to_object_id(customer_id, "customer_id")})
+    customer = None
+    if isinstance(customer_id, str) and ObjectId.is_valid(customer_id):
+        customer = customers_collection().find_one({"_id": ObjectId(customer_id)})
+    if not customer:
+        customer = customers_collection().find_one({"customer_id": customer_id})
     if not customer:
         raise ApiError("Customer not found.", status_code=404)
     return customer
@@ -1594,6 +1636,8 @@ def list_customer_options(
         "organization_types",
         "occupations",
         "opportunity_stages",
+        "opportunity_types",
+        "positions_or_occupations",
         "position_titles",
         "relationship_categories",
         "relationship_roles",
@@ -1612,6 +1656,7 @@ def list_customer_options(
     organization_type_items = master_data_groups.get("organization_types", [])
     occupation_items = master_data_groups.get("occupations", [])
     opportunity_stage_items = master_data_groups.get("opportunity_stages", [])
+    opportunity_type_items = master_data_groups.get("opportunity_types", [])
     position_title_items = master_data_groups.get("position_titles", [])
     relationship_category_items = master_data_groups.get("relationship_categories", [])
     relationship_role_items = master_data_groups.get("relationship_roles", [])
@@ -1625,6 +1670,8 @@ def list_customer_options(
         occupation_items = legacy_position_or_occupation_items
     if not position_title_items:
         position_title_items = legacy_position_or_occupation_items
+    if not opportunity_type_items:
+        opportunity_type_items = potential_service_items
 
     customers: list[dict] = []
     if include_customers:
@@ -1681,6 +1728,7 @@ def list_customer_options(
         "organization_type_items": organization_type_items,
         "occupation_items": occupation_items,
         "opportunity_stage_items": opportunity_stage_items,
+        "opportunity_type_items": opportunity_type_items,
         "position_title_items": position_title_items,
         "relationship_category_items": relationship_category_items,
         "relationship_role_items": relationship_role_items,
@@ -2259,7 +2307,10 @@ def _normalize_opportunity_payload(payload: dict, *, partial: bool = False) -> d
             normalized["opportunity_type_id"] = None
             normalized["opportunity_type"] = None
         else:
-            document = resolve_master_data_item("potential_services", identifier, active_only=True)
+            try:
+                document = resolve_master_data_item("opportunity_types", identifier, active_only=True)
+            except ApiError:
+                document = resolve_master_data_item("potential_services", identifier, active_only=True)
             normalized["opportunity_type_id"] = document["_id"]
             normalized["opportunity_type"] = document["name"]
     if not partial or "specific_product_or_service" in payload:
@@ -2304,9 +2355,14 @@ def _normalize_opportunity_payload(payload: dict, *, partial: bool = False) -> d
 
 def list_customer_opportunities(customer_id: str, current_user_id: str, current_role: str) -> list[dict]:
     _, customer_object_id = _customer_context(customer_id, current_user_id=current_user_id, current_role=current_role)
+    started_at = perf_counter()
     documents = list(
-        customer_opportunities_collection().find({"customer_id": customer_object_id}).sort([("updated_at", DESCENDING), ("created_at", DESCENDING)])
+        customer_opportunities_collection().find(
+            {"customer_id": customer_object_id},
+            CUSTOMER_OPPORTUNITY_PROJECTION,
+        ).sort([("updated_at", DESCENDING), ("created_at", DESCENDING)])
     )
+    log_db_duration("customers.profile.opportunities", started_at)
     return [_serialize_customer_opportunity(document) for document in documents]
 
 
@@ -2393,9 +2449,14 @@ def _normalize_contact_payload(payload: dict, *, partial: bool = False) -> dict[
 
 def list_customer_contacts(customer_id: str, current_user_id: str, current_role: str) -> list[dict]:
     _, customer_object_id = _customer_context(customer_id, current_user_id=current_user_id, current_role=current_role)
+    started_at = perf_counter()
     documents = list(
-        customer_contacts_collection().find({"customer_id": customer_object_id}).sort([("updated_at", DESCENDING), ("created_at", DESCENDING)])
+        customer_contacts_collection().find(
+            {"customer_id": customer_object_id},
+            CUSTOMER_CONTACT_PROJECTION,
+        ).sort([("updated_at", DESCENDING), ("created_at", DESCENDING)])
     )
+    log_db_duration("customers.profile.contacts", started_at)
     return [_serialize_customer_contact(document) for document in documents]
 
 
@@ -2442,9 +2503,14 @@ def update_customer_contact(customer_id: str, contact_id: str, payload: dict, cu
 
 def list_customer_notes(customer_id: str, current_user_id: str, current_role: str) -> dict:
     customer_document, customer_object_id = _customer_context(customer_id, current_user_id=current_user_id, current_role=current_role)
+    started_at = perf_counter()
     note_documents = list(
-        customer_notes_collection().find({"customer_id": customer_object_id}).sort([("created_at", DESCENDING)])
+        customer_notes_collection().find(
+            {"customer_id": customer_object_id},
+            CUSTOMER_NOTE_PROJECTION,
+        ).sort([("created_at", DESCENDING)])
     )
+    log_db_duration("customers.profile.notes", started_at)
     notes = [_serialize_customer_note(document) for document in note_documents]
     timeline = [
         {

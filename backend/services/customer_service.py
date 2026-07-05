@@ -6,7 +6,7 @@ import re
 
 from bson import ObjectId
 from pymongo import ASCENDING, DESCENDING
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DuplicateKeyError, PyMongoError
 from flask import current_app
 from pymongo.read_preferences import ReadPreference
 
@@ -1535,6 +1535,7 @@ def list_customer_options(
     search_query: str | None = None,
     limit: int = 50,
     include_customers: bool = False,
+    include_drivers: bool = False,
 ) -> dict:
     normalized_search_query = _normalize_text(search_query)
     normalized_limit = max(1, min(int(limit or 50), 100))
@@ -1545,24 +1546,43 @@ def list_customer_options(
         q=normalized_search_query or "",
         limit=normalized_limit,
         include_customers="1" if include_customers else "0",
+        include_drivers="1" if include_drivers else "0",
     )
     cached = get_ttl_cached(cache_key)
     if cached is not None:
         return cached
 
     request_started_at = perf_counter()
-    driver_filter = {"role": "driver", "status": "active"}
-    if current_role == "driver":
-        driver_filter["_id"] = _to_object_id(current_user_id, "current_user_id")
+    drivers = []
+    if include_drivers:
+        driver_filter = {"role": "driver", "status": "active"}
+        if current_role == "driver":
+            driver_filter["_id"] = _to_object_id(current_user_id, "current_user_id")
 
-    query_started_at = perf_counter()
-    drivers = list(
-        users_read_collection().find(
-            driver_filter,
-            {"full_name": 1, "email": 1, "phone": 1, "role": 1, "status": 1},
-        ).sort("full_name", ASCENDING)
-    )
-    log_db_duration("customers.options.drivers", query_started_at)
+        drivers_cache_key = build_cache_key(
+            "customer_option_drivers",
+            current_user_id=current_user_id if current_role == "driver" else "",
+            current_role=current_role,
+        )
+        drivers = get_ttl_cached(drivers_cache_key)
+        if drivers is None:
+            query_started_at = perf_counter()
+            try:
+                drivers = list(
+                    users_collection().find(
+                        driver_filter,
+                        {"full_name": 1, "email": 1, "phone": 1, "role": 1, "status": 1},
+                    ).hint([("role", ASCENDING), ("status", ASCENDING), ("full_name", ASCENDING)]).sort("full_name", ASCENDING)
+                )
+                log_db_duration("customers.options.drivers", query_started_at)
+                set_ttl_cached(drivers_cache_key, drivers, ttl_seconds=300)
+            except PyMongoError:
+                current_app.logger.exception(
+                    "[Flux Customers] driver options query failed role=%s user_id=%s",
+                    current_role,
+                    current_user_id,
+                )
+                drivers = []
 
     master_data_started_at = perf_counter()
     master_data_groups = _load_active_master_data_groups(
@@ -1572,14 +1592,15 @@ def list_customer_options(
         "industries",
         "influence_levels",
         "organization_types",
+        "occupations",
         "opportunity_stages",
+        "position_titles",
         "relationship_categories",
         "relationship_roles",
         "opportunity_levels",
         "network_values",
         "lead_statuses",
         "potential_services",
-        "positions_or_occupations",
     )
     log_db_duration("customers.options.master_data_bulk", master_data_started_at)
 
@@ -1589,14 +1610,21 @@ def list_customer_options(
     industry_items = master_data_groups.get("industries", [])
     influence_level_items = master_data_groups.get("influence_levels", [])
     organization_type_items = master_data_groups.get("organization_types", [])
+    occupation_items = master_data_groups.get("occupations", [])
     opportunity_stage_items = master_data_groups.get("opportunity_stages", [])
+    position_title_items = master_data_groups.get("position_titles", [])
     relationship_category_items = master_data_groups.get("relationship_categories", [])
     relationship_role_items = master_data_groups.get("relationship_roles", [])
     opportunity_level_items = master_data_groups.get("opportunity_levels", [])
     network_value_items = master_data_groups.get("network_values", [])
     lead_status_items = master_data_groups.get("lead_statuses", [])
     potential_service_items = master_data_groups.get("potential_services", [])
-    position_or_occupation_items = master_data_groups.get("positions_or_occupations", [])
+    legacy_position_or_occupation_items = master_data_groups.get("positions_or_occupations", [])
+
+    if not occupation_items:
+        occupation_items = legacy_position_or_occupation_items
+    if not position_title_items:
+        position_title_items = legacy_position_or_occupation_items
 
     customers: list[dict] = []
     if include_customers:
@@ -1651,14 +1679,16 @@ def list_customer_options(
         "influence_level_items": influence_level_items,
         "organization_types": [item["name"] for item in organization_type_items],
         "organization_type_items": organization_type_items,
+        "occupation_items": occupation_items,
         "opportunity_stage_items": opportunity_stage_items,
+        "position_title_items": position_title_items,
         "relationship_category_items": relationship_category_items,
         "relationship_role_items": relationship_role_items,
         "opportunity_level_items": opportunity_level_items,
         "network_value_items": network_value_items,
         "lead_status_items": lead_status_items,
         "potential_service_items": potential_service_items,
-        "position_or_occupation_items": position_or_occupation_items,
+        "position_or_occupation_items": legacy_position_or_occupation_items or position_title_items or occupation_items,
         "follow_up_priorities": sorted(FOLLOW_UP_PRIORITIES),
         "statuses": sorted(CUSTOMER_STATUSES),
         "source_options": _build_customer_source_options(customer_source_items),

@@ -86,11 +86,31 @@ const typeLabels: Record<string, string> = {
   industries: 'Industries',
   government_sectors: 'Government Sectors',
   lead_statuses: 'Lead Statuses',
+  occupations: 'Occupations',
   potential_services: 'Potential Services',
-  positions_or_occupations: 'Positions / Occupations',
+  position_titles: 'Position Titles',
+  positions_or_occupations: 'Legacy Positions / Occupations',
   payment_methods: 'Payment Methods',
   ride_purposes: 'Trip Purposes',
 };
+
+const knownMasterDataTypes = Object.keys(typeLabels);
+const hiddenMasterDataTypes = new Set(['positions_or_occupations']);
+
+function buildVisibleMasterDataTypes(apiTypes: string[] | undefined) {
+  const ordered = new Set<string>();
+  for (const type of knownMasterDataTypes) {
+    if (!hiddenMasterDataTypes.has(type)) {
+      ordered.add(type);
+    }
+  }
+  for (const type of apiTypes || []) {
+    if (!hiddenMasterDataTypes.has(type)) {
+      ordered.add(type);
+    }
+  }
+  return Array.from(ordered);
+}
 
 function EmptyState({
   title,
@@ -159,16 +179,17 @@ export default function Settings() {
     setPageError('');
     try {
       const response = await fetchMasterData();
+      const visibleTypes = buildVisibleMasterDataTypes(response.types);
       setMasterDataResponse(response);
       setSelectedType((current) =>
-        response.types.includes(current) ? current : response.types[0] || 'customer_categories',
+        visibleTypes.includes(current) ? current : visibleTypes[0] || 'customer_categories',
       );
       setMasterDataForm((current) => ({
         ...current,
         data_type:
-          response.types.includes(current.data_type)
+          visibleTypes.includes(current.data_type)
             ? current.data_type
-            : response.types[0] || 'customer_categories',
+            : visibleTypes[0] || 'customer_categories',
       }));
     } catch (error) {
       if (error instanceof ApiRequestError) {
@@ -212,7 +233,10 @@ export default function Settings() {
     void loadSystemSettings();
   }, []);
 
-  const types = masterDataResponse?.types || Object.keys(typeLabels);
+  const types = useMemo(
+    () => buildVisibleMasterDataTypes(masterDataResponse?.types),
+    [masterDataResponse?.types],
+  );
   const selectedItems = useMemo(
     () => masterDataResponse?.master_data?.[selectedType] || [],
     [masterDataResponse, selectedType],

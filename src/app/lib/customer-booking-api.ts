@@ -274,16 +274,18 @@ export interface CustomerOptionsResponse {
   company_industries: string[];
   industry_items: MasterDataOption[];
   influence_level_items: MasterDataOption[];
+  occupation_items: MasterDataOption[];
   organization_types: string[];
   organization_type_items: MasterDataOption[];
   opportunity_stage_items: MasterDataOption[];
+  position_title_items: MasterDataOption[];
   relationship_category_items: MasterDataOption[];
   relationship_role_items: MasterDataOption[];
   opportunity_level_items: MasterDataOption[];
   network_value_items: MasterDataOption[];
   lead_status_items: MasterDataOption[];
   potential_service_items: MasterDataOption[];
-  position_or_occupation_items: MasterDataOption[];
+  position_or_occupation_items?: MasterDataOption[];
   follow_up_priorities: string[];
   statuses: string[];
   source_options?: Array<{ value: string; label: string }>;
@@ -417,9 +419,11 @@ function normalizeCustomerOptions(value: unknown): CustomerOptionsResponse {
     company_industries: [],
     industry_items: [],
     influence_level_items: [],
+    occupation_items: [],
     organization_types: [],
     organization_type_items: [],
     opportunity_stage_items: [],
+    position_title_items: [],
     relationship_category_items: [],
     relationship_role_items: [],
     opportunity_level_items: [],
@@ -433,6 +437,10 @@ function normalizeCustomerOptions(value: unknown): CustomerOptionsResponse {
     creator_roles: [],
   });
 
+  const legacyPositionItems = ensureArray<MasterDataOption>(normalized.position_or_occupation_items);
+  const occupationItems = ensureArray<MasterDataOption>(normalized.occupation_items);
+  const positionTitleItems = ensureArray<MasterDataOption>(normalized.position_title_items);
+
   return {
     ...normalized,
     drivers: ensureArray<UserSummary>(normalized.drivers),
@@ -444,16 +452,18 @@ function normalizeCustomerOptions(value: unknown): CustomerOptionsResponse {
     company_industries: ensureArray<string>(normalized.company_industries),
     industry_items: ensureArray<MasterDataOption>(normalized.industry_items),
     influence_level_items: ensureArray<MasterDataOption>(normalized.influence_level_items),
+    occupation_items: occupationItems.length ? occupationItems : legacyPositionItems,
     organization_types: ensureArray<string>(normalized.organization_types),
     organization_type_items: ensureArray<MasterDataOption>(normalized.organization_type_items),
     opportunity_stage_items: ensureArray<MasterDataOption>(normalized.opportunity_stage_items),
+    position_title_items: positionTitleItems.length ? positionTitleItems : legacyPositionItems,
     relationship_category_items: ensureArray<MasterDataOption>(normalized.relationship_category_items),
     relationship_role_items: ensureArray<MasterDataOption>(normalized.relationship_role_items),
     opportunity_level_items: ensureArray<MasterDataOption>(normalized.opportunity_level_items),
     network_value_items: ensureArray<MasterDataOption>(normalized.network_value_items),
     lead_status_items: ensureArray<MasterDataOption>(normalized.lead_status_items),
     potential_service_items: ensureArray<MasterDataOption>(normalized.potential_service_items),
-    position_or_occupation_items: ensureArray<MasterDataOption>(normalized.position_or_occupation_items),
+    position_or_occupation_items: legacyPositionItems,
     follow_up_priorities: ensureArray<string>(normalized.follow_up_priorities),
     statuses: ensureArray<string>(normalized.statuses),
     source_options: ensureArray<{ value: string; label: string }>(normalized.source_options),
@@ -607,8 +617,13 @@ export async function updateCustomerRelationship(customerId: string, payload: Re
   return response.data.customer;
 }
 
-export async function fetchCustomerOptions() {
-  const response = await apiRequest<{ data: CustomerOptionsResponse }>('/customers/options');
+export async function fetchCustomerOptions(options: { includeDrivers?: boolean } = {}) {
+  const searchParams = new URLSearchParams();
+  if (options.includeDrivers) {
+    searchParams.set('include_drivers', 'true');
+  }
+  const query = searchParams.toString();
+  const response = await apiRequest<{ data: CustomerOptionsResponse }>(`/customers/options${query ? `?${query}` : ''}`);
   return normalizeCustomerOptions(response?.data);
 }
 

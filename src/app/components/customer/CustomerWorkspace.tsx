@@ -121,6 +121,13 @@ function buildStringValueOptions(
   return options;
 }
 
+function buildFallbackStringOptions(values: string[], currentValue?: string | null): SearchableSelectOption[] {
+  return buildStringValueOptions(
+    values.map((value) => ({ value, label: value })),
+    currentValue,
+  );
+}
+
 function firstOptionValue(options: SearchableSelectOption[]): string {
   return options[0]?.value || '';
 }
@@ -128,6 +135,42 @@ function firstOptionValue(options: SearchableSelectOption[]): string {
 function formatOptionalCount(value?: number | null) {
   return typeof value === 'number' ? String(value) : '-';
 }
+
+const occupationEmptyLabel = 'No occupations found. Add occupations in Master Data.';
+const positionTitleEmptyLabel = 'No position titles found. Add position titles in Master Data.';
+const opportunityTypeEmptyLabel = 'No opportunity types found. Add potential services in Master Data.';
+const fallbackOccupationValues = [
+  'Driver',
+  'Teacher',
+  'Student',
+  'Accountant',
+  'Engineer',
+  'Pastor',
+  'Business Owner',
+  'Entrepreneur',
+  'Consultant',
+  'Administrator',
+  'Customer Service Professional',
+  'Operations Professional',
+  'Finance Professional',
+  'Procurement Professional',
+];
+const fallbackPositionTitleValues = [
+  'CEO',
+  'Managing Director',
+  'Operations Manager',
+  'Finance Officer',
+  'Procurement Officer',
+  'Customer Service Officer',
+  'Client Experience Officer',
+  'Account Manager',
+  'Branch Supervisor',
+  'Team Lead',
+  'Executive Assistant',
+  'Project Coordinator',
+  'Head Teacher',
+  'Class Representative',
+];
 
 const weekdayOptions = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 const defaultBookingStatuses = ['Scheduled', 'Acknowledged', 'Confirmed', 'En Route', 'Picked Up', 'In Progress', 'Completed', 'Cancelled', 'Missed'];
@@ -959,6 +1002,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
   const [customers, setCustomers] = useState<CustomerRecord[]>([]);
   const [bookings, setBookings] = useState<BookingRecord[]>([]);
   const [customerOptions, setCustomerOptions] = useState<CustomerOptionsResponse | null>(null);
+  const [isLoadingCustomerOptions, setIsLoadingCustomerOptions] = useState(false);
   const [bookingOptions, setBookingOptions] = useState<BookingOptionsResponse | null>(null);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(null);
   const [selectedCustomerProfile, setSelectedCustomerProfile] = useState<CustomerRecord | null>(null);
@@ -1007,6 +1051,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
   const [filterCustomerCategoryId, setFilterCustomerCategoryId] = useState('');
   const [filterSource, setFilterSource] = useState('');
   const customerOptionsRequestRef = useRef<Promise<CustomerOptionsResponse> | null>(null);
+  const customerOptionsWithDriversRequestRef = useRef<Promise<CustomerOptionsResponse> | null>(null);
   const bookingOptionsRequestRef = useRef<Promise<BookingOptionsResponse> | null>(null);
   usePageToastFeedback(pageError, pageNotice);
   const canEditProfileIntelligence = portal !== 'driver';
@@ -1133,6 +1178,15 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
     if (!selectedCustomerId) {
       return;
     }
+    if (
+      (activeProfileTab === 'relationship' || activeProfileTab === 'opportunities' || activeProfileTab === 'contacts')
+      && !customerOptions
+      && !isLoadingCustomerOptions
+    ) {
+      void ensureCustomerOptionsLoaded().catch((error) => {
+        setPageError(getErrorMessage(error, 'Unable to load customer setup options right now.'));
+      });
+    }
     if (activeProfileTab === 'opportunities' && !opportunities.length && !isLoadingOpportunities) {
       void loadCustomerOpportunities(selectedCustomerId).catch((error) => {
         setPageError(getErrorMessage(error, 'Unable to load customer opportunities right now.'));
@@ -1148,16 +1202,27 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
         setPageError(getErrorMessage(error, 'Unable to load customer notes right now.'));
       });
     }
-  }, [activeProfileTab, selectedCustomerId, opportunities.length, contacts.length, customerTimeline.length, isLoadingOpportunities, isLoadingContacts, isLoadingNotes]);
+  }, [activeProfileTab, selectedCustomerId, opportunities.length, contacts.length, customerTimeline.length, isLoadingOpportunities, isLoadingContacts, isLoadingNotes, customerOptions, isLoadingCustomerOptions]);
 
-  const ensureCustomerOptionsLoaded = async () => {
-    if (customerOptions) {
+  const ensureCustomerOptionsLoaded = async (includeDrivers = false) => {
+    if (customerOptions && (!includeDrivers || (customerOptions.drivers || []).length > 0)) {
       return customerOptions;
     }
-    if (!customerOptionsRequestRef.current) {
-      customerOptionsRequestRef.current = fetchCustomerOptions()
+    const requestRef = includeDrivers ? customerOptionsWithDriversRequestRef : customerOptionsRequestRef;
+    if (!requestRef.current) {
+      setIsLoadingCustomerOptions(true);
+      requestRef.current = fetchCustomerOptions({ includeDrivers })
         .then((response) => {
-          setCustomerOptions(response);
+          setCustomerOptions((current) => {
+            if (!current) {
+              return response;
+            }
+            return {
+              ...current,
+              ...response,
+              drivers: response.drivers?.length ? response.drivers : current.drivers,
+            };
+          });
           return response;
         })
         .catch((error) => {
@@ -1169,10 +1234,15 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
           throw error;
         })
         .finally(() => {
-          customerOptionsRequestRef.current = null;
+          setIsLoadingCustomerOptions(false);
+          if (includeDrivers) {
+            customerOptionsWithDriversRequestRef.current = null;
+          } else {
+            customerOptionsRequestRef.current = null;
+          }
         });
     }
-    return customerOptionsRequestRef.current;
+    return requestRef.current;
   };
 
   const ensureBookingOptionsLoaded = async () => {
@@ -1352,6 +1422,20 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
     () => buildMasterDataSelectOptions(customerOptions?.lead_status_items),
     [customerOptions?.lead_status_items],
   );
+  const occupationFieldOptions = useMemo(
+    () =>
+      (customerOptions?.occupation_items || []).length
+        ? buildStringValueOptions(customerOptions?.occupation_items)
+        : buildFallbackStringOptions(fallbackOccupationValues),
+    [customerOptions?.occupation_items],
+  );
+  const positionTitleFieldOptions = useMemo(
+    () =>
+      (customerOptions?.position_title_items || []).length
+        ? buildStringValueOptions(customerOptions?.position_title_items)
+        : buildFallbackStringOptions(fallbackPositionTitleValues),
+    [customerOptions?.position_title_items],
+  );
   const potentialServiceSelectOptions = useMemo(
     () => buildMasterDataSelectOptions(customerOptions?.potential_service_items),
     [customerOptions?.potential_service_items],
@@ -1472,7 +1556,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
   const openCreateCustomer = async () => {
     clearCustomerFormErrors();
     setPageError('');
-    const options = await ensureCustomerOptionsLoaded().catch(() => null);
+    const options = await ensureCustomerOptionsLoaded(false).catch(() => null);
     if (!options) {
       return;
     }
@@ -1490,7 +1574,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
   const openEditCustomer = async (customer: CustomerRecord) => {
     clearCustomerFormErrors();
     setPageError('');
-    const options = await ensureCustomerOptionsLoaded().catch(() => null);
+    const options = await ensureCustomerOptionsLoaded(true).catch(() => null);
     setEditingCustomer(customer);
     setCustomerForm({
       full_name: customer.full_name || '',
@@ -2328,6 +2412,9 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                       </button>
                     )}
                   </div>
+                  {isLoadingCustomerOptions && !customerOptions ? (
+                    <div className="mt-4 rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">Loading relationship options...</div>
+                  ) : null}
                   <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
                     <SearchableSelect value={relationshipForm.industry_id} onChange={(value) => setRelationshipForm((current) => ({ ...current, industry_id: value }))} options={industrySelectOptions} placeholder="Select industry" searchPlaceholder="Search industries..." emptyLabel="No industries found." allowClear clearLabel="No industry" disabled={!canEditProfileIntelligence} />
                     <SearchableSelect value={relationshipForm.government_sector_id} onChange={(value) => setRelationshipForm((current) => ({ ...current, government_sector_id: value }))} options={governmentSectorSelectOptions} placeholder="Select government sector" searchPlaceholder="Search government sectors..." emptyLabel="No government sectors found." allowClear clearLabel="No government sector" disabled={!canEditProfileIntelligence} />
@@ -2343,7 +2430,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                     <SearchableSelect value={relationshipForm.opportunity_level_id} onChange={(value) => setRelationshipForm((current) => ({ ...current, opportunity_level_id: value }))} options={opportunityLevelSelectOptions} placeholder="Select opportunity level" searchPlaceholder="Search opportunity levels..." emptyLabel="No opportunity levels found." allowClear clearLabel="No opportunity level" disabled={!canEditProfileIntelligence} />
                     <SearchableSelect value={relationshipForm.network_value_id} onChange={(value) => setRelationshipForm((current) => ({ ...current, network_value_id: value }))} options={networkValueSelectOptions} placeholder="Select network value" searchPlaceholder="Search network values..." emptyLabel="No network values found." allowClear clearLabel="No network value" disabled={!canEditProfileIntelligence} />
                     <SearchableSelect value={relationshipForm.potential_service_id} onChange={(value) => setRelationshipForm((current) => ({ ...current, potential_service_id: value }))} options={potentialServiceSelectOptions} placeholder="Select potential service" searchPlaceholder="Search potential services..." emptyLabel="No potential services found." allowClear clearLabel="No potential service" disabled={!canEditProfileIntelligence} />
-                    <SearchableSelect value={relationshipForm.position_or_role} onChange={(value) => setRelationshipForm((current) => ({ ...current, position_or_role: value }))} options={buildStringValueOptions(customerOptions?.position_or_occupation_items, relationshipForm.position_or_role)} placeholder="Select position or role" searchPlaceholder="Search positions or roles..." emptyLabel="No positions found." allowClear clearLabel="No position" disabled={!canEditProfileIntelligence} />
+                    <SearchableSelect value={relationshipForm.position_or_role} onChange={(value) => setRelationshipForm((current) => ({ ...current, position_or_role: value }))} options={buildStringValueOptions(positionTitleFieldOptions, relationshipForm.position_or_role)} placeholder="Select position or role" searchPlaceholder="Search positions or roles..." emptyLabel={positionTitleEmptyLabel} allowClear clearLabel="No position" disabled={!canEditProfileIntelligence} />
                     <textarea value={relationshipForm.relationship_notes} onChange={(event) => setRelationshipForm((current) => ({ ...current, relationship_notes: event.target.value }))} rows={4} placeholder="Relationship notes" disabled={!canEditProfileIntelligence} className="md:col-span-2 w-full rounded-xl border border-gray-300 px-4 py-3 text-sm disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-500" />
                   </div>
                 </section>
@@ -2352,14 +2439,20 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
               {activeProfileTab === 'opportunities' && profileDisplayCustomer && (
                 <section className="rounded-2xl border border-gray-200 bg-white p-5">
                   <div className="flex items-center justify-between">
-                    <h3 className="text-lg font-semibold text-[#0F172A]">Opportunities</h3>
+                    <div>
+                      <h3 className="text-lg font-semibold text-[#0F172A]">Opportunities</h3>
+                      <p className="mt-1 text-sm text-gray-500">Track products, services, estimated value, stage, and follow-up for this customer.</p>
+                    </div>
                     {canEditProfileIntelligence && (
-                      <button onClick={() => { setOpportunityForm(emptyOpportunityForm); setShowOpportunityForm((current) => !current); }} className="rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-medium text-white hover:bg-[#1d4ed8]">Add Opportunity</button>
+                      <button onClick={() => { setOpportunityForm(emptyOpportunityForm); setShowOpportunityForm((current) => !current); }} disabled={!customerOptions || isLoadingCustomerOptions} className="rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-medium text-white hover:bg-[#1d4ed8] disabled:cursor-not-allowed disabled:opacity-60">Add Opportunity</button>
                     )}
                   </div>
+                  {isLoadingCustomerOptions && !customerOptions ? (
+                    <div className="mt-4 rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">Loading opportunity options...</div>
+                  ) : null}
                   {showOpportunityForm && canEditProfileIntelligence && (
                     <div className="mt-4 grid grid-cols-1 gap-4 rounded-xl border border-gray-200 p-4 md:grid-cols-2">
-                      <SearchableSelect value={opportunityForm.opportunity_type_id} onChange={(value) => setOpportunityForm((current) => ({ ...current, opportunity_type_id: value }))} options={potentialServiceSelectOptions} placeholder="Select opportunity type" searchPlaceholder="Search opportunity types..." emptyLabel="No opportunity types found." />
+                      <SearchableSelect value={opportunityForm.opportunity_type_id} onChange={(value) => setOpportunityForm((current) => ({ ...current, opportunity_type_id: value }))} options={potentialServiceSelectOptions} placeholder="Select opportunity type" searchPlaceholder="Search opportunity types..." emptyLabel={opportunityTypeEmptyLabel} />
                       <SearchableSelect value={opportunityForm.opportunity_stage_id} onChange={(value) => setOpportunityForm((current) => ({ ...current, opportunity_stage_id: value }))} options={opportunityStageSelectOptions} placeholder="Select opportunity stage" searchPlaceholder="Search opportunity stages..." emptyLabel="No opportunity stages found." allowClear clearLabel="No stage" />
                       <input value={opportunityForm.specific_product_or_service} onChange={(event) => setOpportunityForm((current) => ({ ...current, specific_product_or_service: event.target.value }))} placeholder="Specific product or service" className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
                       <input type="number" min="0" value={opportunityForm.estimated_budget} onChange={(event) => setOpportunityForm((current) => ({ ...current, estimated_budget: event.target.value }))} placeholder="Estimated budget" className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
@@ -2400,15 +2493,21 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
               {activeProfileTab === 'contacts' && profileDisplayCustomer && (
                 <section className="rounded-2xl border border-gray-200 bg-white p-5">
                   <div className="flex items-center justify-between">
-                    <h3 className="text-lg font-semibold text-[#0F172A]">Additional Contacts</h3>
+                    <div>
+                      <h3 className="text-lg font-semibold text-[#0F172A]">Additional Contacts</h3>
+                      <p className="mt-1 text-sm text-gray-500">Add separate people linked to this customer. This is different from the customer&apos;s alternate phone number.</p>
+                    </div>
                     {canEditProfileIntelligence && (
-                      <button onClick={() => { setContactForm(emptyContactForm); setShowContactForm((current) => !current); }} className="rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-medium text-white hover:bg-[#1d4ed8]">Add Contact</button>
+                      <button onClick={() => { setContactForm(emptyContactForm); setShowContactForm((current) => !current); }} disabled={!customerOptions || isLoadingCustomerOptions} className="rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-medium text-white hover:bg-[#1d4ed8] disabled:cursor-not-allowed disabled:opacity-60">Add Contact</button>
                     )}
                   </div>
+                  {isLoadingCustomerOptions && !customerOptions ? (
+                    <div className="mt-4 rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">Loading contact options...</div>
+                  ) : null}
                   {showContactForm && canEditProfileIntelligence && (
                     <div className="mt-4 grid grid-cols-1 gap-4 rounded-xl border border-gray-200 p-4 md:grid-cols-2">
                       <input value={contactForm.contact_name} onChange={(event) => setContactForm((current) => ({ ...current, contact_name: event.target.value }))} placeholder="Contact name" className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
-                      <input value={contactForm.position_or_role} onChange={(event) => setContactForm((current) => ({ ...current, position_or_role: event.target.value }))} placeholder="Position or role" className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
+                      <SearchableSelect value={contactForm.position_or_role} onChange={(value) => setContactForm((current) => ({ ...current, position_or_role: value }))} options={buildStringValueOptions(positionTitleFieldOptions, contactForm.position_or_role)} placeholder="Select position or role" searchPlaceholder="Search positions or roles..." emptyLabel={positionTitleEmptyLabel} allowClear clearLabel="No position" />
                       <input value={contactForm.phone} onChange={(event) => setContactForm((current) => ({ ...current, phone: event.target.value }))} placeholder="Phone" className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
                       <input type="email" value={contactForm.email} onChange={(event) => setContactForm((current) => ({ ...current, email: event.target.value }))} placeholder="Email" className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
                       <SearchableSelect value={contactForm.relationship_role_id} onChange={(value) => setContactForm((current) => ({ ...current, relationship_role_id: value }))} options={relationshipRoleSelectOptions} placeholder="Select relationship role" searchPlaceholder="Search relationship roles..." emptyLabel="No relationship roles found." allowClear clearLabel="No relationship role" />
@@ -2436,7 +2535,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                         </div>
                       </div>
                     )) : (
-                      <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">No additional contacts yet.</div>
+                      <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">No additional contacts yet. Add contact.</div>
                     )}
                   </div>
                 </section>
@@ -2769,10 +2868,10 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
               <SearchableSelect
                 value={customerForm.occupation}
                 onChange={(value) => updateCustomerField('occupation', value)}
-                options={buildStringValueOptions(customerOptions?.position_or_occupation_items, customerForm.occupation)}
+                options={buildStringValueOptions(occupationFieldOptions, customerForm.occupation)}
                 placeholder="Select occupation"
                 searchPlaceholder="Search occupations..."
-                emptyLabel="No occupations found."
+                emptyLabel={occupationEmptyLabel}
                 allowClear
                 clearLabel="No occupation"
                 triggerClassName={getCustomerFieldClass(Boolean(customerFieldErrors.occupation))}
@@ -2815,10 +2914,10 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
               <SearchableSelect
                 value={customerForm.position_title}
                 onChange={(value) => updateCustomerField('position_title', value)}
-                options={buildStringValueOptions(customerOptions?.position_or_occupation_items, customerForm.position_title)}
+                options={buildStringValueOptions(positionTitleFieldOptions, customerForm.position_title)}
                 placeholder="Select position or title"
                 searchPlaceholder="Search positions or titles..."
-                emptyLabel="No positions found."
+                emptyLabel={positionTitleEmptyLabel}
                 allowClear
                 clearLabel="No position"
                 triggerClassName={getCustomerFieldClass(Boolean(customerFieldErrors.position_title))}

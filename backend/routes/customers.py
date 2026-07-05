@@ -42,6 +42,7 @@ def _options_filters() -> dict:
         "q": request.args.get("q"),
         "limit": raw_limit if raw_limit is not None else 50,
         "include_customers": request.args.get("include_customers", "").strip().lower() in {"1", "true", "yes"},
+        "include_drivers": request.args.get("include_drivers", "").strip().lower() in {"1", "true", "yes"},
     }
 
 
@@ -69,6 +70,7 @@ def get_customer_options_route():
             search_query=filters["q"],
             limit=filters["limit"],
             include_customers=filters["include_customers"],
+            include_drivers=filters["include_drivers"],
         )
     )
 

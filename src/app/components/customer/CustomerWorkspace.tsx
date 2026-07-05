@@ -19,23 +19,37 @@ import {
 import {
   createBooking,
   createCustomer,
+  createCustomerContact,
+  createCustomerNote,
+  createCustomerOpportunity,
   fetchBookingOptions,
   fetchBookings,
+  fetchCustomerById,
+  fetchCustomerContacts,
+  fetchCustomerNotes,
   fetchCustomerOptions,
+  fetchCustomerOpportunities,
   fetchCustomers,
   type BookingOptionsResponse,
   type BookingRecord,
+  type CustomerContactRecord,
+  type CustomerNoteRecord,
   type BookingSummary,
+  type CustomerOpportunityRecord,
   type CustomerOptionsResponse,
   type CustomerRecord,
   type CustomerSummary,
+  type CustomerTimelineEntry,
+  updateCustomerContact,
+  updateCustomerOpportunity,
+  updateCustomerRelationship,
   updateBooking,
   updateCustomer,
 } from '../../lib/customer-booking-api';
 import { clearDriverQuickActionIntent, peekDriverQuickActionIntent } from '../../lib/driver-quick-actions';
 import { useDebouncedValue } from '../../lib/use-debounced-value';
 import { usePageToastFeedback } from '../../lib/use-page-toast-feedback';
-import { SearchableSelect } from '../ui/searchable-select';
+import { SearchableSelect, type SearchableSelectOption } from '../ui/searchable-select';
 
 interface CustomerWorkspaceProps {
   portal: 'admin' | 'owner' | 'driver';
@@ -67,6 +81,52 @@ class CustomerWorkspaceErrorBoundary extends Component<{ children: ReactNode }, 
 
     return this.props.children;
   }
+}
+
+function buildMasterDataSelectOptions(
+  items: Array<{ id: string; name: string; description?: string | null }> | undefined,
+  currentValue?: string | null,
+): SearchableSelectOption[] {
+  const options = (items || []).map((item) => ({
+    value: item.id,
+    label: item.name,
+    description: item.description || null,
+  }));
+  if (currentValue && !options.some((option) => option.label === currentValue || option.value === currentValue)) {
+    options.push({
+      value: currentValue,
+      label: currentValue,
+      description: 'Legacy value',
+    });
+  }
+  return options;
+}
+
+function buildStringValueOptions(
+  items: Array<{ id?: string; name?: string; value?: string; label?: string; description?: string | null }> | undefined,
+  currentValue?: string | null,
+): SearchableSelectOption[] {
+  const options = (items || []).map((item) => ({
+    value: item.value || item.name || '',
+    label: item.label || item.name || '',
+    description: item.description || null,
+  })).filter((item) => item.value && item.label);
+  if (currentValue && !options.some((option) => option.value === currentValue || option.label === currentValue)) {
+    options.push({
+      value: currentValue,
+      label: currentValue,
+      description: 'Legacy value',
+    });
+  }
+  return options;
+}
+
+function firstOptionValue(options: SearchableSelectOption[]): string {
+  return options[0]?.value || '';
+}
+
+function formatOptionalCount(value?: number | null) {
+  return typeof value === 'number' ? String(value) : '-';
 }
 
 const weekdayOptions = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
@@ -524,6 +584,56 @@ interface BookingFormState {
   recurrence_end_date: string;
 }
 
+interface RelationshipFormState {
+  industry_id: string;
+  company_or_institution_name: string;
+  branch_or_department: string;
+  position_or_role: string;
+  relationship_role_id: string;
+  relationship_category_id: string;
+  lead_status_id: string;
+  customer_source_id: string;
+  source: string;
+  influence_level_id: string;
+  government_sector_id: string;
+  organization_type_id: string;
+  network_value_id: string;
+  opportunity_level_id: string;
+  potential_service_id: string;
+  relationship_notes: string;
+}
+
+interface OpportunityFormState {
+  id?: string | null;
+  opportunity_type_id: string;
+  specific_product_or_service: string;
+  estimated_budget: string;
+  opportunity_stage_id: string;
+  probability: string;
+  expected_purchase_date: string;
+  follow_up_date: string;
+  notes: string;
+  status: string;
+}
+
+interface ContactFormState {
+  id?: string | null;
+  contact_name: string;
+  phone: string;
+  email: string;
+  position_or_role: string;
+  relationship_role_id: string;
+  notes: string;
+}
+
+type CustomerProfileTab =
+  | 'overview'
+  | 'relationship'
+  | 'opportunities'
+  | 'contacts'
+  | 'trips'
+  | 'notes';
+
 type CustomerFormField = keyof CustomerFormState;
 
 const emptyCustomerForm: CustomerFormState = {
@@ -541,7 +651,7 @@ const emptyCustomerForm: CustomerFormState = {
   preferred_dropoff_location: '',
   residential_area: '',
   work_area: '',
-  source: 'manual_entry',
+  source: '',
   customer_category_id: '',
   customer_source_id: '',
   organization_type_id: '',
@@ -591,6 +701,48 @@ const emptyBookingForm: BookingFormState = {
   monthly_day_of_week: '',
   custom_rule_text: '',
   recurrence_end_date: '',
+};
+
+const emptyRelationshipForm: RelationshipFormState = {
+  industry_id: '',
+  company_or_institution_name: '',
+  branch_or_department: '',
+  position_or_role: '',
+  relationship_role_id: '',
+  relationship_category_id: '',
+  lead_status_id: '',
+  customer_source_id: '',
+  source: '',
+  influence_level_id: '',
+  government_sector_id: '',
+  organization_type_id: '',
+  network_value_id: '',
+  opportunity_level_id: '',
+  potential_service_id: '',
+  relationship_notes: '',
+};
+
+const emptyOpportunityForm: OpportunityFormState = {
+  id: null,
+  opportunity_type_id: '',
+  specific_product_or_service: '',
+  estimated_budget: '',
+  opportunity_stage_id: '',
+  probability: '',
+  expected_purchase_date: '',
+  follow_up_date: '',
+  notes: '',
+  status: 'open',
+};
+
+const emptyContactForm: ContactFormState = {
+  id: null,
+  contact_name: '',
+  phone: '',
+  email: '',
+  position_or_role: '',
+  relationship_role_id: '',
+  notes: '',
 };
 
 const reminderBookingTypes = new Set([
@@ -809,6 +961,27 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
   const [customerOptions, setCustomerOptions] = useState<CustomerOptionsResponse | null>(null);
   const [bookingOptions, setBookingOptions] = useState<BookingOptionsResponse | null>(null);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(null);
+  const [selectedCustomerProfile, setSelectedCustomerProfile] = useState<CustomerRecord | null>(null);
+  const [isLoadingCustomerProfile, setIsLoadingCustomerProfile] = useState(false);
+  const [activeProfileTab, setActiveProfileTab] = useState<CustomerProfileTab>('overview');
+  const [relationshipForm, setRelationshipForm] = useState<RelationshipFormState>(emptyRelationshipForm);
+  const [isSavingRelationship, setIsSavingRelationship] = useState(false);
+  const [opportunities, setOpportunities] = useState<CustomerOpportunityRecord[]>([]);
+  const [isLoadingOpportunities, setIsLoadingOpportunities] = useState(false);
+  const [showOpportunityForm, setShowOpportunityForm] = useState(false);
+  const [opportunityForm, setOpportunityForm] = useState<OpportunityFormState>(emptyOpportunityForm);
+  const [isSavingOpportunity, setIsSavingOpportunity] = useState(false);
+  const [contacts, setContacts] = useState<CustomerContactRecord[]>([]);
+  const [isLoadingContacts, setIsLoadingContacts] = useState(false);
+  const [showContactForm, setShowContactForm] = useState(false);
+  const [contactForm, setContactForm] = useState<ContactFormState>(emptyContactForm);
+  const [isSavingContact, setIsSavingContact] = useState(false);
+  const [customerNotes, setCustomerNotes] = useState<CustomerNoteRecord[]>([]);
+  const [customerTimeline, setCustomerTimeline] = useState<CustomerTimelineEntry[]>([]);
+  const [isLoadingNotes, setIsLoadingNotes] = useState(false);
+  const [newNote, setNewNote] = useState('');
+  const [isSavingNote, setIsSavingNote] = useState(false);
+  const [recentlyCreatedCustomerId, setRecentlyCreatedCustomerId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search, 250);
   const [isLoading, setIsLoading] = useState(true);
@@ -836,6 +1009,8 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
   const customerOptionsRequestRef = useRef<Promise<CustomerOptionsResponse> | null>(null);
   const bookingOptionsRequestRef = useRef<Promise<BookingOptionsResponse> | null>(null);
   usePageToastFeedback(pageError, pageNotice);
+  const canEditProfileIntelligence = portal !== 'driver';
+  const canAddCustomerNotes = true;
 
   const clearCustomerFormErrors = () => {
     setCustomerFormError('');
@@ -922,12 +1097,58 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
     () => customers.find((customer) => customer.id === selectedCustomerId) || null,
     [customers, selectedCustomerId],
   );
-  const selectedCustomerUpcomingBookings = Array.isArray(selectedCustomer?.upcoming_bookings) ? selectedCustomer.upcoming_bookings : [];
-  const selectedCustomerCompletedBookings = Array.isArray(selectedCustomer?.completed_bookings) ? selectedCustomer.completed_bookings : [];
-  const selectedCustomerMissedBookings = Array.isArray(selectedCustomer?.missed_bookings) ? selectedCustomer.missed_bookings : [];
-  const selectedCustomerRideHistory = Array.isArray(selectedCustomer?.ride_history) ? selectedCustomer.ride_history : [];
-  const selectedCustomerRecurringSchedule = Array.isArray(selectedCustomer?.recurring_schedule) ? selectedCustomer.recurring_schedule : [];
-  const selectedCustomerFollowUpHistory = Array.isArray(selectedCustomer?.follow_up_history) ? selectedCustomer.follow_up_history : [];
+  const profileCustomer = selectedCustomerProfile && selectedCustomerProfile.id === selectedCustomerId
+    ? selectedCustomerProfile
+    : null;
+  const selectedCustomerUpcomingBookings = Array.isArray(profileCustomer?.upcoming_bookings) ? profileCustomer.upcoming_bookings : [];
+  const selectedCustomerCompletedBookings = Array.isArray(profileCustomer?.completed_bookings) ? profileCustomer.completed_bookings : [];
+  const selectedCustomerMissedBookings = Array.isArray(profileCustomer?.missed_bookings) ? profileCustomer.missed_bookings : [];
+  const selectedCustomerRideHistory = Array.isArray(profileCustomer?.ride_history) ? profileCustomer.ride_history : [];
+  const selectedCustomerRecurringSchedule = Array.isArray(profileCustomer?.recurring_schedule) ? profileCustomer.recurring_schedule : [];
+  const selectedCustomerFollowUpHistory = Array.isArray(profileCustomer?.follow_up_history) ? profileCustomer.follow_up_history : [];
+
+  useEffect(() => {
+    if (!selectedCustomerId) {
+      setSelectedCustomerProfile(null);
+      setShowOpportunityForm(false);
+      setShowContactForm(false);
+      setNewNote('');
+      return;
+    }
+    setShowOpportunityForm(false);
+    setOpportunityForm(emptyOpportunityForm);
+    setShowContactForm(false);
+    setContactForm(emptyContactForm);
+    setNewNote('');
+    setOpportunities([]);
+    setContacts([]);
+    setCustomerNotes([]);
+    setCustomerTimeline([]);
+    void loadCustomerProfile(selectedCustomerId).catch((error) => {
+      setPageError(getErrorMessage(error, 'Unable to load this customer profile right now.'));
+    });
+  }, [selectedCustomerId]);
+
+  useEffect(() => {
+    if (!selectedCustomerId) {
+      return;
+    }
+    if (activeProfileTab === 'opportunities' && !opportunities.length && !isLoadingOpportunities) {
+      void loadCustomerOpportunities(selectedCustomerId).catch((error) => {
+        setPageError(getErrorMessage(error, 'Unable to load customer opportunities right now.'));
+      });
+    }
+    if (activeProfileTab === 'contacts' && !contacts.length && !isLoadingContacts) {
+      void loadCustomerContacts(selectedCustomerId).catch((error) => {
+        setPageError(getErrorMessage(error, 'Unable to load customer contacts right now.'));
+      });
+    }
+    if (activeProfileTab === 'notes' && !customerTimeline.length && !isLoadingNotes) {
+      void loadCustomerNotes(selectedCustomerId).catch((error) => {
+        setPageError(getErrorMessage(error, 'Unable to load customer notes right now.'));
+      });
+    }
+  }, [activeProfileTab, selectedCustomerId, opportunities.length, contacts.length, customerTimeline.length, isLoadingOpportunities, isLoadingContacts, isLoadingNotes]);
 
   const ensureCustomerOptionsLoaded = async () => {
     if (customerOptions) {
@@ -979,6 +1200,63 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
     return bookingOptionsRequestRef.current;
   };
 
+  const loadCustomerProfile = async (customerId: string) => {
+    setIsLoadingCustomerProfile(true);
+    try {
+      const customer = await fetchCustomerById(customerId);
+      setSelectedCustomerProfile(customer);
+      setRelationshipForm({
+        industry_id: customer.industry_id || '',
+        company_or_institution_name: customer.organization_name || customer.company_name || '',
+        branch_or_department: customer.branch_or_department || '',
+        position_or_role: customer.position_title || '',
+        relationship_role_id: customer.relationship_role_id || '',
+        relationship_category_id: customer.relationship_category_id || '',
+        lead_status_id: customer.lead_status_id || '',
+        customer_source_id: customer.customer_source_id || '',
+        source: customer.source || '',
+        influence_level_id: customer.influence_level_id || '',
+        government_sector_id: customer.government_sector_id || '',
+        organization_type_id: customer.organization_type_id || '',
+        network_value_id: customer.network_value_id || '',
+        opportunity_level_id: customer.opportunity_level_id || '',
+        potential_service_id: customer.potential_service_id || '',
+        relationship_notes: customer.relationship_notes || '',
+      });
+    } finally {
+      setIsLoadingCustomerProfile(false);
+    }
+  };
+
+  const loadCustomerOpportunities = async (customerId: string) => {
+    setIsLoadingOpportunities(true);
+    try {
+      setOpportunities(await fetchCustomerOpportunities(customerId));
+    } finally {
+      setIsLoadingOpportunities(false);
+    }
+  };
+
+  const loadCustomerContacts = async (customerId: string) => {
+    setIsLoadingContacts(true);
+    try {
+      setContacts(await fetchCustomerContacts(customerId));
+    } finally {
+      setIsLoadingContacts(false);
+    }
+  };
+
+  const loadCustomerNotes = async (customerId: string) => {
+    setIsLoadingNotes(true);
+    try {
+      const data = await fetchCustomerNotes(customerId);
+      setCustomerNotes(data.notes);
+      setCustomerTimeline(data.timeline);
+    } finally {
+      setIsLoadingNotes(false);
+    }
+  };
+
   const summaryScopedCustomers = useMemo(
     () =>
       customers.filter((customer) =>
@@ -1022,10 +1300,63 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
     summaryScopedCustomers,
   ]);
 
-  const occupationSuggestions = useMemo(
-    () => Array.from(new Set(customers.map((customer) => customer.occupation).filter(Boolean) as string[])).sort(),
-    [customers],
+  const customerCategorySelectOptions = useMemo(
+    () => buildMasterDataSelectOptions(customerOptions?.customer_category_items),
+    [customerOptions?.customer_category_items],
   );
+  const customerSourceSelectOptions = useMemo(
+    () => buildMasterDataSelectOptions(customerOptions?.customer_source_items),
+    [customerOptions?.customer_source_items],
+  );
+  const sourceSelectOptions = useMemo(
+    () => buildStringValueOptions(customerOptions?.source_options, editingCustomer?.source || undefined),
+    [customerOptions?.source_options, editingCustomer?.source],
+  );
+  const organizationTypeSelectOptions = useMemo(
+    () => buildMasterDataSelectOptions(customerOptions?.organization_type_items),
+    [customerOptions?.organization_type_items],
+  );
+  const industrySelectOptions = useMemo(
+    () => buildMasterDataSelectOptions(customerOptions?.industry_items),
+    [customerOptions?.industry_items],
+  );
+  const governmentSectorSelectOptions = useMemo(
+    () => buildMasterDataSelectOptions(customerOptions?.government_sector_items),
+    [customerOptions?.government_sector_items],
+  );
+  const relationshipCategorySelectOptions = useMemo(
+    () => buildMasterDataSelectOptions(customerOptions?.relationship_category_items),
+    [customerOptions?.relationship_category_items],
+  );
+  const relationshipRoleSelectOptions = useMemo(
+    () => buildMasterDataSelectOptions(customerOptions?.relationship_role_items),
+    [customerOptions?.relationship_role_items],
+  );
+  const opportunityLevelSelectOptions = useMemo(
+    () => buildMasterDataSelectOptions(customerOptions?.opportunity_level_items),
+    [customerOptions?.opportunity_level_items],
+  );
+  const opportunityStageSelectOptions = useMemo(
+    () => buildMasterDataSelectOptions(customerOptions?.opportunity_stage_items),
+    [customerOptions?.opportunity_stage_items],
+  );
+  const networkValueSelectOptions = useMemo(
+    () => buildMasterDataSelectOptions(customerOptions?.network_value_items),
+    [customerOptions?.network_value_items],
+  );
+  const influenceLevelSelectOptions = useMemo(
+    () => buildMasterDataSelectOptions(customerOptions?.influence_level_items),
+    [customerOptions?.influence_level_items],
+  );
+  const leadStatusSelectOptions = useMemo(
+    () => buildMasterDataSelectOptions(customerOptions?.lead_status_items),
+    [customerOptions?.lead_status_items],
+  );
+  const potentialServiceSelectOptions = useMemo(
+    () => buildMasterDataSelectOptions(customerOptions?.potential_service_items),
+    [customerOptions?.potential_service_items],
+  );
+  const profileDisplayCustomer = profileCustomer || selectedCustomer;
 
   const filteredCustomers = useMemo(
     () =>
@@ -1148,7 +1479,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
     setEditingCustomer(null);
     setCustomerForm({
       ...emptyCustomerForm,
-      source: 'manual_entry',
+      source: firstOptionValue(buildStringValueOptions(options.source_options)),
       customer_category_id: options.customer_category_items?.[0]?.id || '',
       follow_up_priority: options.follow_up_priorities?.[1] || 'medium',
       lead_status_id: options.lead_status_items?.[0]?.id || '',
@@ -1159,7 +1490,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
   const openEditCustomer = async (customer: CustomerRecord) => {
     clearCustomerFormErrors();
     setPageError('');
-    await ensureCustomerOptionsLoaded().catch(() => null);
+    const options = await ensureCustomerOptionsLoaded().catch(() => null);
     setEditingCustomer(customer);
     setCustomerForm({
       full_name: customer.full_name || '',
@@ -1176,7 +1507,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
       preferred_dropoff_location: customer.preferred_dropoff_location || '',
       residential_area: customer.residential_area || '',
       work_area: customer.work_area || '',
-      source: customer.source || 'manual_entry',
+      source: customer.source || firstOptionValue(buildStringValueOptions(options?.source_options, customer.customer_source || customer.source || undefined)),
       customer_category_id: customer.customer_category_id || '',
       customer_source_id: customer.customer_source_id || '',
       organization_type_id: customer.organization_type_id || '',
@@ -1297,6 +1628,9 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
         return [savedCustomer, ...current];
       });
       setSelectedCustomerId(savedCustomer.id);
+      setSelectedCustomerProfile(savedCustomer);
+      setActiveProfileTab('overview');
+      setRecentlyCreatedCustomerId(editingCustomer ? null : savedCustomer.id);
       setPageNotice(editingCustomer ? 'Customer profile updated.' : 'Customer added successfully.');
     } catch (error) {
       if (error instanceof ApiRequestError) {
@@ -1395,6 +1729,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
         follow_up_completion_note: `Completed from ${portal} portal`,
       });
       setCustomers((current) => current.map((customer) => (customer.id === updated.id ? updated : customer)));
+      setSelectedCustomerProfile(updated);
       setPageNotice('Follow-up marked as completed.');
     } catch (error) {
       if (error instanceof ApiRequestError) {
@@ -1402,6 +1737,113 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
       } else {
         setPageError('Unable to complete that follow-up right now.');
       }
+    }
+  };
+
+  const handleSaveRelationship = async () => {
+    if (!profileCustomer || !canEditProfileIntelligence) {
+      return;
+    }
+    setIsSavingRelationship(true);
+    setPageError('');
+    try {
+      const updated = await updateCustomerRelationship(profileCustomer.id, relationshipForm);
+      setSelectedCustomerProfile(updated);
+      setCustomers((current) => current.map((customer) => (customer.id === updated.id ? { ...customer, ...updated } : customer)));
+      setPageNotice('Relationship details updated.');
+    } catch (error) {
+      setPageError(getErrorMessage(error, 'Unable to update relationship details right now.'));
+    } finally {
+      setIsSavingRelationship(false);
+    }
+  };
+
+  const handleSaveOpportunity = async () => {
+    if (!profileCustomer || !canEditProfileIntelligence) {
+      return;
+    }
+    setIsSavingOpportunity(true);
+    setPageError('');
+    try {
+      const payload = {
+        opportunity_type_id: opportunityForm.opportunity_type_id || undefined,
+        specific_product_or_service: opportunityForm.specific_product_or_service || undefined,
+        estimated_budget: opportunityForm.estimated_budget ? Number(opportunityForm.estimated_budget) : null,
+        opportunity_stage_id: opportunityForm.opportunity_stage_id || undefined,
+        probability: opportunityForm.probability ? Number(opportunityForm.probability) : null,
+        expected_purchase_date: opportunityForm.expected_purchase_date || undefined,
+        follow_up_date: opportunityForm.follow_up_date || undefined,
+        notes: opportunityForm.notes || undefined,
+        status: opportunityForm.status || undefined,
+      };
+      const saved = opportunityForm.id
+        ? await updateCustomerOpportunity(profileCustomer.id, opportunityForm.id, payload)
+        : await createCustomerOpportunity(profileCustomer.id, payload);
+      setOpportunities((current) => {
+        if (opportunityForm.id) {
+          return current.map((item) => (item.id === saved.id ? saved : item));
+        }
+        return [saved, ...current];
+      });
+      setOpportunityForm(emptyOpportunityForm);
+      setShowOpportunityForm(false);
+      setPageNotice(opportunityForm.id ? 'Opportunity updated.' : 'Opportunity added.');
+    } catch (error) {
+      setPageError(getErrorMessage(error, 'Unable to save this opportunity right now.'));
+    } finally {
+      setIsSavingOpportunity(false);
+    }
+  };
+
+  const handleSaveContact = async () => {
+    if (!profileCustomer || !canEditProfileIntelligence) {
+      return;
+    }
+    setIsSavingContact(true);
+    setPageError('');
+    try {
+      const payload = {
+        contact_name: contactForm.contact_name,
+        phone: contactForm.phone || undefined,
+        email: contactForm.email || undefined,
+        position_or_role: contactForm.position_or_role || undefined,
+        relationship_role_id: contactForm.relationship_role_id || undefined,
+        notes: contactForm.notes || undefined,
+      };
+      const saved = contactForm.id
+        ? await updateCustomerContact(profileCustomer.id, contactForm.id, payload)
+        : await createCustomerContact(profileCustomer.id, payload);
+      setContacts((current) => {
+        if (contactForm.id) {
+          return current.map((item) => (item.id === saved.id ? saved : item));
+        }
+        return [saved, ...current];
+      });
+      setContactForm(emptyContactForm);
+      setShowContactForm(false);
+      setPageNotice(contactForm.id ? 'Contact updated.' : 'Contact added.');
+    } catch (error) {
+      setPageError(getErrorMessage(error, 'Unable to save this contact right now.'));
+    } finally {
+      setIsSavingContact(false);
+    }
+  };
+
+  const handleAddNote = async () => {
+    if (!profileCustomer || !canAddCustomerNotes || !newNote.trim()) {
+      return;
+    }
+    setIsSavingNote(true);
+    setPageError('');
+    try {
+      await createCustomerNote(profileCustomer.id, { note: newNote });
+      setNewNote('');
+      await loadCustomerNotes(profileCustomer.id);
+      setPageNotice('Note added.');
+    } catch (error) {
+      setPageError(getErrorMessage(error, 'Unable to add this note right now.'));
+    } finally {
+      setIsSavingNote(false);
     }
   };
 
@@ -1484,6 +1926,38 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
           </button>
         </div>
       </div>
+
+      {recentlyCreatedCustomerId && (
+        <div className="rounded-2xl border border-blue-200 bg-blue-50 px-4 py-4">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <div className="text-sm font-semibold text-[#0F172A]">Customer saved successfully.</div>
+              <p className="mt-1 text-sm text-gray-600">You can open the full profile now or add another customer right away.</p>
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <button
+                onClick={() => {
+                  setSelectedCustomerId(recentlyCreatedCustomerId);
+                  setActiveProfileTab('overview');
+                  setRecentlyCreatedCustomerId(null);
+                }}
+                className="rounded-xl bg-[#2563EB] px-4 py-2.5 text-sm font-medium text-white hover:bg-[#1d4ed8]"
+              >
+                View Profile
+              </button>
+              <button
+                onClick={() => {
+                  setRecentlyCreatedCustomerId(null);
+                  void openCreateCustomer();
+                }}
+                className="rounded-xl border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Add Another Customer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
         {metrics.primary.map((card) => {
@@ -1694,11 +2168,11 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                       </span>
                     </div>
                   </div>
-                <div className="text-right text-xs text-gray-500">
-                  <div>{customer.total_rides || 0} rides</div>
-                  <div className="mt-1">{customer.upcoming_bookings_count || 0} upcoming</div>
-                  <div className="mt-1">{customer.completed_bookings_count || 0} completed</div>
-                  <div className="mt-1">{customer.missed_bookings_count || 0} missed</div>
+                  <div className="text-right text-xs text-gray-500">
+                  <div>{formatOptionalCount(customer.total_rides)} rides</div>
+                  <div className="mt-1">{formatOptionalCount(customer.upcoming_bookings_count)} upcoming</div>
+                  <div className="mt-1">{formatOptionalCount(customer.completed_bookings_count)} completed</div>
+                  <div className="mt-1">{formatOptionalCount(customer.missed_bookings_count)} missed</div>
                   {customer.active_follow_up_date && (
                     <div className="mt-1">{customer.follow_up_status_label}</div>
                   )}
@@ -1719,60 +2193,60 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                   <div className="space-y-3">
                     <div>
-                      <h2 className="text-2xl font-semibold">{selectedCustomer.full_name}</h2>
+                      <h2 className="text-2xl font-semibold">{profileDisplayCustomer?.full_name || selectedCustomer.full_name}</h2>
                       <p className="mt-1 text-sm text-blue-100">
-                        {selectedCustomer.occupation || 'Customer profile'}
-                        {selectedCustomer.organization_name ? ` - ${selectedCustomer.organization_name}` : ''}
+                        {profileDisplayCustomer?.occupation || 'Customer profile'}
+                        {(profileDisplayCustomer?.organization_name || profileDisplayCustomer?.company_name) ? ` - ${profileDisplayCustomer?.organization_name || profileDisplayCustomer?.company_name}` : ''}
                       </p>
                     </div>
                     <div className="flex flex-wrap gap-2 text-sm text-blue-100">
                       <span className="inline-flex items-center gap-1 rounded-lg bg-white/10 px-3 py-1.5">
                         <Phone className="h-4 w-4" />
-                        {selectedCustomer.phone_number}
+                        {profileDisplayCustomer?.phone_number || selectedCustomer.phone_number}
                       </span>
                       <span className="inline-flex items-center gap-1 rounded-lg bg-white/10 px-3 py-1.5">
                         <MapPin className="h-4 w-4" />
-                        {selectedCustomer.preferred_pickup_location || selectedCustomer.pickup_location || 'Pickup not set'}
+                        {profileDisplayCustomer?.residential_area || selectedCustomer.residential_area || 'Location not set'}
                       </span>
                       <span className="inline-flex items-center gap-1 rounded-lg bg-white/10 px-3 py-1.5">
                         <Briefcase className="h-4 w-4" />
-                        {selectedCustomer.customer_category}
+                        {profileDisplayCustomer?.customer_category || selectedCustomer.customer_category}
                       </span>
-                      {selectedCustomer.relationship_category && (
-                        <span className="inline-flex items-center gap-1 rounded-lg bg-white/10 px-3 py-1.5">
-                          <Star className="h-4 w-4" />
-                          {selectedCustomer.relationship_category}
-                        </span>
-                      )}
                     </div>
-                    <div className="mt-2 text-xs text-gray-500">
-                      Created by {selectedCustomer?.created_by_name || 'Unknown / Legacy Record'}
-                      {selectedCustomer?.created_by_role ? ` (${selectedCustomer.created_by_role})` : ''}
+                    <div className="mt-2 text-xs text-gray-200">
+                      Created by {profileDisplayCustomer?.created_by_name || selectedCustomer.created_by_name || 'Unknown / Legacy Record'}
+                      {(profileDisplayCustomer?.created_by_role || selectedCustomer.created_by_role) ? ` (${profileDisplayCustomer?.created_by_role || selectedCustomer.created_by_role})` : ''}
                     </div>
                   </div>
-                  <button
-                    onClick={() => void openEditCustomer(selectedCustomer)}
-                    className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-white/15 px-4 py-2.5 text-sm font-medium text-white hover:bg-white/25 sm:w-auto"
-                  >
-                    <Pencil className="h-4 w-4" />
-                    Edit Profile
-                  </button>
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    <button
+                      onClick={() => {
+                        setActiveProfileTab('overview');
+                        void loadCustomerProfile(selectedCustomer.id);
+                      }}
+                      className="inline-flex items-center justify-center gap-2 rounded-xl bg-white/15 px-4 py-2.5 text-sm font-medium text-white hover:bg-white/25"
+                    >
+                      View Profile
+                    </button>
+                    <button
+                      onClick={() => void openEditCustomer(profileDisplayCustomer || selectedCustomer)}
+                      className="inline-flex items-center justify-center gap-2 rounded-xl bg-white/15 px-4 py-2.5 text-sm font-medium text-white hover:bg-white/25"
+                    >
+                      <Pencil className="h-4 w-4" />
+                      Edit Basic Info
+                    </button>
+                  </div>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-6">
                 {[
-                  { label: 'Total Rides', value: selectedCustomer.total_rides || 0 },
-                  { label: 'Total Bookings', value: selectedCustomer.total_bookings || 0 },
-                  { label: 'Upcoming', value: selectedCustomer.upcoming_bookings_count || 0 },
-                  { label: 'Completed', value: selectedCustomer.completed_bookings_count || 0 },
-                  { label: 'Missed', value: selectedCustomer.missed_bookings_count || 0 },
-                  {
-                    label: 'Follow-Up',
-                    value: selectedCustomer.active_follow_up_date
-                      ? formatDate(selectedCustomer.active_follow_up_date)
-                      : 'Not scheduled',
-                  },
+                  { label: 'Total Rides', value: profileDisplayCustomer?.total_rides || 0 },
+                  { label: 'Total Bookings', value: profileDisplayCustomer?.total_bookings || 0 },
+                  { label: 'Upcoming', value: profileDisplayCustomer?.upcoming_bookings_count || 0 },
+                  { label: 'Completed', value: profileDisplayCustomer?.completed_bookings_count || 0 },
+                  { label: 'Missed', value: profileDisplayCustomer?.missed_bookings_count || 0 },
+                  { label: 'Follow-Up', value: profileDisplayCustomer?.active_follow_up_date ? formatDate(profileDisplayCustomer.active_follow_up_date) : 'Not scheduled' },
                 ].map((item) => (
                   <div key={item.label} className="rounded-2xl border border-gray-200 bg-white p-4">
                     <div className="text-xs font-medium uppercase tracking-wide text-gray-500">{item.label}</div>
@@ -1781,209 +2255,243 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                 ))}
               </div>
 
-              <div className="grid grid-cols-1 gap-6 2xl:grid-cols-[1.3fr_1fr]">
-                <div className="space-y-6">
-                  <section className="rounded-2xl border border-gray-200 bg-white">
-                    <div className="border-b border-gray-200 px-5 py-4">
-                      <h3 className="text-lg font-semibold text-[#0F172A]">Customer Details</h3>
-                    </div>
-                    <div className="grid grid-cols-1 gap-4 p-5 md:grid-cols-2">
-                      {[
-                        ['Phone', selectedCustomer.phone_number],
-                        ['Alternate Phone', selectedCustomer.alternate_phone || 'Not set'],
-                        ['Occupation', selectedCustomer.occupation || 'Not set'],
-                        ['Position', selectedCustomer.position_title || 'Not set'],
-                        ['Organization', selectedCustomer.organization_name || selectedCustomer.company_name || 'Not set'],
-                        ['Source', selectedCustomer.source_label || selectedCustomer.customer_source || 'Not set'],
-                        ['Created By', selectedCustomer.created_by_name || 'Unknown / Legacy Record'],
-                        ['Creator Role', selectedCustomer.created_by_role || 'legacy'],
-                        ['Relationship Category', selectedCustomer.relationship_category || 'Not set'],
-                        ['Opportunity Level', selectedCustomer.opportunity_level || 'Not set'],
-                        ['Network Value', selectedCustomer.network_value || 'Not set'],
-                        ['Lead Status', selectedCustomer.lead_status || 'Not set'],
-                        ['Residential Area', selectedCustomer.residential_area || 'Not set'],
-                        ['Work Area', selectedCustomer.work_area || 'Not set'],
-                        ['Assigned Driver', selectedCustomer.assigned_driver?.full_name || selectedCustomer.preferred_driver?.full_name || 'Not set'],
-                        ['Email', selectedCustomer.email_address || 'Not set'],
-                      ].map(([label, value]) => (
-                        <div key={label}>
-                          <div className="text-xs font-medium uppercase tracking-wide text-gray-500">{label}</div>
-                          <div className="mt-1 text-sm text-[#0F172A]">{value}</div>
-                        </div>
-                      ))}
-                    </div>
-                  </section>
+              <div className="flex flex-wrap gap-2 rounded-2xl border border-gray-200 bg-white p-3">
+                {[
+                  ['overview', 'Overview'],
+                  ['relationship', 'Relationship Details'],
+                  ['opportunities', 'Opportunities'],
+                  ['contacts', 'Additional Contacts'],
+                  ['trips', 'Trips / Bookings'],
+                  ['notes', 'Notes / Timeline'],
+                ].map(([id, label]) => (
+                  <button
+                    key={id}
+                    onClick={() => setActiveProfileTab(id as CustomerProfileTab)}
+                    className={`rounded-xl px-4 py-2 text-sm font-medium ${
+                      activeProfileTab === id ? 'bg-[#2563EB] text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
 
+              {isLoadingCustomerProfile && !profileCustomer ? (
+                <div className="rounded-2xl border border-gray-200 bg-white px-6 py-12 text-center text-sm text-gray-500">
+                  Loading customer profile...
+                </div>
+              ) : null}
+
+              {activeProfileTab === 'overview' && profileDisplayCustomer && (
+                <section className="rounded-2xl border border-gray-200 bg-white p-5">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-lg font-semibold text-[#0F172A]">Overview</h3>
+                    <button
+                      onClick={() => void openEditCustomer(profileDisplayCustomer)}
+                      className="rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                    >
+                      Edit Basic Info
+                    </button>
+                  </div>
+                  <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+                    {[
+                      ['Customer Name', profileDisplayCustomer.full_name],
+                      ['Phone', profileDisplayCustomer.phone_number],
+                      ['Location', profileDisplayCustomer.residential_area || 'Not set'],
+                      ['Organization / Business Name', profileDisplayCustomer.organization_name || profileDisplayCustomer.company_name || 'Not set'],
+                      ['Customer Type / Category', profileDisplayCustomer.customer_category || 'Not set'],
+                      ['Email', profileDisplayCustomer.email_address || 'Not set'],
+                      ['Status', profileDisplayCustomer.status || 'Not set'],
+                      ['Created By', profileDisplayCustomer.created_by_name || 'Unknown / Legacy Record'],
+                      ['Created Date', formatDate(profileDisplayCustomer.created_at)],
+                    ].map(([label, value]) => (
+                      <div key={label} className="rounded-xl bg-gray-50 p-4">
+                        <div className="text-xs font-medium uppercase tracking-wide text-gray-500">{label}</div>
+                        <div className="mt-2 text-sm text-[#0F172A]">{value}</div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              {activeProfileTab === 'relationship' && profileDisplayCustomer && (
+                <section className="rounded-2xl border border-gray-200 bg-white p-5">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-lg font-semibold text-[#0F172A]">Relationship Details</h3>
+                    {canEditProfileIntelligence && (
+                      <button
+                        onClick={() => void handleSaveRelationship()}
+                        disabled={isSavingRelationship}
+                        className="rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-medium text-white hover:bg-[#1d4ed8] disabled:opacity-60"
+                      >
+                        {isSavingRelationship ? 'Saving...' : 'Save Relationship'}
+                      </button>
+                    )}
+                  </div>
+                  <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+                    <SearchableSelect value={relationshipForm.industry_id} onChange={(value) => setRelationshipForm((current) => ({ ...current, industry_id: value }))} options={industrySelectOptions} placeholder="Select industry" searchPlaceholder="Search industries..." emptyLabel="No industries found." allowClear clearLabel="No industry" disabled={!canEditProfileIntelligence} />
+                    <SearchableSelect value={relationshipForm.government_sector_id} onChange={(value) => setRelationshipForm((current) => ({ ...current, government_sector_id: value }))} options={governmentSectorSelectOptions} placeholder="Select government sector" searchPlaceholder="Search government sectors..." emptyLabel="No government sectors found." allowClear clearLabel="No government sector" disabled={!canEditProfileIntelligence} />
+                    <input value={relationshipForm.company_or_institution_name} onChange={(event) => setRelationshipForm((current) => ({ ...current, company_or_institution_name: event.target.value }))} placeholder="Company or institution name" disabled={!canEditProfileIntelligence} className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-500" />
+                    <input value={relationshipForm.branch_or_department} onChange={(event) => setRelationshipForm((current) => ({ ...current, branch_or_department: event.target.value }))} placeholder="Branch or department" disabled={!canEditProfileIntelligence} className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-500" />
+                    <SearchableSelect value={relationshipForm.customer_source_id} onChange={(value) => setRelationshipForm((current) => ({ ...current, customer_source_id: value }))} options={customerSourceSelectOptions} placeholder="Select customer source" searchPlaceholder="Search customer sources..." emptyLabel="No customer sources found." allowClear clearLabel="No customer source" disabled={!canEditProfileIntelligence} />
+                    <SearchableSelect value={relationshipForm.source} onChange={(value) => setRelationshipForm((current) => ({ ...current, source: value }))} options={sourceSelectOptions} placeholder="Select source" searchPlaceholder="Search sources..." emptyLabel="No sources found." allowClear clearLabel="No source" disabled={!canEditProfileIntelligence} />
+                    <SearchableSelect value={relationshipForm.relationship_category_id} onChange={(value) => setRelationshipForm((current) => ({ ...current, relationship_category_id: value }))} options={relationshipCategorySelectOptions} placeholder="Select relationship category" searchPlaceholder="Search relationship categories..." emptyLabel="No relationship categories found." allowClear clearLabel="No relationship category" disabled={!canEditProfileIntelligence} />
+                    <SearchableSelect value={relationshipForm.relationship_role_id} onChange={(value) => setRelationshipForm((current) => ({ ...current, relationship_role_id: value }))} options={relationshipRoleSelectOptions} placeholder="Select relationship role" searchPlaceholder="Search relationship roles..." emptyLabel="No relationship roles found." allowClear clearLabel="No relationship role" disabled={!canEditProfileIntelligence} />
+                    <SearchableSelect value={relationshipForm.lead_status_id} onChange={(value) => setRelationshipForm((current) => ({ ...current, lead_status_id: value }))} options={leadStatusSelectOptions} placeholder="Select lead status" searchPlaceholder="Search lead statuses..." emptyLabel="No lead statuses found." allowClear clearLabel="No lead status" disabled={!canEditProfileIntelligence} />
+                    <SearchableSelect value={relationshipForm.influence_level_id} onChange={(value) => setRelationshipForm((current) => ({ ...current, influence_level_id: value }))} options={influenceLevelSelectOptions} placeholder="Select influence level" searchPlaceholder="Search influence levels..." emptyLabel="No influence levels found." allowClear clearLabel="No influence level" disabled={!canEditProfileIntelligence} />
+                    <SearchableSelect value={relationshipForm.organization_type_id} onChange={(value) => setRelationshipForm((current) => ({ ...current, organization_type_id: value }))} options={organizationTypeSelectOptions} placeholder="Select organization type" searchPlaceholder="Search organization types..." emptyLabel="No organization types found." allowClear clearLabel="No organization type" disabled={!canEditProfileIntelligence} />
+                    <SearchableSelect value={relationshipForm.opportunity_level_id} onChange={(value) => setRelationshipForm((current) => ({ ...current, opportunity_level_id: value }))} options={opportunityLevelSelectOptions} placeholder="Select opportunity level" searchPlaceholder="Search opportunity levels..." emptyLabel="No opportunity levels found." allowClear clearLabel="No opportunity level" disabled={!canEditProfileIntelligence} />
+                    <SearchableSelect value={relationshipForm.network_value_id} onChange={(value) => setRelationshipForm((current) => ({ ...current, network_value_id: value }))} options={networkValueSelectOptions} placeholder="Select network value" searchPlaceholder="Search network values..." emptyLabel="No network values found." allowClear clearLabel="No network value" disabled={!canEditProfileIntelligence} />
+                    <SearchableSelect value={relationshipForm.potential_service_id} onChange={(value) => setRelationshipForm((current) => ({ ...current, potential_service_id: value }))} options={potentialServiceSelectOptions} placeholder="Select potential service" searchPlaceholder="Search potential services..." emptyLabel="No potential services found." allowClear clearLabel="No potential service" disabled={!canEditProfileIntelligence} />
+                    <SearchableSelect value={relationshipForm.position_or_role} onChange={(value) => setRelationshipForm((current) => ({ ...current, position_or_role: value }))} options={buildStringValueOptions(customerOptions?.position_or_occupation_items, relationshipForm.position_or_role)} placeholder="Select position or role" searchPlaceholder="Search positions or roles..." emptyLabel="No positions found." allowClear clearLabel="No position" disabled={!canEditProfileIntelligence} />
+                    <textarea value={relationshipForm.relationship_notes} onChange={(event) => setRelationshipForm((current) => ({ ...current, relationship_notes: event.target.value }))} rows={4} placeholder="Relationship notes" disabled={!canEditProfileIntelligence} className="md:col-span-2 w-full rounded-xl border border-gray-300 px-4 py-3 text-sm disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-500" />
+                  </div>
+                </section>
+              )}
+
+              {activeProfileTab === 'opportunities' && profileDisplayCustomer && (
+                <section className="rounded-2xl border border-gray-200 bg-white p-5">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-lg font-semibold text-[#0F172A]">Opportunities</h3>
+                    {canEditProfileIntelligence && (
+                      <button onClick={() => { setOpportunityForm(emptyOpportunityForm); setShowOpportunityForm((current) => !current); }} className="rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-medium text-white hover:bg-[#1d4ed8]">Add Opportunity</button>
+                    )}
+                  </div>
+                  {showOpportunityForm && canEditProfileIntelligence && (
+                    <div className="mt-4 grid grid-cols-1 gap-4 rounded-xl border border-gray-200 p-4 md:grid-cols-2">
+                      <SearchableSelect value={opportunityForm.opportunity_type_id} onChange={(value) => setOpportunityForm((current) => ({ ...current, opportunity_type_id: value }))} options={potentialServiceSelectOptions} placeholder="Select opportunity type" searchPlaceholder="Search opportunity types..." emptyLabel="No opportunity types found." />
+                      <SearchableSelect value={opportunityForm.opportunity_stage_id} onChange={(value) => setOpportunityForm((current) => ({ ...current, opportunity_stage_id: value }))} options={opportunityStageSelectOptions} placeholder="Select opportunity stage" searchPlaceholder="Search opportunity stages..." emptyLabel="No opportunity stages found." allowClear clearLabel="No stage" />
+                      <input value={opportunityForm.specific_product_or_service} onChange={(event) => setOpportunityForm((current) => ({ ...current, specific_product_or_service: event.target.value }))} placeholder="Specific product or service" className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
+                      <input type="number" min="0" value={opportunityForm.estimated_budget} onChange={(event) => setOpportunityForm((current) => ({ ...current, estimated_budget: event.target.value }))} placeholder="Estimated budget" className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
+                      <input type="number" min="0" max="100" value={opportunityForm.probability} onChange={(event) => setOpportunityForm((current) => ({ ...current, probability: event.target.value }))} placeholder="Probability %" className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
+                      <input value={opportunityForm.status} onChange={(event) => setOpportunityForm((current) => ({ ...current, status: event.target.value }))} placeholder="Status" className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
+                      <input type="date" value={opportunityForm.expected_purchase_date} onChange={(event) => setOpportunityForm((current) => ({ ...current, expected_purchase_date: event.target.value }))} className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
+                      <input type="date" value={opportunityForm.follow_up_date} onChange={(event) => setOpportunityForm((current) => ({ ...current, follow_up_date: event.target.value }))} className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
+                      <textarea value={opportunityForm.notes} onChange={(event) => setOpportunityForm((current) => ({ ...current, notes: event.target.value }))} rows={3} placeholder="Notes" className="md:col-span-2 w-full rounded-xl border border-gray-300 px-4 py-3 text-sm" />
+                      <div className="md:col-span-2 flex justify-end gap-2">
+                        <button onClick={() => { setShowOpportunityForm(false); setOpportunityForm(emptyOpportunityForm); }} className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">Cancel</button>
+                        <button onClick={() => void handleSaveOpportunity()} disabled={isSavingOpportunity} className="rounded-lg bg-[#2563EB] px-3 py-2 text-sm text-white hover:bg-[#1d4ed8] disabled:opacity-60">{isSavingOpportunity ? 'Saving...' : opportunityForm.id ? 'Update Opportunity' : 'Save Opportunity'}</button>
+                      </div>
+                    </div>
+                  )}
+                  <div className="mt-4 space-y-3">
+                    {isLoadingOpportunities ? (
+                      <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">Loading opportunities...</div>
+                    ) : opportunities.length ? opportunities.map((opportunity) => (
+                      <div key={opportunity.id} className="rounded-xl border border-gray-200 p-4">
+                        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                          <div>
+                            <div className="text-sm font-semibold text-[#0F172A]">{opportunity.opportunity_type || 'Opportunity'}</div>
+                            <div className="mt-1 text-xs text-gray-500">{opportunity.specific_product_or_service || 'No product/service specified'}</div>
+                            <div className="mt-2 text-xs text-gray-500">{opportunity.opportunity_stage || 'No stage'}{opportunity.estimated_budget ? ` • ${formatCurrency(opportunity.estimated_budget)}` : ''}</div>
+                          </div>
+                          {canEditProfileIntelligence && (
+                            <button onClick={() => { setOpportunityForm({ id: opportunity.id, opportunity_type_id: opportunity.opportunity_type_id || '', specific_product_or_service: opportunity.specific_product_or_service || '', estimated_budget: opportunity.estimated_budget ? String(opportunity.estimated_budget) : '', opportunity_stage_id: opportunity.opportunity_stage_id || '', probability: opportunity.probability ? String(opportunity.probability) : '', expected_purchase_date: opportunity.expected_purchase_date || '', follow_up_date: opportunity.follow_up_date || '', notes: opportunity.notes || '', status: opportunity.status || 'open' }); setShowOpportunityForm(true); }} className="rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50">Edit</button>
+                          )}
+                        </div>
+                      </div>
+                    )) : (
+                      <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">No opportunities yet. Add opportunity.</div>
+                    )}
+                  </div>
+                </section>
+              )}
+
+              {activeProfileTab === 'contacts' && profileDisplayCustomer && (
+                <section className="rounded-2xl border border-gray-200 bg-white p-5">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-lg font-semibold text-[#0F172A]">Additional Contacts</h3>
+                    {canEditProfileIntelligence && (
+                      <button onClick={() => { setContactForm(emptyContactForm); setShowContactForm((current) => !current); }} className="rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-medium text-white hover:bg-[#1d4ed8]">Add Contact</button>
+                    )}
+                  </div>
+                  {showContactForm && canEditProfileIntelligence && (
+                    <div className="mt-4 grid grid-cols-1 gap-4 rounded-xl border border-gray-200 p-4 md:grid-cols-2">
+                      <input value={contactForm.contact_name} onChange={(event) => setContactForm((current) => ({ ...current, contact_name: event.target.value }))} placeholder="Contact name" className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
+                      <input value={contactForm.position_or_role} onChange={(event) => setContactForm((current) => ({ ...current, position_or_role: event.target.value }))} placeholder="Position or role" className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
+                      <input value={contactForm.phone} onChange={(event) => setContactForm((current) => ({ ...current, phone: event.target.value }))} placeholder="Phone" className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
+                      <input type="email" value={contactForm.email} onChange={(event) => setContactForm((current) => ({ ...current, email: event.target.value }))} placeholder="Email" className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm" />
+                      <SearchableSelect value={contactForm.relationship_role_id} onChange={(value) => setContactForm((current) => ({ ...current, relationship_role_id: value }))} options={relationshipRoleSelectOptions} placeholder="Select relationship role" searchPlaceholder="Search relationship roles..." emptyLabel="No relationship roles found." allowClear clearLabel="No relationship role" />
+                      <textarea value={contactForm.notes} onChange={(event) => setContactForm((current) => ({ ...current, notes: event.target.value }))} rows={3} placeholder="Notes" className="w-full rounded-xl border border-gray-300 px-4 py-3 text-sm" />
+                      <div className="md:col-span-2 flex justify-end gap-2">
+                        <button onClick={() => { setShowContactForm(false); setContactForm(emptyContactForm); }} className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">Cancel</button>
+                        <button onClick={() => void handleSaveContact()} disabled={isSavingContact} className="rounded-lg bg-[#2563EB] px-3 py-2 text-sm text-white hover:bg-[#1d4ed8] disabled:opacity-60">{isSavingContact ? 'Saving...' : contactForm.id ? 'Update Contact' : 'Save Contact'}</button>
+                      </div>
+                    </div>
+                  )}
+                  <div className="mt-4 space-y-3">
+                    {isLoadingContacts ? (
+                      <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">Loading contacts...</div>
+                    ) : contacts.length ? contacts.map((contact) => (
+                      <div key={contact.id} className="rounded-xl border border-gray-200 p-4">
+                        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                          <div>
+                            <div className="text-sm font-semibold text-[#0F172A]">{contact.contact_name}</div>
+                            <div className="mt-1 text-xs text-gray-500">{contact.position_or_role || 'No position'}{contact.relationship_role ? ` • ${contact.relationship_role}` : ''}</div>
+                            <div className="mt-1 text-xs text-gray-500">{contact.phone || 'No phone'}{contact.email ? ` • ${contact.email}` : ''}</div>
+                          </div>
+                          {canEditProfileIntelligence && (
+                            <button onClick={() => { setContactForm({ id: contact.id, contact_name: contact.contact_name, phone: contact.phone || '', email: contact.email || '', position_or_role: contact.position_or_role || '', relationship_role_id: contact.relationship_role_id || '', notes: contact.notes || '' }); setShowContactForm(true); }} className="rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50">Edit</button>
+                          )}
+                        </div>
+                      </div>
+                    )) : (
+                      <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">No additional contacts yet.</div>
+                    )}
+                  </div>
+                </section>
+              )}
+
+              {activeProfileTab === 'trips' && profileDisplayCustomer && (
+                <div className="grid grid-cols-1 gap-6 2xl:grid-cols-[1.2fr_1fr]">
                   <section className="rounded-2xl border border-gray-200 bg-white">
                     <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4">
-                      <h3 className="text-lg font-semibold text-[#0F172A]">Upcoming Bookings</h3>
-                      <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
-                        <button
-                          onClick={openCreateBooking}
-                          className="w-full rounded-lg bg-[#2563EB] px-3 py-2 text-xs font-medium text-white hover:bg-[#1d4ed8] sm:w-auto"
-                        >
-                          Add Booking
-                        </button>
-                        <button
-                          onClick={openCreateFollowUpBooking}
-                          className="w-full rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700 hover:bg-amber-100 sm:w-auto"
-                        >
-                          Add Follow-Up
-                        </button>
+                      <h3 className="text-lg font-semibold text-[#0F172A]">Trips / Bookings</h3>
+                      <div className="flex gap-2">
+                        <button onClick={openCreateBooking} className="rounded-lg bg-[#2563EB] px-3 py-2 text-xs font-medium text-white hover:bg-[#1d4ed8]">Add Booking</button>
+                        <button onClick={openCreateFollowUpBooking} className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700 hover:bg-amber-100">Add Follow-Up</button>
                       </div>
-                    </div>
-                    <div className="space-y-3 p-5">
-                      {isBookingDataLoading ? (
-                        <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">
-                          Loading booking details for this customer...
-                        </div>
-                      ) : selectedCustomerUpcomingBookings.length ? (
-                        selectedCustomerUpcomingBookings.map((booking) => (
-                          <div key={booking.id} className="rounded-xl border border-gray-200 p-4">
-                            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                              <div>
-                                <div className="text-sm font-semibold text-[#0F172A]">{booking.booking_type}</div>
-                                <div className="mt-1 text-xs text-gray-500">
-                                  {formatDateTime(booking.pickup_at)} - {booking.pickup_location} to {booking.destination}
-                                </div>
-                              </div>
-                              <div className="flex flex-wrap items-center gap-2">
-                                <BookingStatusBadge status={booking.status} />
-                                <select
-                                  value={booking.status}
-                                  onChange={(event) => void handleBookingStatusChange(booking.id, event.target.value)}
-                                  disabled={isCompletedBookingStatus(booking.status)}
-                                  className="rounded-lg border border-gray-300 px-3 py-2 text-xs focus:border-[#2563EB] focus:outline-none"
-                                >
-                                  {(bookingOptions?.statuses || defaultBookingStatuses).map((status) => (
-                                    <option key={status} value={status}>
-                                      {status}
-                                    </option>
-                                  ))}
-                                </select>
-                              </div>
-                            </div>
-                          </div>
-                        ))
-                      ) : (
-                        <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">
-                          No upcoming bookings for this customer yet.
-                        </div>
-                      )}
-                    </div>
-                  </section>
-
-                  <section className="rounded-2xl border border-gray-200 bg-white">
-                    <div className="border-b border-gray-200 px-5 py-4">
-                      <h3 className="text-lg font-semibold text-[#0F172A]">Completed & Missed Bookings</h3>
-                    </div>
-                    <div className="grid grid-cols-1 gap-4 p-5 lg:grid-cols-2">
-                      <div className="space-y-3">
-                        <div className="text-sm font-medium text-gray-500">Completed</div>
-                        {selectedCustomerCompletedBookings.length ? (
-                          selectedCustomerCompletedBookings.map((booking) => (
-                            <div key={booking.id} className="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
-                              <div className="text-sm font-semibold text-[#0F172A]">{booking.title || booking.booking_type}</div>
-                              <div className="mt-1 text-xs text-gray-600">{formatDateTime(booking.completed_at || booking.pickup_at)}</div>
-                              {booking.completion_note ? (
-                                <div className="mt-2 text-xs text-emerald-800">Completion note: {booking.completion_note}</div>
-                              ) : null}
-                            </div>
-                          ))
-                        ) : (
-                          <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">No completed bookings yet.</div>
-                        )}
-                      </div>
-                      <div className="space-y-3">
-                        <div className="text-sm font-medium text-gray-500">Missed</div>
-                        {selectedCustomerMissedBookings.length ? (
-                          selectedCustomerMissedBookings.map((booking) => (
-                            <div key={booking.id} className="rounded-xl border border-red-200 bg-red-50 p-4">
-                              <div className="text-sm font-semibold text-[#0F172A]">{booking.title || booking.booking_type}</div>
-                              <div className="mt-1 text-xs text-gray-600">{formatDateTime(booking.pickup_at)}</div>
-                            </div>
-                          ))
-                        ) : (
-                          <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">No missed bookings recorded.</div>
-                        )}
-                      </div>
-                    </div>
-                  </section>
-
-                  <section className="rounded-2xl border border-gray-200 bg-white">
-                    <div className="border-b border-gray-200 px-5 py-4">
-                      <h3 className="text-lg font-semibold text-[#0F172A]">Ride History</h3>
-                    </div>
-                    <div className="space-y-3 p-5">
-                      {selectedCustomerRideHistory.length ? (
-                        selectedCustomerRideHistory.map((ride) => (
-                          <div key={ride.id} className="rounded-xl border border-gray-200 p-4">
-                            <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                              <div>
-                                <div className="text-sm font-semibold text-[#0F172A]">
-                                  {ride.pickup_location} to {ride.destination}
-                                </div>
-                                <div className="mt-1 text-xs text-gray-500">
-                                  {formatDateTime(ride.end_time || ride.start_time || ride.scheduled_time)}
-                                  {ride.driver?.full_name ? ` - ${ride.driver.full_name}` : ''}
-                                </div>
-                              </div>
-                              <div className="flex items-center gap-3">
-                                <div className="text-sm font-semibold text-emerald-700">
-                                  {formatCurrency(ride.actual_fare ?? ride.estimated_fare)}
-                                </div>
-                                <BookingStatusBadge status={ride.status} />
-                              </div>
-                            </div>
-                          </div>
-                        ))
-                      ) : (
-                        <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">
-                          No completed ride history has been recorded yet.
-                        </div>
-                      )}
-                    </div>
-                  </section>
-                </div>
-
-                <div className="space-y-6">
-                  <section className="rounded-2xl border border-gray-200 bg-white">
-                    <div className="border-b border-gray-200 px-5 py-4">
-                      <h3 className="text-lg font-semibold text-[#0F172A]">Recurring Schedule</h3>
-                    </div>
-                    <div className="space-y-3 p-5">
-                      {selectedCustomerRecurringSchedule.length ? (
-                        selectedCustomerRecurringSchedule.map((booking) => (
-                          <div key={booking.id} className="rounded-xl bg-blue-50 p-4">
-                            <div className="text-sm font-semibold text-[#0F172A]">{booking.booking_type}</div>
-                            <div className="mt-1 text-xs text-gray-600">
-                              {booking.recurrence_type} every {booking.recurrence_frequency}
-                              {booking.recurrence_days?.length ? ` - ${booking.recurrence_days.join(', ')}` : ''}
-                            </div>
-                            <div className="mt-2 text-xs text-gray-500">
-                              {booking.pickup_time} - {booking.pickup_location} to {booking.destination}
-                            </div>
-                          </div>
-                        ))
-                      ) : (
-                        <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">
-                          No recurring pickup schedule for this customer yet.
-                        </div>
-                      )}
-                    </div>
-                  </section>
-
-                  <section className="rounded-2xl border border-gray-200 bg-white">
-                    <div className="border-b border-gray-200 px-5 py-4">
-                      <h3 className="text-lg font-semibold text-[#0F172A]">Follow-Up Management</h3>
                     </div>
                     <div className="space-y-4 p-5">
-                      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                      {selectedCustomerUpcomingBookings.length ? selectedCustomerUpcomingBookings.map((booking) => (
+                        <div key={booking.id} className="rounded-xl border border-gray-200 p-4">
+                          <div className="text-sm font-semibold text-[#0F172A]">{booking.title || booking.booking_type}</div>
+                          <div className="mt-1 text-xs text-gray-500">{formatDateTime(booking.pickup_at)} • {booking.pickup_location} to {booking.destination}</div>
+                        </div>
+                      )) : <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">No upcoming bookings for this customer yet.</div>}
+                      {selectedCustomerRideHistory.length ? selectedCustomerRideHistory.map((ride) => (
+                        <div key={ride.id} className="rounded-xl border border-gray-200 p-4">
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <div className="text-sm font-semibold text-[#0F172A]">{ride.pickup_location} to {ride.destination}</div>
+                              <div className="mt-1 text-xs text-gray-500">{formatDateTime(ride.end_time || ride.start_time || ride.scheduled_time)}</div>
+                            </div>
+                            <BookingStatusBadge status={ride.status} />
+                          </div>
+                        </div>
+                      )) : <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">No completed ride history has been recorded yet.</div>}
+                    </div>
+                  </section>
+                  <section className="space-y-6">
+                    <div className="rounded-2xl border border-gray-200 bg-white p-5">
+                      <h3 className="text-lg font-semibold text-[#0F172A]">Recurring Schedule</h3>
+                      <div className="mt-4 space-y-3">
+                        {selectedCustomerRecurringSchedule.length ? selectedCustomerRecurringSchedule.map((booking) => (
+                          <div key={booking.id} className="rounded-xl bg-blue-50 p-4">
+                            <div className="text-sm font-semibold text-[#0F172A]">{booking.booking_type}</div>
+                            <div className="mt-1 text-xs text-gray-600">{booking.recurrence_type} every {booking.recurrence_frequency}</div>
+                          </div>
+                        )) : <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">No recurring pickup schedule for this customer yet.</div>}
+                      </div>
+                    </div>
+                    <div className="rounded-2xl border border-gray-200 bg-white p-5">
+                      <h3 className="text-lg font-semibold text-[#0F172A]">Follow-Up</h3>
+                      <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
                         {[
-                          ['Current Follow-Up', selectedCustomer.active_follow_up_date ? formatDate(selectedCustomer.active_follow_up_date) : 'Not scheduled'],
-                          ['Priority', selectedCustomer.follow_up_priority || 'Not set'],
-                          ['Status', selectedCustomer.follow_up_status_label || 'No follow-up scheduled'],
-                          ['Next Planned Follow-Up', selectedCustomer.next_follow_up_date ? formatDate(selectedCustomer.next_follow_up_date) : 'Not set'],
+                          ['Current Follow-Up', profileDisplayCustomer.active_follow_up_date ? formatDate(profileDisplayCustomer.active_follow_up_date) : 'Not scheduled'],
+                          ['Priority', profileDisplayCustomer.follow_up_priority || 'Not set'],
+                          ['Status', profileDisplayCustomer.follow_up_status_label || 'No follow-up scheduled'],
+                          ['Next Planned Follow-Up', profileDisplayCustomer.next_follow_up_date ? formatDate(profileDisplayCustomer.next_follow_up_date) : 'Not set'],
                         ].map(([label, value]) => (
                           <div key={label} className="rounded-xl bg-gray-50 p-4">
                             <div className="text-xs font-medium uppercase tracking-wide text-gray-500">{label}</div>
@@ -1991,89 +2499,44 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
                           </div>
                         ))}
                       </div>
-                      <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
-                        <button
-                          onClick={() => void openEditCustomer(selectedCustomer)}
-                          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 sm:w-auto"
-                        >
-                          Schedule Follow-Up
-                        </button>
-                        {selectedCustomer.active_follow_up_date && (
-                          <button
-                            onClick={() => void handleCompleteFollowUp()}
-                            className="w-full rounded-lg bg-[#2563EB] px-3 py-2 text-xs font-medium text-white hover:bg-[#1d4ed8] sm:w-auto"
-                          >
-                            Mark Follow-Up Completed
-                          </button>
-                        )}
-                      </div>
-                      {selectedCustomerFollowUpHistory.slice(0, 4).map((entry, index) => (
-                        <div key={`${entry.at || entry.date || 'follow-up'}-${index}`} className="rounded-xl border border-gray-200 p-4">
-                          <div className="text-xs font-medium uppercase tracking-wide text-gray-500">{entry.action}</div>
-                          <div className="mt-2 text-sm text-[#0F172A]">
-                            {entry.date ? formatDate(entry.date) : 'No date'}
-                            {entry.priority ? ` - ${entry.priority}` : ''}
-                          </div>
-                          {entry.note && <div className="mt-1 text-sm text-gray-600">{entry.note}</div>}
-                        </div>
-                      ))}
-                    </div>
-                  </section>
-
-                  <section className="rounded-2xl border border-gray-200 bg-white">
-                    <div className="border-b border-gray-200 px-5 py-4">
-                      <h3 className="text-lg font-semibold text-[#0F172A]">Notes & Relationship Tracking</h3>
-                    </div>
-                    <div className="space-y-4 p-5">
-                      {[
-                        ['General Notes', selectedCustomer.notes || 'No general notes yet.'],
-                        ['Relationship Notes', selectedCustomer.relationship_notes || 'No relationship notes yet.'],
-                        ['Lead Notes', selectedCustomer.lead_notes || 'No lead notes yet.'],
-                        ['Important Notes', selectedCustomer.important_notes || 'No important notes yet.'],
-                        ['Referral', selectedCustomer.referred_by || 'No referral captured.'],
-                      ].map(([label, value]) => (
-                        <div key={label} className="rounded-xl bg-gray-50 p-4">
-                          <div className="text-xs font-medium uppercase tracking-wide text-gray-500">{label}</div>
-                          <div className="mt-2 text-sm text-[#0F172A]">{value}</div>
-                        </div>
-                      ))}
-                    </div>
-                  </section>
-
-                  <section className="rounded-2xl border border-gray-200 bg-white">
-                    <div className="border-b border-gray-200 px-5 py-4">
-                      <h3 className="text-lg font-semibold text-[#0F172A]">Network & Business Context</h3>
-                    </div>
-                    <div className="space-y-3 p-5 text-sm text-[#0F172A]">
-                      <div>
-                        <span className="font-medium">Company:</span> {selectedCustomer.company_name || 'Not set'}
-                      </div>
-                      <div>
-                        <span className="font-medium">Industry:</span> {selectedCustomer.company_industry || 'Not set'}
-                      </div>
-                      <div>
-                        <span className="font-medium">Organization Type:</span> {selectedCustomer.organization_type || 'Not set'}
-                      </div>
-                      <div>
-                        <span className="font-medium">Potential Service:</span> {selectedCustomer.potential_service || 'Not set'}
-                      </div>
-                      <div>
-                        <span className="font-medium">Lead Value Estimate:</span>{' '}
-                        {selectedCustomer.lead_value_estimate ? formatCurrency(selectedCustomer.lead_value_estimate) : 'Not set'}
-                      </div>
-                      <div>
-                        <span className="font-medium">Transport Customer:</span> {selectedCustomer.is_transport_customer ? 'Yes' : 'No'}
-                      </div>
-                      <div>
-                        <span className="font-medium">Business Lead:</span> {selectedCustomer.is_business_lead ? 'Yes' : 'No'}
-                      </div>
-                      <div>
-                        <span className="font-medium">Relationship Created:</span> {formatDate(selectedCustomer.created_at)}
-                      </div>
                     </div>
                   </section>
                 </div>
-              </div>
+              )}
+
+              {activeProfileTab === 'notes' && profileDisplayCustomer && (
+                <div className="grid grid-cols-1 gap-6 2xl:grid-cols-[0.9fr_1.1fr]">
+                  <section className="rounded-2xl border border-gray-200 bg-white p-5">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-lg font-semibold text-[#0F172A]">Notes</h3>
+                    </div>
+                    <textarea value={newNote} onChange={(event) => setNewNote(event.target.value)} rows={4} placeholder="Add a note for this customer" className="mt-4 w-full rounded-xl border border-gray-300 px-4 py-3 text-sm" />
+                    <div className="mt-3 flex justify-end">
+                      <button onClick={() => void handleAddNote()} disabled={isSavingNote || !newNote.trim()} className="rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-medium text-white hover:bg-[#1d4ed8] disabled:opacity-60">{isSavingNote ? 'Saving...' : 'Add Note'}</button>
+                    </div>
+                    <div className="mt-4 space-y-3">
+                      {isLoadingNotes ? <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">Loading notes...</div> : customerNotes.length ? customerNotes.map((note) => (
+                        <div key={note.id} className="rounded-xl border border-gray-200 p-4">
+                          <div className="text-xs text-gray-500">{note.created_by_name || 'Unknown'} • {formatDateTime(note.created_at)}</div>
+                          <div className="mt-2 text-sm text-[#0F172A]">{note.note}</div>
+                        </div>
+                      )) : <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">No notes yet.</div>}
+                    </div>
+                  </section>
+                  <section className="rounded-2xl border border-gray-200 bg-white p-5">
+                    <h3 className="text-lg font-semibold text-[#0F172A]">Timeline</h3>
+                    <div className="mt-4 space-y-3">
+                      {isLoadingNotes ? <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">Loading timeline...</div> : customerTimeline.length ? customerTimeline.map((entry) => (
+                        <div key={entry.id} className="rounded-xl border border-gray-200 p-4">
+                          <div className="text-xs font-medium uppercase tracking-wide text-gray-500">{entry.type === 'note' ? 'Note' : entry.action || 'Activity'}</div>
+                          <div className="mt-1 text-xs text-gray-500">{formatDateTime(entry.at)}{entry.author ? ` • ${entry.author}` : ''}</div>
+                          <div className="mt-2 text-sm text-[#0F172A]">{entry.text || 'Activity logged.'}</div>
+                        </div>
+                      )) : <div className="rounded-xl bg-gray-50 px-4 py-6 text-sm text-gray-500">No timeline activity yet.</div>}
+                    </div>
+                  </section>
+                </div>
+              )}
             </>
           ) : (
             <div className="rounded-2xl border border-dashed border-gray-300 bg-white px-6 py-16 text-center text-gray-500">
@@ -2195,11 +2658,6 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
           subtitle="Capture the rider details, relationship context, and CRM fields that matter over time."
           onClose={closeCustomerModal}
         >
-          <datalist id="customer-occupation-suggestions">
-            {occupationSuggestions.map((occupation) => (
-              <option key={occupation} value={occupation} />
-            ))}
-          </datalist>
           {customerFormError && (
             <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -2267,7 +2725,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
               <SearchableSelect
                 value={customerForm.customer_category_id}
                 onChange={(value) => updateCustomerField('customer_category_id', value)}
-                options={(customerOptions?.customer_category_items || []).map((item) => ({ value: item.id, label: item.name }))}
+                options={customerCategorySelectOptions}
                 placeholder="Select customer type"
                 searchPlaceholder="Search customer types..."
                 emptyLabel="No customer types found."
@@ -2308,11 +2766,16 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
 
             <label className="space-y-2">
               <span className="text-sm font-medium text-[#0F172A]">Occupation</span>
-              <input
-                list="customer-occupation-suggestions"
+              <SearchableSelect
                 value={customerForm.occupation}
-                onChange={(event) => updateCustomerField('occupation', event.target.value)}
-                className={getCustomerFieldClass(Boolean(customerFieldErrors.occupation))}
+                onChange={(value) => updateCustomerField('occupation', value)}
+                options={buildStringValueOptions(customerOptions?.position_or_occupation_items, customerForm.occupation)}
+                placeholder="Select occupation"
+                searchPlaceholder="Search occupations..."
+                emptyLabel="No occupations found."
+                allowClear
+                clearLabel="No occupation"
+                triggerClassName={getCustomerFieldClass(Boolean(customerFieldErrors.occupation))}
               />
             </label>
 
@@ -2321,34 +2784,154 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
               <SearchableSelect
                 value={customerForm.source}
                 onChange={(value) => updateCustomerField('source', value)}
-                options={(customerOptions?.source_options || []).map((item) => ({ value: item.value, label: item.label }))}
+                options={sourceSelectOptions}
                 placeholder="Select source"
                 searchPlaceholder="Search sources..."
                 emptyLabel="No sources found."
                 allowClear
-                clearLabel="Use default source"
+                clearLabel="No source"
                 triggerClassName={getCustomerFieldClass(Boolean(customerFieldErrors.source))}
               />
               {customerFieldErrors.source && <p className="text-xs text-red-600">{customerFieldErrors.source}</p>}
             </label>
 
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-[#0F172A]">Customer Source</span>
+              <SearchableSelect
+                value={customerForm.customer_source_id}
+                onChange={(value) => updateCustomerField('customer_source_id', value)}
+                options={customerSourceSelectOptions}
+                placeholder="Select customer source"
+                searchPlaceholder="Search customer sources..."
+                emptyLabel="No customer sources found."
+                allowClear
+                clearLabel="No customer source"
+                triggerClassName={getCustomerFieldClass(Boolean(customerFieldErrors.customer_source_id))}
+              />
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-[#0F172A]">Position / Title</span>
+              <SearchableSelect
+                value={customerForm.position_title}
+                onChange={(value) => updateCustomerField('position_title', value)}
+                options={buildStringValueOptions(customerOptions?.position_or_occupation_items, customerForm.position_title)}
+                placeholder="Select position or title"
+                searchPlaceholder="Search positions or titles..."
+                emptyLabel="No positions found."
+                allowClear
+                clearLabel="No position"
+                triggerClassName={getCustomerFieldClass(Boolean(customerFieldErrors.position_title))}
+              />
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-[#0F172A]">Organization Type</span>
+              <SearchableSelect
+                value={customerForm.organization_type_id}
+                onChange={(value) => updateCustomerField('organization_type_id', value)}
+                options={organizationTypeSelectOptions}
+                placeholder="Select organization type"
+                searchPlaceholder="Search organization types..."
+                emptyLabel="No organization types found."
+                allowClear
+                clearLabel="No organization type"
+                triggerClassName={getCustomerFieldClass(Boolean(customerFieldErrors.organization_type_id))}
+              />
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-[#0F172A]">Industry</span>
+              <SearchableSelect
+                value={customerForm.industry_id}
+                onChange={(value) => updateCustomerField('industry_id', value)}
+                options={industrySelectOptions}
+                placeholder="Select industry"
+                searchPlaceholder="Search industries..."
+                emptyLabel="No industries found."
+                allowClear
+                clearLabel="No industry"
+                triggerClassName={getCustomerFieldClass(Boolean(customerFieldErrors.industry_id))}
+              />
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-[#0F172A]">Relationship Category</span>
+              <SearchableSelect
+                value={customerForm.relationship_category_id}
+                onChange={(value) => updateCustomerField('relationship_category_id', value)}
+                options={relationshipCategorySelectOptions}
+                placeholder="Select relationship category"
+                searchPlaceholder="Search relationship categories..."
+                emptyLabel="No relationship categories found."
+                allowClear
+                clearLabel="No relationship category"
+                triggerClassName={getCustomerFieldClass(Boolean(customerFieldErrors.relationship_category_id))}
+              />
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-[#0F172A]">Opportunity Level</span>
+              <SearchableSelect
+                value={customerForm.opportunity_level_id}
+                onChange={(value) => updateCustomerField('opportunity_level_id', value)}
+                options={opportunityLevelSelectOptions}
+                placeholder="Select opportunity level"
+                searchPlaceholder="Search opportunity levels..."
+                emptyLabel="No opportunity levels found."
+                allowClear
+                clearLabel="No opportunity level"
+                triggerClassName={getCustomerFieldClass(Boolean(customerFieldErrors.opportunity_level_id))}
+              />
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-[#0F172A]">Network Value</span>
+              <SearchableSelect
+                value={customerForm.network_value_id}
+                onChange={(value) => updateCustomerField('network_value_id', value)}
+                options={networkValueSelectOptions}
+                placeholder="Select network value"
+                searchPlaceholder="Search network values..."
+                emptyLabel="No network values found."
+                allowClear
+                clearLabel="No network value"
+                triggerClassName={getCustomerFieldClass(Boolean(customerFieldErrors.network_value_id))}
+              />
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-[#0F172A]">Lead Status</span>
+              <SearchableSelect
+                value={customerForm.lead_status_id}
+                onChange={(value) => updateCustomerField('lead_status_id', value)}
+                options={leadStatusSelectOptions}
+                placeholder="Select lead status"
+                searchPlaceholder="Search lead statuses..."
+                emptyLabel="No lead statuses found."
+                allowClear
+                clearLabel="No lead status"
+                triggerClassName={getCustomerFieldClass(Boolean(customerFieldErrors.lead_status_id))}
+              />
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium text-[#0F172A]">Potential Service</span>
+              <SearchableSelect
+                value={customerForm.potential_service_id}
+                onChange={(value) => updateCustomerField('potential_service_id', value)}
+                options={potentialServiceSelectOptions}
+                placeholder="Select potential service"
+                searchPlaceholder="Search potential services..."
+                emptyLabel="No potential services found."
+                allowClear
+                clearLabel="No potential service"
+                triggerClassName={getCustomerFieldClass(Boolean(customerFieldErrors.potential_service_id))}
+              />
+            </label>
+
             {editingCustomer && (
               <>
-                <label className="space-y-2">
-                  <span className="text-sm font-medium text-[#0F172A]">Organization Type</span>
-                  <SearchableSelect
-                    value={customerForm.organization_type_id}
-                    onChange={(value) => updateCustomerField('organization_type_id', value)}
-                    options={(customerOptions?.organization_type_items || []).map((item) => ({ value: item.id, label: item.name }))}
-                    placeholder="Select organization type"
-                    searchPlaceholder="Search organization types..."
-                    emptyLabel="No organization types found."
-                    allowClear
-                    clearLabel="No organization type"
-                    triggerClassName={getCustomerFieldClass(Boolean(customerFieldErrors.organization_type_id))}
-                  />
-                </label>
-
                 <label className="space-y-2">
                   <span className="text-sm font-medium text-[#0F172A]">Preferred Driver</span>
                   <SearchableSelect

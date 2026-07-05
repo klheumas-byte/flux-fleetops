@@ -232,15 +232,19 @@ export default function CreateRide() {
     setQuickAddCustomerError('');
     setPageError('');
     try {
-      const savedCustomer = await createCustomer({
+      const payload: Record<string, unknown> = {
         full_name: quickAddCustomerForm.full_name,
         phone_number: quickAddCustomerForm.phone_number,
         residential_area: quickAddCustomerForm.residential_area,
         customer_category_id: quickAddCustomerForm.customer_category_id,
-        source: 'manual_entry',
         status: 'active',
         is_transport_customer: true,
-      });
+      };
+      const defaultSource = customerOptions?.source_options?.[0]?.value;
+      if (defaultSource) {
+        payload.source = defaultSource;
+      }
+      const savedCustomer = await createCustomer(payload);
 
       setOptions((current) => {
         if (!current) {

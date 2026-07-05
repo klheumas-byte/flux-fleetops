@@ -105,13 +105,20 @@ export interface CustomerRecord {
   organization_type?: string | null;
   industry_id?: string | null;
   industry?: string | null;
+  government_sector_id?: string | null;
+  government_sector?: string | null;
   referred_by?: string | null;
+  branch_or_department?: string | null;
   relationship_category_id?: string | null;
   relationship_category?: string | null;
+  relationship_role_id?: string | null;
+  relationship_role?: string | null;
   opportunity_level_id?: string | null;
   opportunity_level?: string | null;
   network_value_id?: string | null;
   network_value?: string | null;
+  influence_level_id?: string | null;
+  influence_level?: string | null;
   is_transport_customer?: boolean;
   is_business_lead?: boolean;
   lead_status_id?: string | null;
@@ -191,6 +198,63 @@ export interface CustomerRecord {
   };
 }
 
+export interface CustomerOpportunityRecord {
+  id: string;
+  customer_id?: string | null;
+  opportunity_type_id?: string | null;
+  opportunity_type?: string | null;
+  specific_product_or_service?: string | null;
+  estimated_budget?: number | null;
+  opportunity_stage_id?: string | null;
+  opportunity_stage?: string | null;
+  probability?: number | null;
+  expected_purchase_date?: string | null;
+  follow_up_date?: string | null;
+  notes?: string | null;
+  status?: string | null;
+  created_by?: string | null;
+  created_by_name?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface CustomerContactRecord {
+  id: string;
+  customer_id?: string | null;
+  contact_name: string;
+  phone?: string | null;
+  email?: string | null;
+  position_or_role?: string | null;
+  relationship_role_id?: string | null;
+  relationship_role?: string | null;
+  notes?: string | null;
+  created_by?: string | null;
+  created_by_name?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface CustomerNoteRecord {
+  id: string;
+  customer_id?: string | null;
+  note: string;
+  created_by?: string | null;
+  created_by_name?: string | null;
+  created_by_role?: string | null;
+  created_at?: string | null;
+}
+
+export interface CustomerTimelineEntry {
+  id: string;
+  type: 'note' | 'activity';
+  at?: string | null;
+  author?: string | null;
+  author_role?: string | null;
+  text?: string | null;
+  action?: string | null;
+  changes?: string[];
+}
+
 export interface MasterDataOption {
   id: string;
   data_type: string;
@@ -206,15 +270,20 @@ export interface CustomerOptionsResponse {
   customer_category_items: MasterDataOption[];
   customer_sources: string[];
   customer_source_items: MasterDataOption[];
+  government_sector_items: MasterDataOption[];
   company_industries: string[];
   industry_items: MasterDataOption[];
+  influence_level_items: MasterDataOption[];
   organization_types: string[];
   organization_type_items: MasterDataOption[];
+  opportunity_stage_items: MasterDataOption[];
   relationship_category_items: MasterDataOption[];
+  relationship_role_items: MasterDataOption[];
   opportunity_level_items: MasterDataOption[];
   network_value_items: MasterDataOption[];
   lead_status_items: MasterDataOption[];
   potential_service_items: MasterDataOption[];
+  position_or_occupation_items: MasterDataOption[];
   follow_up_priorities: string[];
   statuses: string[];
   source_options?: Array<{ value: string; label: string }>;
@@ -344,15 +413,20 @@ function normalizeCustomerOptions(value: unknown): CustomerOptionsResponse {
     customer_category_items: [],
     customer_sources: [],
     customer_source_items: [],
+    government_sector_items: [],
     company_industries: [],
     industry_items: [],
+    influence_level_items: [],
     organization_types: [],
     organization_type_items: [],
+    opportunity_stage_items: [],
     relationship_category_items: [],
+    relationship_role_items: [],
     opportunity_level_items: [],
     network_value_items: [],
     lead_status_items: [],
     potential_service_items: [],
+    position_or_occupation_items: [],
     follow_up_priorities: [],
     statuses: [],
     source_options: [],
@@ -366,15 +440,20 @@ function normalizeCustomerOptions(value: unknown): CustomerOptionsResponse {
     customer_category_items: ensureArray<MasterDataOption>(normalized.customer_category_items),
     customer_sources: ensureArray<string>(normalized.customer_sources),
     customer_source_items: ensureArray<MasterDataOption>(normalized.customer_source_items),
+    government_sector_items: ensureArray<MasterDataOption>(normalized.government_sector_items),
     company_industries: ensureArray<string>(normalized.company_industries),
     industry_items: ensureArray<MasterDataOption>(normalized.industry_items),
+    influence_level_items: ensureArray<MasterDataOption>(normalized.influence_level_items),
     organization_types: ensureArray<string>(normalized.organization_types),
     organization_type_items: ensureArray<MasterDataOption>(normalized.organization_type_items),
+    opportunity_stage_items: ensureArray<MasterDataOption>(normalized.opportunity_stage_items),
     relationship_category_items: ensureArray<MasterDataOption>(normalized.relationship_category_items),
+    relationship_role_items: ensureArray<MasterDataOption>(normalized.relationship_role_items),
     opportunity_level_items: ensureArray<MasterDataOption>(normalized.opportunity_level_items),
     network_value_items: ensureArray<MasterDataOption>(normalized.network_value_items),
     lead_status_items: ensureArray<MasterDataOption>(normalized.lead_status_items),
     potential_service_items: ensureArray<MasterDataOption>(normalized.potential_service_items),
+    position_or_occupation_items: ensureArray<MasterDataOption>(normalized.position_or_occupation_items),
     follow_up_priorities: ensureArray<string>(normalized.follow_up_priorities),
     statuses: ensureArray<string>(normalized.statuses),
     source_options: ensureArray<{ value: string; label: string }>(normalized.source_options),
@@ -499,6 +578,11 @@ export async function fetchCustomers() {
   return ensureArray<CustomerRecord>(response?.data?.customers);
 }
 
+export async function fetchCustomerById(customerId: string) {
+  const response = await apiRequest<{ data: { customer: CustomerRecord } }>(`/customers/${customerId}`);
+  return response.data.customer;
+}
+
 export async function createCustomer(payload: Record<string, unknown>) {
   const response = await apiRequest<{ data: { customer: CustomerRecord } }>('/customers', {
     method: 'POST',
@@ -509,6 +593,14 @@ export async function createCustomer(payload: Record<string, unknown>) {
 
 export async function updateCustomer(customerId: string, payload: Record<string, unknown>) {
   const response = await apiRequest<{ data: { customer: CustomerRecord } }>(`/customers/${customerId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+  return response.data.customer;
+}
+
+export async function updateCustomerRelationship(customerId: string, payload: Record<string, unknown>) {
+  const response = await apiRequest<{ data: { customer: CustomerRecord } }>(`/customers/${customerId}/relationship`, {
     method: 'PATCH',
     body: JSON.stringify(payload),
   });
@@ -601,6 +693,64 @@ export async function reportBookingIssue(
 export async function fetchBookingOptions() {
   const response = await apiRequest<{ data: BookingOptionsResponse }>('/bookings/options');
   return normalizeBookingOptions(response?.data);
+}
+
+export async function fetchCustomerOpportunities(customerId: string) {
+  const response = await apiRequest<{ data: { opportunities: CustomerOpportunityRecord[] } }>(`/customers/${customerId}/opportunities`);
+  return ensureArray<CustomerOpportunityRecord>(response?.data?.opportunities);
+}
+
+export async function createCustomerOpportunity(customerId: string, payload: Record<string, unknown>) {
+  const response = await apiRequest<{ data: { opportunity: CustomerOpportunityRecord } }>(`/customers/${customerId}/opportunities`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  return response.data.opportunity;
+}
+
+export async function updateCustomerOpportunity(customerId: string, opportunityId: string, payload: Record<string, unknown>) {
+  const response = await apiRequest<{ data: { opportunity: CustomerOpportunityRecord } }>(`/customers/${customerId}/opportunities/${opportunityId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+  return response.data.opportunity;
+}
+
+export async function fetchCustomerContacts(customerId: string) {
+  const response = await apiRequest<{ data: { contacts: CustomerContactRecord[] } }>(`/customers/${customerId}/contacts`);
+  return ensureArray<CustomerContactRecord>(response?.data?.contacts);
+}
+
+export async function createCustomerContact(customerId: string, payload: Record<string, unknown>) {
+  const response = await apiRequest<{ data: { contact: CustomerContactRecord } }>(`/customers/${customerId}/contacts`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  return response.data.contact;
+}
+
+export async function updateCustomerContact(customerId: string, contactId: string, payload: Record<string, unknown>) {
+  const response = await apiRequest<{ data: { contact: CustomerContactRecord } }>(`/customers/${customerId}/contacts/${contactId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+  return response.data.contact;
+}
+
+export async function fetchCustomerNotes(customerId: string) {
+  const response = await apiRequest<{ data: { notes: CustomerNoteRecord[]; timeline: CustomerTimelineEntry[] } }>(`/customers/${customerId}/notes`);
+  return {
+    notes: ensureArray<CustomerNoteRecord>(response?.data?.notes),
+    timeline: ensureArray<CustomerTimelineEntry>(response?.data?.timeline),
+  };
+}
+
+export async function createCustomerNote(customerId: string, payload: Record<string, unknown>) {
+  const response = await apiRequest<{ data: { note: CustomerNoteRecord } }>(`/customers/${customerId}/notes`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  return response.data.note;
 }
 
 export async function fetchCalendar(view: 'today' | 'tomorrow' | 'this-week' | 'upcoming' | 'overdue' | 'completed') {

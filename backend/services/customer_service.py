@@ -28,15 +28,6 @@ from utils.validators import normalize_email, normalize_phone, validate_email, v
 
 CUSTOMER_STATUSES = {"active", "inactive"}
 FOLLOW_UP_PRIORITIES = {"low", "medium", "high"}
-SOURCE_OPTIONS = {
-    "manual_entry": "Manual Entry",
-    "ride_customer": "Ride Customer",
-    "scheduled_booking": "Scheduled Booking",
-    "referral": "Referral",
-    "business_lead": "Business Lead",
-    "imported_record": "Imported Record",
-    "other": "Other",
-}
 CREATOR_ROLES = {"owner", "admin", "driver"}
 
 MASTER_DATA_FIELD_CONFIG = {
@@ -44,9 +35,12 @@ MASTER_DATA_FIELD_CONFIG = {
     "customer_source": ("customer_sources", "customer_source_id", "customer_source", False),
     "organization_type": ("organization_types", "organization_type_id", "organization_type", False),
     "industry": ("industries", "industry_id", "industry", False),
+    "government_sector": ("government_sectors", "government_sector_id", "government_sector", False),
     "relationship_category": ("relationship_categories", "relationship_category_id", "relationship_category", False),
+    "relationship_role": ("relationship_roles", "relationship_role_id", "relationship_role", False),
     "opportunity_level": ("opportunity_levels", "opportunity_level_id", "opportunity_level", False),
     "network_value": ("network_values", "network_value_id", "network_value", False),
+    "influence_level": ("influence_levels", "influence_level_id", "influence_level", False),
     "lead_status": ("lead_statuses", "lead_status_id", "lead_status", False),
     "potential_service": ("potential_services", "potential_service_id", "potential_service", False),
 }
@@ -66,6 +60,18 @@ def bookings_collection():
 
 def rides_collection():
     return get_collection("rides")
+
+
+def customer_opportunities_collection():
+    return get_collection("customer_opportunities")
+
+
+def customer_contacts_collection():
+    return get_collection("customer_contacts")
+
+
+def customer_notes_collection():
+    return get_collection("customer_notes")
 
 
 def users_collection():
@@ -95,8 +101,11 @@ def ensure_customer_indexes():
             {"keys": [("source", ASCENDING)]},
             {"keys": [("customer_category_id", ASCENDING)]},
             {"keys": [("relationship_category_id", ASCENDING)]},
+            {"keys": [("relationship_role_id", ASCENDING)]},
             {"keys": [("opportunity_level_id", ASCENDING)]},
             {"keys": [("network_value_id", ASCENDING)]},
+            {"keys": [("influence_level_id", ASCENDING)]},
+            {"keys": [("government_sector_id", ASCENDING)]},
             {"keys": [("lead_status_id", ASCENDING)]},
             {"keys": [("status", ASCENDING)]},
             {"keys": [("follow_up_date", ASCENDING)]},
@@ -112,6 +121,28 @@ def ensure_customer_indexes():
             {"keys": [("status", ASCENDING), ("created_at", DESCENDING)]},
         ],
         collection_name="customers",
+    )
+    ensure_indexes_for_collection(
+        customer_opportunities_collection(),
+        [
+            {"keys": [("customer_id", ASCENDING), ("updated_at", DESCENDING)]},
+            {"keys": [("customer_id", ASCENDING), ("status", ASCENDING), ("updated_at", DESCENDING)]},
+        ],
+        collection_name="customer_opportunities",
+    )
+    ensure_indexes_for_collection(
+        customer_contacts_collection(),
+        [
+            {"keys": [("customer_id", ASCENDING), ("updated_at", DESCENDING)]},
+        ],
+        collection_name="customer_contacts",
+    )
+    ensure_indexes_for_collection(
+        customer_notes_collection(),
+        [
+            {"keys": [("customer_id", ASCENDING), ("created_at", DESCENDING)]},
+        ],
+        collection_name="customer_notes",
     )
 
 
@@ -182,14 +213,56 @@ def _validate_money(value, field_name: str):
     return round(float(value), 2)
 
 
-def _validate_source(value: Any):
-    normalized = (_normalize_text(value) or "manual_entry").lower()
-    if normalized not in SOURCE_OPTIONS:
-        raise ApiError(
-            f"source must be one of: {', '.join(sorted(SOURCE_OPTIONS))}.",
-            status_code=400,
+def _master_data_slug(value: str | None):
+    normalized = _normalize_text(value)
+    if not normalized:
+        return None
+    return re.sub(r"[^a-z0-9]+", "_", normalized.lower()).strip("_") or None
+
+
+def _build_customer_source_options(items: list[dict] | None = None) -> list[dict]:
+    source_items = items if items is not None else get_active_master_data_items("customer_sources")
+    options = []
+    for item in source_items:
+        value = _master_data_slug(item.get("name"))
+        if not value:
+            continue
+        options.append(
+            {
+                "id": item.get("id"),
+                "value": value,
+                "label": item.get("name"),
+                "description": item.get("description"),
+            }
         )
-    return normalized
+    return options
+
+
+def _match_customer_source_option(identifier: Any, *, options: list[dict] | None = None):
+    normalized = _normalize_text(identifier)
+    if not normalized:
+        return None
+    lowered = normalized.lower()
+    slug = _master_data_slug(normalized)
+    source_options = options if options is not None else _build_customer_source_options()
+    for option in source_options:
+        if (
+            option["value"] == lowered
+            or option["value"] == slug
+            or str(option.get("id") or "") == normalized
+            or (option.get("label") or "").lower() == lowered
+        ):
+            return option
+    return None
+
+
+def _validate_source(value: Any):
+    if value in (None, ""):
+        return None
+    option = _match_customer_source_option(value)
+    if not option:
+        raise ApiError("source must match an active customer source master data value.", status_code=400)
+    return option["value"]
 
 
 def _validate_creator_role(value: Any):
@@ -253,8 +326,41 @@ def _get_driver_document(driver_id: str | None):
     return driver
 
 
-def _source_label(source: str | None):
-    return SOURCE_OPTIONS.get((source or "").lower())
+def _source_label(source: str | None, customer_source: str | None = None):
+    if customer_source:
+        return customer_source
+    normalized = _normalize_text(source)
+    if not normalized:
+        return None
+    return normalized.replace("_", " ").replace("-", " ").title()
+
+
+def _sync_customer_source_fields(payload: dict, normalized: dict[str, Any], *, partial: bool):
+    source_in_payload = "source" in payload
+    customer_source_changed = "customer_source_id" in payload or "customer_source" in payload
+    if not source_in_payload and not customer_source_changed and partial:
+        return
+
+    source_value = None
+    source_option = None
+
+    if source_in_payload:
+        source_value = _validate_source(payload.get("source"))
+        source_option = _match_customer_source_option(source_value)
+    elif normalized.get("customer_source"):
+        source_option = _match_customer_source_option(normalized.get("customer_source"))
+        if source_option:
+            source_value = source_option["value"]
+
+    normalized["source"] = source_value
+
+    if source_option:
+        source_document = resolve_master_data_item("customer_sources", source_option["id"], active_only=True)
+        normalized["customer_source_id"] = source_document["_id"]
+        normalized["customer_source"] = source_document["name"]
+    elif source_in_payload or customer_source_changed:
+        normalized["customer_source_id"] = None
+        normalized["customer_source"] = None
 
 
 def _empty_customer_summary() -> dict:
@@ -280,7 +386,7 @@ def _empty_customer_summary() -> dict:
             "creator_roles": [],
             "drivers": [],
             "customer_categories": [],
-            "sources": [{"value": key, "label": value} for key, value in SOURCE_OPTIONS.items()],
+            "sources": [],
         },
         "applied_filters": {
             "date_from": None,
@@ -621,7 +727,7 @@ def _customer_summary_filters_from_scope(scope_query: dict, *, current_role: str
         "creator_roles": creator_roles,
         "drivers": drivers,
         "customer_categories": customer_categories,
-        "sources": [{"value": key, "label": value} for key, value in SOURCE_OPTIONS.items()],
+        "sources": _build_customer_source_options(),
     }
 
 
@@ -663,7 +769,7 @@ def _serialize_customer_summary(customer_document: dict, *, user_lookup: dict[st
         customer["created_by_role"] = created_by_user.get("role") if created_by_user else "legacy"
     if not customer.get("created_by_driver_id") and (created_by_user or {}).get("role") == "driver":
         customer["created_by_driver_id"] = str(created_by_user["_id"])
-    customer["source_label"] = _source_label(customer.get("source")) or customer.get("customer_source") or "Other"
+    customer["source_label"] = _source_label(customer.get("source"), customer.get("customer_source")) or "Other"
     return customer
 
 
@@ -698,8 +804,79 @@ def _serialize_option_customer(customer_document: dict) -> dict:
         "residential_area": customer_document.get("residential_area"),
         "work_area": customer_document.get("work_area"),
         "source": customer_document.get("source"),
-        "source_label": _source_label(customer_document.get("source")) or customer_document.get("customer_source") or "Other",
+        "source_label": _source_label(customer_document.get("source"), customer_document.get("customer_source")) or "Other",
         "status": customer_document.get("status"),
+    }
+
+
+CUSTOMER_LIST_PROJECTION = {
+    "customer_id": 1,
+    "full_name": 1,
+    "phone_number": 1,
+    "alternate_phone": 1,
+    "email_address": 1,
+    "customer_category_id": 1,
+    "customer_category": 1,
+    "organization_name": 1,
+    "company_name": 1,
+    "pickup_location": 1,
+    "destination_location": 1,
+    "preferred_pickup_location": 1,
+    "preferred_dropoff_location": 1,
+    "residential_area": 1,
+    "work_area": 1,
+    "preferred_driver_id": 1,
+    "assigned_driver_id": 1,
+    "created_by_driver_id": 1,
+    "source": 1,
+    "customer_source": 1,
+    "status": 1,
+    "relationship_category": 1,
+    "lead_status": 1,
+    "follow_up_date": 1,
+    "next_follow_up_date": 1,
+    "follow_up_priority": 1,
+    "follow_up_completed_at": 1,
+    "created_at": 1,
+    "created_by_name": 1,
+    "created_by_role": 1,
+}
+
+
+def _serialize_customer_list_item(customer_document: dict) -> dict:
+    follow_up = _follow_up_flags(customer_document)
+    return {
+        "id": str(customer_document.get("_id")),
+        "customer_id": customer_document.get("customer_id"),
+        "full_name": customer_document.get("full_name"),
+        "phone_number": customer_document.get("phone_number"),
+        "alternate_phone": customer_document.get("alternate_phone"),
+        "email_address": customer_document.get("email_address"),
+        "customer_category_id": str(customer_document.get("customer_category_id")) if customer_document.get("customer_category_id") else None,
+        "customer_category": customer_document.get("customer_category"),
+        "organization_name": customer_document.get("organization_name") or customer_document.get("company_name"),
+        "company_name": customer_document.get("company_name"),
+        "pickup_location": customer_document.get("pickup_location"),
+        "destination_location": customer_document.get("destination_location"),
+        "preferred_pickup_location": customer_document.get("preferred_pickup_location"),
+        "preferred_dropoff_location": customer_document.get("preferred_dropoff_location"),
+        "residential_area": customer_document.get("residential_area"),
+        "work_area": customer_document.get("work_area"),
+        "preferred_driver_id": str(customer_document.get("preferred_driver_id")) if customer_document.get("preferred_driver_id") else None,
+        "assigned_driver_id": str(customer_document.get("assigned_driver_id")) if customer_document.get("assigned_driver_id") else None,
+        "created_by_driver_id": str(customer_document.get("created_by_driver_id")) if customer_document.get("created_by_driver_id") else None,
+        "source": customer_document.get("source"),
+        "source_label": _source_label(customer_document.get("source"), customer_document.get("customer_source")) or "Other",
+        "status": customer_document.get("status"),
+        "relationship_category": customer_document.get("relationship_category"),
+        "lead_status": customer_document.get("lead_status"),
+        "follow_up_date": customer_document.get("follow_up_date"),
+        "next_follow_up_date": customer_document.get("next_follow_up_date"),
+        "follow_up_priority": customer_document.get("follow_up_priority"),
+        **follow_up,
+        "created_at": customer_document.get("created_at").isoformat() if customer_document.get("created_at") else None,
+        "created_by_name": customer_document.get("created_by_name"),
+        "created_by_role": customer_document.get("created_by_role"),
     }
 
 
@@ -859,6 +1036,7 @@ def _normalized_customer_payload(payload: dict, *, partial: bool = False) -> tup
         "lead_notes",
         "important_notes",
         "company_name",
+        "branch_or_department",
     ):
         if field_name in payload:
             normalized[field_name] = _normalize_text(payload.get(field_name))
@@ -880,8 +1058,7 @@ def _normalized_customer_payload(payload: dict, *, partial: bool = False) -> tup
         normalized["preferred_driver_id"] = preferred_driver["_id"] if preferred_driver else None
         normalized["assigned_driver_id"] = preferred_driver["_id"] if preferred_driver else None
 
-    if not partial or "source" in payload:
-        normalized["source"] = _validate_source(payload.get("source"))
+    _sync_customer_source_fields(payload, normalized, partial=partial)
 
     if "is_transport_customer" in payload:
         normalized["is_transport_customer"] = _validate_boolean(payload.get("is_transport_customer"), "is_transport_customer")
@@ -1094,7 +1271,7 @@ def _customer_analytics_available_filters(customer_documents: list[dict], *, cur
         "creator_roles": creator_roles,
         "drivers": drivers,
         "customer_categories": category_documents,
-        "sources": [{"value": key, "label": value} for key, value in SOURCE_OPTIONS.items()],
+        "sources": _build_customer_source_options(),
     }
 
 
@@ -1391,25 +1568,35 @@ def list_customer_options(
     master_data_groups = _load_active_master_data_groups(
         "customer_categories",
         "customer_sources",
+        "government_sectors",
         "industries",
+        "influence_levels",
         "organization_types",
+        "opportunity_stages",
         "relationship_categories",
+        "relationship_roles",
         "opportunity_levels",
         "network_values",
         "lead_statuses",
         "potential_services",
+        "positions_or_occupations",
     )
     log_db_duration("customers.options.master_data_bulk", master_data_started_at)
 
     customer_category_items = master_data_groups.get("customer_categories", [])
     customer_source_items = master_data_groups.get("customer_sources", [])
+    government_sector_items = master_data_groups.get("government_sectors", [])
     industry_items = master_data_groups.get("industries", [])
+    influence_level_items = master_data_groups.get("influence_levels", [])
     organization_type_items = master_data_groups.get("organization_types", [])
+    opportunity_stage_items = master_data_groups.get("opportunity_stages", [])
     relationship_category_items = master_data_groups.get("relationship_categories", [])
+    relationship_role_items = master_data_groups.get("relationship_roles", [])
     opportunity_level_items = master_data_groups.get("opportunity_levels", [])
     network_value_items = master_data_groups.get("network_values", [])
     lead_status_items = master_data_groups.get("lead_statuses", [])
     potential_service_items = master_data_groups.get("potential_services", [])
+    position_or_occupation_items = master_data_groups.get("positions_or_occupations", [])
 
     customers: list[dict] = []
     if include_customers:
@@ -1458,18 +1645,23 @@ def list_customer_options(
         "customer_category_items": customer_category_items,
         "customer_sources": [item["name"] for item in customer_source_items],
         "customer_source_items": customer_source_items,
+        "government_sector_items": government_sector_items,
         "company_industries": [item["name"] for item in industry_items],
         "industry_items": industry_items,
+        "influence_level_items": influence_level_items,
         "organization_types": [item["name"] for item in organization_type_items],
         "organization_type_items": organization_type_items,
+        "opportunity_stage_items": opportunity_stage_items,
         "relationship_category_items": relationship_category_items,
+        "relationship_role_items": relationship_role_items,
         "opportunity_level_items": opportunity_level_items,
         "network_value_items": network_value_items,
         "lead_status_items": lead_status_items,
         "potential_service_items": potential_service_items,
+        "position_or_occupation_items": position_or_occupation_items,
         "follow_up_priorities": sorted(FOLLOW_UP_PRIORITIES),
         "statuses": sorted(CUSTOMER_STATUSES),
-        "source_options": [{"value": key, "label": value} for key, value in SOURCE_OPTIONS.items()],
+        "source_options": _build_customer_source_options(customer_source_items),
         "creator_roles": sorted(CREATOR_ROLES),
     }
     if include_customers:
@@ -1495,10 +1687,11 @@ def list_customers(current_user_id: str, current_role: str) -> list[dict]:
     request_started_at = perf_counter()
     customer_documents = list(
         customers_collection().find(
-            _customer_scope_query(current_user_id, current_role)
+            _customer_scope_query(current_user_id, current_role),
+            CUSTOMER_LIST_PROJECTION,
         ).sort([("created_at", DESCENDING)])
     )
-    enriched_customers = _enrich_customers(customer_documents)
+    enriched_customers = [_serialize_customer_list_item(customer_document) for customer_document in customer_documents]
     total_duration_ms = (perf_counter() - request_started_at) * 1000
     current_app.logger.info(
         "[Flux Customers] list role=%s count=%s duration_ms=%.2f",
@@ -1619,7 +1812,7 @@ def get_customer_summary(current_user_id: str, current_role: str, filters: dict 
             result["customers_by_source"] = [
                 {
                     "source": item["_id"] or "other",
-                    "label": SOURCE_OPTIONS.get(item["_id"] or "other", "Other"),
+                    "label": _source_label(item["_id"]) or "Other",
                     "count": int(item.get("count") or 0),
                 }
                 for item in summary.get("customers_by_source") or []
@@ -1661,7 +1854,7 @@ def get_customer_summary(current_user_id: str, current_role: str, filters: dict 
                     {"id": item["id"], "name": item["name"]}
                     for item in get_active_master_data_items("customer_categories")
                 ],
-                "sources": [{"value": key, "label": value} for key, value in SOURCE_OPTIONS.items()],
+                "sources": _build_customer_source_options(),
             }
         else:
             filtered_query = _merge_queries(scope_query, _customer_filter_query(normalized_filters))
@@ -1898,3 +2091,384 @@ def update_customer(customer_id: str, payload: dict, current_user_id: str, curre
     if follow_up_history_entries:
         customer_document.setdefault("follow_up_history", []).extend(follow_up_history_entries)
     return _enrich_customer(customer_document)
+
+
+def _assert_customer_profile_edit_access(current_role: str):
+    if current_role not in {"owner", "admin"}:
+        raise ApiError("You do not have permission to edit customer relationship details.", status_code=403)
+
+
+def _assert_customer_note_access(current_role: str):
+    if current_role not in {"owner", "admin", "driver"}:
+        raise ApiError("You do not have permission to add customer notes.", status_code=403)
+
+
+def _customer_context(customer_id: str, *, current_user_id: str, current_role: str) -> tuple[dict, ObjectId]:
+    customer_document = _get_customer_document(customer_id)
+    _assert_customer_access(
+        customer_document,
+        current_user_id=current_user_id,
+        current_role=current_role,
+    )
+    return customer_document, customer_document["_id"]
+
+
+def _serialize_customer_opportunity(document: dict) -> dict:
+    return {
+        "id": str(document.get("_id")),
+        "customer_id": str(document.get("customer_id")) if document.get("customer_id") else None,
+        "opportunity_type_id": str(document.get("opportunity_type_id")) if document.get("opportunity_type_id") else None,
+        "opportunity_type": document.get("opportunity_type"),
+        "specific_product_or_service": document.get("specific_product_or_service"),
+        "estimated_budget": document.get("estimated_budget"),
+        "opportunity_stage_id": str(document.get("opportunity_stage_id")) if document.get("opportunity_stage_id") else None,
+        "opportunity_stage": document.get("opportunity_stage"),
+        "probability": document.get("probability"),
+        "expected_purchase_date": document.get("expected_purchase_date"),
+        "follow_up_date": document.get("follow_up_date"),
+        "notes": document.get("notes"),
+        "status": document.get("status"),
+        "created_by": str(document.get("created_by")) if document.get("created_by") else None,
+        "created_by_name": document.get("created_by_name"),
+        "created_at": document.get("created_at").isoformat() if document.get("created_at") else None,
+        "updated_at": document.get("updated_at").isoformat() if document.get("updated_at") else None,
+    }
+
+
+def _serialize_customer_contact(document: dict) -> dict:
+    return {
+        "id": str(document.get("_id")),
+        "customer_id": str(document.get("customer_id")) if document.get("customer_id") else None,
+        "contact_name": document.get("contact_name"),
+        "phone": document.get("phone"),
+        "email": document.get("email"),
+        "position_or_role": document.get("position_or_role"),
+        "relationship_role_id": str(document.get("relationship_role_id")) if document.get("relationship_role_id") else None,
+        "relationship_role": document.get("relationship_role"),
+        "notes": document.get("notes"),
+        "created_by": str(document.get("created_by")) if document.get("created_by") else None,
+        "created_by_name": document.get("created_by_name"),
+        "created_at": document.get("created_at").isoformat() if document.get("created_at") else None,
+        "updated_at": document.get("updated_at").isoformat() if document.get("updated_at") else None,
+    }
+
+
+def _serialize_customer_note(document: dict) -> dict:
+    return {
+        "id": str(document.get("_id")),
+        "customer_id": str(document.get("customer_id")) if document.get("customer_id") else None,
+        "note": document.get("note"),
+        "created_by": str(document.get("created_by")) if document.get("created_by") else None,
+        "created_by_name": document.get("created_by_name"),
+        "created_by_role": document.get("created_by_role"),
+        "created_at": document.get("created_at").isoformat() if document.get("created_at") else None,
+    }
+
+
+def _normalize_relationship_payload(payload: dict) -> dict[str, Any]:
+    normalized, _ = _normalized_customer_payload(payload, partial=True)
+    allowed_fields = {
+        "industry_id",
+        "industry",
+        "company_industry",
+        "organization_name",
+        "company_name",
+        "branch_or_department",
+        "position_title",
+        "relationship_role_id",
+        "relationship_role",
+        "relationship_category_id",
+        "relationship_category",
+        "lead_status_id",
+        "lead_status",
+        "customer_source_id",
+        "customer_source",
+        "source",
+        "influence_level_id",
+        "influence_level",
+        "government_sector_id",
+        "government_sector",
+        "relationship_notes",
+        "organization_type_id",
+        "organization_type",
+        "network_value_id",
+        "network_value",
+        "opportunity_level_id",
+        "opportunity_level",
+        "potential_service_id",
+        "potential_service",
+        "referred_by",
+        "is_business_lead",
+        "is_transport_customer",
+    }
+    return {key: value for key, value in normalized.items() if key in allowed_fields}
+
+
+def update_customer_relationship(customer_id: str, payload: dict, current_user_id: str, current_role: str) -> dict:
+    _assert_customer_profile_edit_access(current_role)
+    if payload.get("position_or_role") is not None and "position_title" not in payload:
+        payload = {**payload, "position_title": payload.get("position_or_role")}
+    if payload.get("company_or_institution_name") is not None:
+        payload = {
+            **payload,
+            "organization_name": payload.get("company_or_institution_name"),
+        }
+    relationship_payload = _normalize_relationship_payload(payload)
+    if not relationship_payload:
+        raise ApiError("No relationship detail fields provided for update.", status_code=400)
+    return update_customer(customer_id, relationship_payload, current_user_id, current_role)
+
+
+def _normalize_opportunity_payload(payload: dict, *, partial: bool = False) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    if not partial or "opportunity_type_id" in payload or "opportunity_type" in payload:
+        identifier = payload.get("opportunity_type_id") if "opportunity_type_id" in payload else payload.get("opportunity_type")
+        if identifier in (None, ""):
+            if not partial:
+                raise ApiError("opportunity_type_id is required.", status_code=400)
+            normalized["opportunity_type_id"] = None
+            normalized["opportunity_type"] = None
+        else:
+            document = resolve_master_data_item("potential_services", identifier, active_only=True)
+            normalized["opportunity_type_id"] = document["_id"]
+            normalized["opportunity_type"] = document["name"]
+    if not partial or "specific_product_or_service" in payload:
+        normalized["specific_product_or_service"] = _normalize_text(payload.get("specific_product_or_service"))
+    if "estimated_budget" in payload:
+        normalized["estimated_budget"] = _validate_money(payload.get("estimated_budget"), "estimated_budget")
+    elif not partial:
+        normalized["estimated_budget"] = None
+    if not partial or "opportunity_stage_id" in payload or "opportunity_stage" in payload:
+        identifier = payload.get("opportunity_stage_id") if "opportunity_stage_id" in payload else payload.get("opportunity_stage")
+        if identifier in (None, ""):
+            normalized["opportunity_stage_id"] = None
+            normalized["opportunity_stage"] = None
+        else:
+            document = resolve_master_data_item("opportunity_stages", identifier, active_only=True)
+            normalized["opportunity_stage_id"] = document["_id"]
+            normalized["opportunity_stage"] = document["name"]
+    if "probability" in payload:
+        probability = payload.get("probability")
+        if probability in (None, ""):
+            normalized["probability"] = None
+        elif isinstance(probability, bool) or not isinstance(probability, (int, float)):
+            raise ApiError("probability must be numeric.", status_code=400)
+        else:
+            normalized["probability"] = max(0, min(100, int(probability)))
+    elif not partial:
+        normalized["probability"] = None
+    if "expected_purchase_date" in payload:
+        normalized["expected_purchase_date"] = _normalize_date_string(payload.get("expected_purchase_date"), "expected_purchase_date")
+    elif not partial:
+        normalized["expected_purchase_date"] = None
+    if "follow_up_date" in payload:
+        normalized["follow_up_date"] = _normalize_date_string(payload.get("follow_up_date"), "follow_up_date")
+    elif not partial:
+        normalized["follow_up_date"] = None
+    if not partial or "notes" in payload:
+        normalized["notes"] = _normalize_text(payload.get("notes"))
+    if not partial or "status" in payload:
+        normalized["status"] = _normalize_text(payload.get("status")) or "open"
+    return {key: value for key, value in normalized.items() if partial or key in normalized}
+
+
+def list_customer_opportunities(customer_id: str, current_user_id: str, current_role: str) -> list[dict]:
+    _, customer_object_id = _customer_context(customer_id, current_user_id=current_user_id, current_role=current_role)
+    documents = list(
+        customer_opportunities_collection().find({"customer_id": customer_object_id}).sort([("updated_at", DESCENDING), ("created_at", DESCENDING)])
+    )
+    return [_serialize_customer_opportunity(document) for document in documents]
+
+
+def create_customer_opportunity(customer_id: str, payload: dict, current_user_id: str, current_role: str) -> dict:
+    _assert_customer_profile_edit_access(current_role)
+    customer_document, customer_object_id = _customer_context(customer_id, current_user_id=current_user_id, current_role=current_role)
+    normalized = _normalize_opportunity_payload(payload, partial=False)
+    creator_user = _get_user_document(current_user_id)
+    timestamp = now_utc()
+    document = {
+        **normalized,
+        "customer_id": customer_object_id,
+        "created_by": creator_user["_id"],
+        "created_by_name": creator_user.get("full_name"),
+        "created_at": timestamp,
+        "updated_at": timestamp,
+    }
+    result = customer_opportunities_collection().insert_one(document)
+    document["_id"] = result.inserted_id
+    customers_collection().update_one(
+        {"_id": customer_object_id},
+        {"$push": {"audit_events": _serialize_audit_event(action="opportunity_added", user_id=current_user_id, changes=sorted(normalized.keys()))}},
+    )
+    customer_document.setdefault("audit_events", []).append(
+        _serialize_audit_event(action="opportunity_added", user_id=current_user_id, changes=sorted(normalized.keys()))
+    )
+    return _serialize_customer_opportunity(document)
+
+
+def update_customer_opportunity(customer_id: str, opportunity_id: str, payload: dict, current_user_id: str, current_role: str) -> dict:
+    _assert_customer_profile_edit_access(current_role)
+    _, customer_object_id = _customer_context(customer_id, current_user_id=current_user_id, current_role=current_role)
+    document = customer_opportunities_collection().find_one({
+        "_id": _to_object_id(opportunity_id, "opportunity_id"),
+        "customer_id": customer_object_id,
+    })
+    if not document:
+        raise ApiError("Customer opportunity not found.", status_code=404)
+    normalized = _normalize_opportunity_payload(payload, partial=True)
+    if not normalized:
+        raise ApiError("No opportunity fields provided for update.", status_code=400)
+    normalized["updated_at"] = now_utc()
+    customer_opportunities_collection().update_one({"_id": document["_id"]}, {"$set": normalized})
+    document.update(normalized)
+    return _serialize_customer_opportunity(document)
+
+
+def _normalize_contact_payload(payload: dict, *, partial: bool = False) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    if not partial or "contact_name" in payload:
+        contact_name = _normalize_text(payload.get("contact_name"))
+        if not contact_name and not partial:
+            raise ApiError("contact_name is required.", status_code=400)
+        normalized["contact_name"] = contact_name
+    if "phone" in payload:
+        phone = normalize_phone(payload.get("phone"))
+        if phone and not validate_phone(phone):
+            raise ApiError("phone must be a valid phone number.", status_code=400)
+        normalized["phone"] = phone
+    elif not partial:
+        normalized["phone"] = None
+    if "email" in payload:
+        email = normalize_email(payload.get("email"))
+        if email and not validate_email(email):
+            raise ApiError("email must be a valid email.", status_code=400)
+        normalized["email"] = email
+    elif not partial:
+        normalized["email"] = None
+    if not partial or "position_or_role" in payload:
+        normalized["position_or_role"] = _normalize_text(payload.get("position_or_role"))
+    if not partial or "relationship_role_id" in payload or "relationship_role" in payload:
+        identifier = payload.get("relationship_role_id") if "relationship_role_id" in payload else payload.get("relationship_role")
+        if identifier in (None, ""):
+            normalized["relationship_role_id"] = None
+            normalized["relationship_role"] = None
+        else:
+            document = resolve_master_data_item("relationship_roles", identifier, active_only=True)
+            normalized["relationship_role_id"] = document["_id"]
+            normalized["relationship_role"] = document["name"]
+    if not partial or "notes" in payload:
+        normalized["notes"] = _normalize_text(payload.get("notes"))
+    return normalized
+
+
+def list_customer_contacts(customer_id: str, current_user_id: str, current_role: str) -> list[dict]:
+    _, customer_object_id = _customer_context(customer_id, current_user_id=current_user_id, current_role=current_role)
+    documents = list(
+        customer_contacts_collection().find({"customer_id": customer_object_id}).sort([("updated_at", DESCENDING), ("created_at", DESCENDING)])
+    )
+    return [_serialize_customer_contact(document) for document in documents]
+
+
+def create_customer_contact(customer_id: str, payload: dict, current_user_id: str, current_role: str) -> dict:
+    _assert_customer_profile_edit_access(current_role)
+    _, customer_object_id = _customer_context(customer_id, current_user_id=current_user_id, current_role=current_role)
+    normalized = _normalize_contact_payload(payload, partial=False)
+    creator_user = _get_user_document(current_user_id)
+    timestamp = now_utc()
+    document = {
+        **normalized,
+        "customer_id": customer_object_id,
+        "created_by": creator_user["_id"],
+        "created_by_name": creator_user.get("full_name"),
+        "created_at": timestamp,
+        "updated_at": timestamp,
+    }
+    result = customer_contacts_collection().insert_one(document)
+    document["_id"] = result.inserted_id
+    customers_collection().update_one(
+        {"_id": customer_object_id},
+        {"$push": {"audit_events": _serialize_audit_event(action="contact_added", user_id=current_user_id, changes=sorted(normalized.keys()))}},
+    )
+    return _serialize_customer_contact(document)
+
+
+def update_customer_contact(customer_id: str, contact_id: str, payload: dict, current_user_id: str, current_role: str) -> dict:
+    _assert_customer_profile_edit_access(current_role)
+    _, customer_object_id = _customer_context(customer_id, current_user_id=current_user_id, current_role=current_role)
+    document = customer_contacts_collection().find_one({
+        "_id": _to_object_id(contact_id, "contact_id"),
+        "customer_id": customer_object_id,
+    })
+    if not document:
+        raise ApiError("Customer contact not found.", status_code=404)
+    normalized = _normalize_contact_payload(payload, partial=True)
+    if not normalized:
+        raise ApiError("No contact fields provided for update.", status_code=400)
+    normalized["updated_at"] = now_utc()
+    customer_contacts_collection().update_one({"_id": document["_id"]}, {"$set": normalized})
+    document.update(normalized)
+    return _serialize_customer_contact(document)
+
+
+def list_customer_notes(customer_id: str, current_user_id: str, current_role: str) -> dict:
+    customer_document, customer_object_id = _customer_context(customer_id, current_user_id=current_user_id, current_role=current_role)
+    note_documents = list(
+        customer_notes_collection().find({"customer_id": customer_object_id}).sort([("created_at", DESCENDING)])
+    )
+    notes = [_serialize_customer_note(document) for document in note_documents]
+    timeline = [
+        {
+            "type": "note",
+            "id": note["id"],
+            "at": note["created_at"],
+            "author": note.get("created_by_name"),
+            "author_role": note.get("created_by_role"),
+            "text": note.get("note"),
+        }
+        for note in notes
+    ]
+    timeline.extend(
+        [
+            {
+                "type": "activity",
+                "id": f"audit-{index}",
+                "at": event.get("at").isoformat() if event.get("at") else None,
+                "author": None,
+                "author_role": None,
+                "text": event.get("note") or event.get("action"),
+                "action": event.get("action"),
+                "changes": event.get("changes") or [],
+            }
+            for index, event in enumerate(customer_document.get("audit_events") or [])
+        ]
+    )
+    timeline.sort(key=lambda item: item.get("at") or "", reverse=True)
+    return {
+        "notes": notes,
+        "timeline": timeline,
+    }
+
+
+def create_customer_note(customer_id: str, payload: dict, current_user_id: str, current_role: str) -> dict:
+    _assert_customer_note_access(current_role)
+    _, customer_object_id = _customer_context(customer_id, current_user_id=current_user_id, current_role=current_role)
+    note = _normalize_text(payload.get("note"))
+    if not note:
+        raise ApiError("note is required.", status_code=400)
+    creator_user = _get_user_document(current_user_id)
+    timestamp = now_utc()
+    document = {
+        "customer_id": customer_object_id,
+        "note": note,
+        "created_by": creator_user["_id"],
+        "created_by_name": creator_user.get("full_name"),
+        "created_by_role": creator_user.get("role"),
+        "created_at": timestamp,
+    }
+    result = customer_notes_collection().insert_one(document)
+    document["_id"] = result.inserted_id
+    customers_collection().update_one(
+        {"_id": customer_object_id},
+        {"$push": {"audit_events": _serialize_audit_event(action="note_added", user_id=current_user_id, changes=["note"], note=note)}},
+    )
+    return _serialize_customer_note(document)

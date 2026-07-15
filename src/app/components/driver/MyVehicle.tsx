@@ -1,8 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, Calendar, Car, Gauge, Loader2, Shield, Truck, Wrench } from 'lucide-react';
+import { AlertCircle, Calendar, Car, CheckCircle, Gauge, Loader2, Shield, Truck, Wrench } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
 import { getAssignedVehicleLabel, type SessionUser } from '../../lib/auth-session';
 import type { DriverActiveAssignment } from '../../lib/driver-api';
+import { FuelGaugeSelector } from '../shared/FuelGaugeSelector';
+import {
+  confirmVehicleMovementDelivery,
+  fetchVehicleMovements,
+  respondToMaintenanceMovement,
+  checkOutVehicleMovement,
+  startVehicleMovement,
+  returnVehicleMovement,
+  submitMaintenanceMovementCompletion,
+  type VehicleMovementRecord,
+} from '../../lib/vehicle-movement-api';
 
 interface MyVehicleProps {
   currentUser: SessionUser | null;
@@ -68,6 +79,12 @@ interface PreventiveSchedule {
   next_due_date: string | null;
   next_due_odometer: number | null;
   description: string | null;
+  completed_date?: string | null;
+  last_completed_service?: {
+    completed_date?: string | null;
+    work_done?: string | null;
+    parts_changed?: string[] | null;
+  } | null;
 }
 
 interface PreventiveSchedulesResponse {
@@ -189,16 +206,27 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
   const hasAssignedVehicle = Boolean(activeAssignment && vehicle);
   const [preventiveSectionRef, shouldLoadPreventive] = useVisibilityOnce<HTMLDivElement>();
   const [maintenanceSectionRef, shouldLoadMaintenance] = useVisibilityOnce<HTMLDivElement>();
+  const [dispatchSectionRef, shouldLoadDispatchMovements] = useVisibilityOnce<HTMLDivElement>();
   const [maintenanceJobs, setMaintenanceJobs] = useState<MaintenanceJob[]>([]);
   const [isLoadingMaintenance, setIsLoadingMaintenance] = useState(false);
+  const [hasLoadedMaintenance, setHasLoadedMaintenance] = useState(false);
   const [maintenanceError, setMaintenanceError] = useState('');
   const [preventiveSchedules, setPreventiveSchedules] = useState<PreventiveSchedule[]>([]);
   const [complianceRecords, setComplianceRecords] = useState<ComplianceRecord[]>([]);
   const [isLoadingPreventive, setIsLoadingPreventive] = useState(false);
+  const [hasLoadedPreventive, setHasLoadedPreventive] = useState(false);
   const [preventiveError, setPreventiveError] = useState('');
   const [driverUpdateJobId, setDriverUpdateJobId] = useState<string | null>(null);
   const [driverUpdateNote, setDriverUpdateNote] = useState('');
   const [driverActionError, setDriverActionError] = useState('');
+  const [driverActionFeedback, setDriverActionFeedback] = useState<Record<string, string>>({});
+  const [dispatchMovements, setDispatchMovements] = useState<VehicleMovementRecord[]>([]);
+  const [isLoadingDispatchMovements, setIsLoadingDispatchMovements] = useState(false);
+  const [hasLoadedDispatchMovements, setHasLoadedDispatchMovements] = useState(false);
+  const [dispatchError, setDispatchError] = useState('');
+  const [deliveryNoteDrafts, setDeliveryNoteDrafts] = useState<Record<string, string>>({});
+  const [confirmingMovementId, setConfirmingMovementId] = useState<string | null>(null);
+  const vehicleId = vehicle?.id || '';
 
   const formatValue = (value: string | number | null | undefined) =>
     value === null || value === undefined || value === '' ? 'Not provided' : String(value);
@@ -206,14 +234,51 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
   useEffect(() => {
     if (!hasAssignedVehicle) {
       setMaintenanceJobs([]);
+      setHasLoadedMaintenance(false);
       setMaintenanceError('');
       setIsLoadingMaintenance(false);
       setPreventiveSchedules([]);
       setComplianceRecords([]);
+      setHasLoadedPreventive(false);
       setPreventiveError('');
       setIsLoadingPreventive(false);
+      setDispatchMovements([]);
+      setHasLoadedDispatchMovements(false);
+      setDispatchError('');
+      setIsLoadingDispatchMovements(false);
+      return;
     }
-  }, [hasAssignedVehicle]);
+    // A changed assignment must re-arm each lazy section, while an empty
+    // successful response must remain a stable empty state.
+    setHasLoadedMaintenance(false);
+    setHasLoadedPreventive(false);
+    setHasLoadedDispatchMovements(false);
+  }, [vehicleId, hasAssignedVehicle]);
+
+  const loadDispatchMovements = async () => {
+    setIsLoadingDispatchMovements(true);
+    setDispatchError('');
+    try {
+      const response = await fetchVehicleMovements({
+        page: 1,
+        page_size: 10,
+      });
+      const visibleMovements = (response.movements || []).filter((movement) =>
+        ['draft', 'pending_approval', 'approved', 'checked_out', 'in_progress', 'returned', 'closed'].includes(movement.status),
+      );
+      setDispatchMovements(visibleMovements);
+    } catch (error) {
+      setDispatchMovements([]);
+      if (error instanceof ApiRequestError) {
+        setDispatchError(error.message);
+      } else {
+        setDispatchError('Unable to load dispatch movements right now.');
+      }
+    } finally {
+      setIsLoadingDispatchMovements(false);
+      setHasLoadedDispatchMovements(true);
+    }
+  };
 
   const loadMaintenanceJobs = async () => {
     setIsLoadingMaintenance(true);
@@ -230,6 +295,7 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
       }
     } finally {
       setIsLoadingMaintenance(false);
+      setHasLoadedMaintenance(true);
     }
   };
 
@@ -250,22 +316,30 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
       }
     } finally {
       setIsLoadingPreventive(false);
+      setHasLoadedPreventive(true);
     }
   };
 
   useEffect(() => {
-    if (!hasAssignedVehicle || !shouldLoadPreventive || isLoadingPreventive || preventiveSchedules.length || complianceRecords.length || preventiveError) {
+    if (!hasAssignedVehicle || !shouldLoadPreventive || isLoadingPreventive || hasLoadedPreventive || preventiveError) {
       return;
     }
     void loadPreventiveData();
-  }, [complianceRecords.length, hasAssignedVehicle, isLoadingPreventive, preventiveError, preventiveSchedules.length, shouldLoadPreventive]);
+  }, [hasAssignedVehicle, hasLoadedPreventive, isLoadingPreventive, preventiveError, shouldLoadPreventive]);
 
   useEffect(() => {
-    if (!hasAssignedVehicle || !shouldLoadMaintenance || isLoadingMaintenance || maintenanceJobs.length || maintenanceError) {
+    if (!hasAssignedVehicle || !shouldLoadMaintenance || isLoadingMaintenance || hasLoadedMaintenance || maintenanceError) {
       return;
     }
     void loadMaintenanceJobs();
-  }, [hasAssignedVehicle]);
+  }, [hasAssignedVehicle, hasLoadedMaintenance, isLoadingMaintenance, maintenanceError, shouldLoadMaintenance]);
+
+  useEffect(() => {
+    if (!hasAssignedVehicle || !shouldLoadDispatchMovements || isLoadingDispatchMovements || hasLoadedDispatchMovements || dispatchError) {
+      return;
+    }
+    void loadDispatchMovements();
+  }, [dispatchError, hasAssignedVehicle, hasLoadedDispatchMovements, isLoadingDispatchMovements, shouldLoadDispatchMovements]);
 
   const activeMaintenanceJobs = useMemo(
     () => maintenanceJobs.filter((job) => job.status !== 'completed' && job.status !== 'cancelled'),
@@ -277,21 +351,59 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
     [maintenanceJobs],
   );
 
-  const preventiveAlerts = useMemo(
-    () =>
-      preventiveSchedules.filter((schedule) =>
-        ['due_soon', 'due', 'overdue'].includes(schedule.status),
-      ),
-    [preventiveSchedules],
-  );
+  const preventiveAlerts = preventiveSchedules;
 
   const complianceAlerts = useMemo(
     () => complianceRecords.filter((record) => ['due_soon', 'expired'].includes(record.status)),
     [complianceRecords],
   );
 
+  const activeDispatchMovements = useMemo(
+    () =>
+      dispatchMovements.filter((movement) => movement.movement_type === 'customer_dispatch' &&
+        ['checked_out', 'in_progress'].includes(movement.status),
+      ),
+    [dispatchMovements],
+  );
+
+  const maintenanceMovements = useMemo(
+    () => dispatchMovements.filter((movement) => ['maintenance', 'workshop'].includes(movement.movement_type)),
+    [dispatchMovements],
+  );
+
+  const runMaintenanceMovementAction = async (movement: VehicleMovementRecord, action: 'accept' | 'reject' | 'checkout' | 'arrived' | 'return' | 'submit') => {
+    if (confirmingMovementId) return;
+    setConfirmingMovementId(movement.id);
+    setDispatchError('');
+    try {
+      let updated = movement;
+      if (action === 'accept') updated = await respondToMaintenanceMovement(movement.id, 'accepted');
+      if (action === 'reject') {
+        const reason = window.prompt('Why can you not take this maintenance movement?')?.trim();
+        if (!reason) return;
+        updated = await respondToMaintenanceMovement(movement.id, 'rejected', reason);
+      }
+      if (action === 'checkout') updated = await checkOutVehicleMovement(movement.id, {});
+      if (action === 'arrived') updated = await startVehicleMovement(movement.id);
+      if (action === 'return') updated = await returnVehicleMovement(movement.id, {});
+      if (action === 'submit') {
+        const workPerformed = window.prompt('Describe the work performed:')?.trim();
+        if (!workPerformed) return;
+        const partsChanged = window.prompt('Parts changed (comma separated, optional):') || '';
+        const testResult = window.prompt('Vehicle test result (optional):') || '';
+        updated = await submitMaintenanceMovementCompletion(movement.id, { work_performed: workPerformed, parts_changed: partsChanged, test_result: testResult });
+      }
+      setDispatchMovements((current) => current.map((item) => item.id === updated.id ? updated : item));
+    } catch (error) {
+      setDispatchError(error instanceof ApiRequestError ? error.message : 'Unable to update this maintenance movement.');
+    } finally {
+      setConfirmingMovementId(null);
+    }
+  };
+
   const submitDriverMaintenanceUpdate = async (jobId: string, driverConfirmation: 'confirmed' | 'rejected') => {
     setDriverActionError('');
+    setDriverActionFeedback((current) => ({ ...current, [jobId]: '' }));
     setDriverUpdateJobId(jobId);
     try {
       await apiRequest<MaintenanceProgressMutationResponse>(`/driver/maintenance/${jobId}/progress`, {
@@ -304,14 +416,42 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
       setDriverUpdateNote('');
       const response = await apiRequest<MaintenanceJobsResponse>('/driver/maintenance');
       setMaintenanceJobs(Array.isArray(response.data?.jobs) ? response.data.jobs : []);
+      setDriverActionFeedback((current) => ({
+        ...current,
+        [jobId]: driverConfirmation === 'confirmed' ? 'Vehicle marked as fixed.' : 'Reported as not fixed. The maintenance team has been notified.',
+      }));
     } catch (error) {
       if (error instanceof ApiRequestError) {
         setDriverActionError(error.message);
       } else {
         setDriverActionError('Unable to send your maintenance confirmation right now.');
       }
+      setDriverActionFeedback((current) => ({ ...current, [jobId]: '' }));
     } finally {
       setDriverUpdateJobId(null);
+    }
+  };
+
+  const submitDeliveryConfirmation = async (movement: VehicleMovementRecord) => {
+    setDispatchError('');
+    setConfirmingMovementId(movement.id);
+    try {
+      const updatedMovement = await confirmVehicleMovementDelivery(movement.id, {
+        delivery_status: 'delivered',
+        delivery_note: deliveryNoteDrafts[movement.id] || undefined,
+      });
+      setDispatchMovements((current) =>
+        current.map((item) => (item.id === updatedMovement.id ? updatedMovement : item)),
+      );
+      setDeliveryNoteDrafts((current) => ({ ...current, [movement.id]: '' }));
+    } catch (error) {
+      if (error instanceof ApiRequestError) {
+        setDispatchError(error.message);
+      } else {
+        setDispatchError('Unable to confirm delivery right now.');
+      }
+    } finally {
+      setConfirmingMovementId(null);
     }
   };
 
@@ -468,6 +608,18 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
                 <DetailRow label="Color" value={formatValue(vehicle?.color)} />
                 <DetailRow label="Transmission" value={formatValue(vehicle?.transmission)} />
                 <DetailRow label="Fuel Type" value={formatValue(vehicle?.fuel_type)} />
+                {vehicle?.current_fuel_level != null ? (
+                  <div className="mt-4">
+                    <FuelGaugeSelector
+                      label="Current Fuel Level"
+                      value={vehicle.current_fuel_level}
+                      readOnly
+                      compact
+                      showEstimatedLitres
+                      tankCapacityLitres={vehicle.tank_capacity_litres}
+                    />
+                  </div>
+                ) : null}
               </div>
 
               <div className="rounded-xl border border-gray-200 bg-white p-5">
@@ -488,6 +640,131 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
               </div>
             </div>
 
+            <div ref={dispatchSectionRef} className="rounded-xl border border-gray-200 bg-white p-5">
+              <div className="mb-4 flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-100">
+                  <CheckCircle className="h-5 w-5 text-emerald-600" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-semibold text-[#0F172A]">Dispatch Delivery Confirmation</h3>
+                  <p className="text-xs text-gray-500">Confirm customer dispatch delivery without changing your primary assignment.</p>
+                </div>
+              </div>
+
+              {isLoadingDispatchMovements ? (
+                <div className="flex items-center gap-3 rounded-xl border border-gray-200 bg-gray-50 px-4 py-5 text-sm text-gray-600">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Loading dispatch deliveries...
+                </div>
+              ) : dispatchError ? (
+                <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-4 text-sm text-red-700">
+                  {dispatchError}
+                </div>
+              ) : activeDispatchMovements.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50 px-4 py-5 text-sm text-gray-600">
+                  No active customer dispatch movements need delivery confirmation right now.
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {activeDispatchMovements.map((movement) => (
+                    <div key={movement.id} className="rounded-xl border border-gray-200 p-4">
+                      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                        <div>
+                          <div className="text-sm font-semibold text-[#0F172A]">{movement.movement_id}</div>
+                          <div className="mt-1 text-sm text-gray-600">
+                            {movement.origin || 'Origin not set'} to {movement.destination || 'Destination not set'}
+                          </div>
+                          <div className="mt-1 text-xs text-gray-500">
+                            Status: {movement.status.replaceAll('_', ' ')} • Delivery: {movement.delivery_status || 'pending'}
+                          </div>
+                        </div>
+                        {movement.delivery_status === 'delivered' && movement.delivered_at ? (
+                          <span className="inline-flex rounded-full border border-green-200 bg-green-100 px-3 py-1 text-xs font-semibold text-green-700">
+                            Delivered {formatDate(movement.delivered_at)}
+                          </span>
+                        ) : null}
+                      </div>
+
+                      {movement.delivery_status !== 'delivered' && (
+                        <div className="mt-4 space-y-3">
+                          <textarea
+                            value={deliveryNoteDrafts[movement.id] || ''}
+                            onChange={(event) =>
+                              setDeliveryNoteDrafts((current) => ({
+                                ...current,
+                                [movement.id]: event.target.value,
+                              }))
+                            }
+                            placeholder="Optional delivery note, for example who received the goods or where they were left."
+                            className="min-h-[96px] w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void submitDeliveryConfirmation(movement)}
+                            disabled={confirmingMovementId === movement.id}
+                            className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-medium text-white transition-all hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-70"
+                          >
+                            {confirmingMovementId === movement.id && <Loader2 className="h-4 w-4 animate-spin" />}
+                            Mark Delivered
+                          </button>
+                        </div>
+                      )}
+
+                      {movement.delivery_status === 'delivered' && movement.delivery_note ? (
+                        <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700">
+                          {movement.delivery_note}
+                        </div>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {maintenanceMovements.length > 0 ? (
+              <div className="rounded-xl border border-blue-200 bg-white p-5">
+                <div className="mb-4">
+                  <h3 className="text-sm font-semibold text-[#0F172A]">Maintenance Movement Tasks</h3>
+                  <p className="text-xs text-gray-500">Tasks assigned to you and activity involving your permanently assigned vehicle.</p>
+                </div>
+                <div className="space-y-3">
+                  {maintenanceMovements.map((movement) => {
+                    const isCustodian = movement.movement_custodian_id === currentUser?.id || movement.driver_id === currentUser?.id;
+                    const busy = confirmingMovementId === movement.id;
+                    return (
+                      <div key={movement.id} className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <div className="font-medium text-[#0F172A]">{movement.destination || movement.workshop_name || 'Maintenance workshop'}</div>
+                            <div className="text-xs text-gray-500">{formatLabel(movement.status)} · Custodian: {movement.movement_custodian?.full_name || movement.driver?.full_name || 'Unassigned'}</div>
+                          </div>
+                          <span className="rounded-full bg-blue-100 px-2.5 py-1 text-xs font-medium text-blue-700">{formatLabel(movement.completion_status || movement.custodian_response_status || movement.status)}</span>
+                        </div>
+                        <div className="mt-3 grid gap-2 text-sm text-gray-600 sm:grid-cols-2">
+                          <div>Departure: {formatDate(movement.departure_time || movement.requested_departure_time)}</div>
+                          <div>Expected return: {formatDate(movement.expected_return_time)}</div>
+                          {movement.work_performed ? <div className="sm:col-span-2">Work performed: {movement.work_performed}</div> : null}
+                          {movement.parts_changed?.length ? <div className="sm:col-span-2">Parts changed: {movement.parts_changed.join(', ')}</div> : null}
+                        </div>
+                        {isCustodian ? (
+                          <div className="mt-4 flex flex-wrap gap-2">
+                            {movement.custodian_response_status === 'pending' ? <>
+                              <button disabled={busy} onClick={() => void runMaintenanceMovementAction(movement, 'accept')} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-medium text-white disabled:opacity-60">{busy ? 'Saving...' : 'Accept'}</button>
+                              <button disabled={busy} onClick={() => void runMaintenanceMovementAction(movement, 'reject')} className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-700 disabled:opacity-60">Reject</button>
+                            </> : null}
+                            {movement.custodian_response_status === 'accepted' && movement.status === 'approved' ? <button disabled={busy} onClick={() => void runMaintenanceMovementAction(movement, 'checkout')} className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white disabled:opacity-60">{busy ? 'Saving...' : 'Check Out'}</button> : null}
+                            {movement.status === 'checked_out' ? <button disabled={busy} onClick={() => void runMaintenanceMovementAction(movement, 'arrived')} className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white disabled:opacity-60">{busy ? 'Saving...' : 'Arrived at Workshop'}</button> : null}
+                            {movement.status === 'in_progress' ? <button disabled={busy} onClick={() => void runMaintenanceMovementAction(movement, 'return')} className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white disabled:opacity-60">{busy ? 'Saving...' : 'Confirm Returned'}</button> : null}
+                            {movement.status === 'returned' && !movement.completion_status ? <button disabled={busy} onClick={() => void runMaintenanceMovementAction(movement, 'submit')} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-medium text-white disabled:opacity-60">{busy ? 'Submitting...' : 'Submit Completion'}</button> : null}
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
+
             <div ref={preventiveSectionRef} className="rounded-xl border border-gray-200 bg-white p-5">
               <div className="mb-4 flex items-center gap-3">
                 <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-amber-100">
@@ -506,11 +783,14 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
                 </div>
               ) : preventiveError ? (
                 <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-4 text-sm text-red-700">
-                  {preventiveError}
+                  <div>{preventiveError}</div>
+                  <button type="button" onClick={() => void loadPreventiveData()} className="mt-3 rounded-lg border border-red-300 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100">
+                    Retry
+                  </button>
                 </div>
               ) : preventiveAlerts.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50 px-4 py-5 text-sm text-gray-600">
-                  No preventive maintenance alerts for your vehicle right now.
+                  No preventive maintenance schedules are recorded for your vehicle yet.
                 </div>
               ) : (
                 <div className="space-y-3">
@@ -550,6 +830,16 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
                           <span className="font-medium text-[#0F172A]">Next Due Odometer:</span>{' '}
                           {schedule.next_due_odometer != null ? `${schedule.next_due_odometer.toLocaleString()} km` : 'Not set'}
                         </div>
+                        <div>
+                          <span className="font-medium text-[#0F172A]">Last Completed Service:</span>{' '}
+                          {formatDate(schedule.last_completed_service?.completed_date || schedule.completed_date)}
+                        </div>
+                        {schedule.last_completed_service?.work_done ? (
+                          <div className="md:col-span-2">
+                            <span className="font-medium text-[#0F172A]">Work Performed:</span>{' '}
+                            {schedule.last_completed_service.work_done}
+                          </div>
+                        ) : null}
                       </div>
                     </div>
                   ))}
@@ -598,7 +888,10 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
                 </div>
               ) : maintenanceError ? (
                 <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-4 text-sm text-red-700">
-                  {maintenanceError}
+                  <div>{maintenanceError}</div>
+                  <button type="button" onClick={() => void loadMaintenanceJobs()} className="mt-3 rounded-lg border border-red-300 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100">
+                    Retry
+                  </button>
                 </div>
               ) : activeMaintenanceJobs.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50 px-4 py-5 text-sm text-gray-600">
@@ -695,6 +988,11 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
                               Report Not Fixed
                             </button>
                           </div>
+                          {driverActionFeedback[job.id] ? (
+                            <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700" role="status">
+                              {driverActionFeedback[job.id]}
+                            </div>
+                          ) : null}
                         </div>
                       )}
                     </div>
@@ -721,7 +1019,10 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
                 </div>
               ) : maintenanceError ? (
                 <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-4 text-sm text-red-700">
-                  {maintenanceError}
+                  <div>{maintenanceError}</div>
+                  <button type="button" onClick={() => void loadMaintenanceJobs()} className="mt-3 rounded-lg border border-red-300 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100">
+                    Retry
+                  </button>
                 </div>
               ) : maintenanceHistory.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50 px-4 py-5 text-sm text-gray-600">

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { AlertTriangle, Loader2 } from 'lucide-react';
+import { AlertTriangle, Loader2, RefreshCw } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
 
 type FaultStatus =
@@ -18,6 +18,8 @@ interface FaultHistoryRecord {
   resolution_notes: string | null;
   admin_notes: string | null;
   owner_notes: string | null;
+  description: string;
+  request_info_note: string | null;
   vehicle?: {
     registration_number: string;
     make?: string | null;
@@ -77,9 +79,11 @@ export default function FaultHistory() {
   const [faults, setFaults] = useState<FaultHistoryRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [pageError, setPageError] = useState('');
+  const [clarifications, setClarifications] = useState<Record<string, string>>({});
+  const [savingFaultId, setSavingFaultId] = useState<string | null>(null);
+  const [actionMessages, setActionMessages] = useState<Record<string, { tone: 'success' | 'error'; text: string }>>({});
 
-  useEffect(() => {
-    const loadFaults = async () => {
+  const loadFaults = async () => {
       setIsLoading(true);
       setPageError('');
       try {
@@ -96,8 +100,43 @@ export default function FaultHistory() {
       }
     };
 
+  useEffect(() => {
     void loadFaults();
   }, []);
+
+  const submitClarification = async (fault: FaultHistoryRecord) => {
+    if (savingFaultId) return;
+    const responseText = (clarifications[fault.id] || '').trim();
+    if (!responseText) {
+      setActionMessages((current) => ({ ...current, [fault.id]: { tone: 'error', text: 'Enter the requested details before submitting.' } }));
+      return;
+    }
+    setSavingFaultId(fault.id);
+    setActionMessages((current) => {
+      const next = { ...current };
+      delete next[fault.id];
+      return next;
+    });
+    try {
+      const response = await apiRequest<{ success: boolean; data: { fault: FaultHistoryRecord } }>(`/faults/${fault.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ description: `${fault.description}\n\nAdditional information: ${responseText}` }),
+      });
+      setFaults((current) => current.map((item) => (item.id === fault.id ? response.data.fault : item)));
+      setClarifications((current) => ({ ...current, [fault.id]: '' }));
+      setActionMessages((current) => ({ ...current, [fault.id]: { tone: 'success', text: 'Additional information sent for review.' } }));
+    } catch (error) {
+      setActionMessages((current) => ({
+        ...current,
+        [fault.id]: {
+          tone: 'error',
+          text: error instanceof ApiRequestError ? error.message : 'Unable to send the additional information right now.',
+        },
+      }));
+    } finally {
+      setSavingFaultId(null);
+    }
+  };
 
   return (
     <div className="space-y-6 p-6">
@@ -108,7 +147,12 @@ export default function FaultHistory() {
 
       {pageError && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-          {pageError}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span>{pageError}</span>
+            <button type="button" onClick={() => void loadFaults()} className="inline-flex items-center gap-2 rounded-md border border-red-300 bg-white px-3 py-1.5 font-medium hover:bg-red-100">
+              <RefreshCw className="h-4 w-4" /> Retry
+            </button>
+          </div>
         </div>
       )}
 
@@ -146,6 +190,32 @@ export default function FaultHistory() {
                     <div className="text-sm text-gray-600">
                       Resolution Notes: {fault.resolution_notes || fault.admin_notes || fault.owner_notes || 'No notes yet'}
                     </div>
+                    {fault.status === 'under_review' && fault.request_info_note && (
+                      <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
+                        <div className="text-sm font-semibold text-amber-900">Administrator requested more information</div>
+                        <div className="mt-1 text-sm text-amber-800">{fault.request_info_note}</div>
+                        <textarea
+                          value={clarifications[fault.id] || ''}
+                          onChange={(event) => setClarifications((current) => ({ ...current, [fault.id]: event.target.value }))}
+                          className="mt-3 min-h-[96px] w-full rounded-lg border border-amber-300 bg-white px-3 py-2 text-sm text-gray-800 focus:border-transparent focus:ring-2 focus:ring-amber-500"
+                          placeholder="Add the requested details..."
+                        />
+                        {actionMessages[fault.id] && (
+                          <div className={`mt-2 text-sm ${actionMessages[fault.id].tone === 'success' ? 'text-green-700' : 'text-red-700'}`} role="status">
+                            {actionMessages[fault.id].text}
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          disabled={savingFaultId !== null}
+                          onClick={() => void submitClarification(fault)}
+                          className="mt-3 inline-flex items-center gap-2 rounded-lg bg-amber-700 px-3 py-2 text-sm font-medium text-white hover:bg-amber-800 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {savingFaultId === fault.id && <Loader2 className="h-4 w-4 animate-spin" />}
+                          Send Additional Information
+                        </button>
+                      </div>
+                    )}
                   </div>
                   <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${statusClassName(fault.status)}`}>
                     {formatLabel(fault.status)}
@@ -160,7 +230,7 @@ export default function FaultHistory() {
       <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
         <div className="flex items-start gap-3">
           <AlertTriangle className="mt-0.5 h-5 w-5 flex-shrink-0" />
-          <div>Use Report Fault to add more details if an admin requests more information while a fault is under review.</div>
+          <div>If an admin requests more information, respond on the existing fault above so its review history stays together.</div>
         </div>
       </div>
     </div>

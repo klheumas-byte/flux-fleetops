@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useState } from 'react';
+import { Suspense, lazy, startTransition, useEffect, useState } from 'react';
 import { Toaster, toast } from 'sonner';
 import Login from './components/Login';
 import { API_BASE_URL } from './lib/api';
@@ -20,51 +20,68 @@ import {
   type DriverWalletData,
 } from './lib/driver-api';
 import AdminLayout from './components/admin/AdminLayout';
-import Dashboard from './components/admin/Dashboard';
-import FleetTracking from './components/admin/FleetTracking';
-import Vehicles from './components/admin/Vehicles';
-import Drivers from './components/admin/Drivers';
-import DriverApproval from './components/admin/DriverApproval';
-import Collections from './components/admin/Collections';
-import Deposits from './components/admin/Deposits';
-import Expenses from './components/admin/Expenses';
-import FinanceAccounts from './components/admin/FinanceAccounts';
-import Revenue from './components/admin/Revenue';
-import AdminAccountability from './components/admin/AdminAccountability';
-import Customers from './components/admin/Customers';
-import FuelManagement from './components/admin/Fuel';
-import FaultApprovals from './components/admin/FaultApprovals';
-import Maintenance from './components/admin/Maintenance';
-import PreventiveMaintenance from './components/admin/PreventiveMaintenance';
-import Assignments from './components/admin/Assignments';
-import DriverPerformance from './components/admin/DriverPerformance';
-import Rides from './components/admin/Rides';
-import Security from './components/admin/Security';
-import Settings from './components/admin/Settings';
 import DriverLayout from './components/driver/DriverLayout';
-import DriverDashboard from './components/driver/DriverDashboard';
-import CreateRide from './components/driver/CreateRide';
-import CustomerManagement from './components/driver/CustomerManagement';
-import DriverCalendar from './components/driver/DriverCalendar';
-import MyVehicle from './components/driver/MyVehicle';
-import MyWallet from './components/driver/MyWallet';
-import RideHistory from './components/driver/RideHistory';
-import FuelLogs from './components/driver/FuelLogs';
-import FaultHistory from './components/driver/FaultHistory';
-import MyPerformance from './components/driver/MyPerformance';
-import ReportFault from './components/driver/ReportFault';
-import DriverNotifications from './components/driver/DriverNotifications';
-import DriverProfile from './components/driver/DriverProfile';
 import AccessDenied from './components/shared/AccessDenied';
-import IncidentsModule from './components/shared/IncidentsModule';
+import NotificationSoundController from './components/shared/NotificationSoundController';
 import { canAccessModule, type AppModule } from './lib/role-access';
 
+const Dashboard = lazy(() => import('./components/admin/Dashboard'));
+const FleetTracking = lazy(() => import('./components/admin/FleetTracking'));
+const Vehicles = lazy(() => import('./components/admin/Vehicles'));
+const VehicleMovements = lazy(() => import('./components/admin/VehicleMovements'));
+const DispatchFinancials = lazy(() => import('./components/admin/DispatchFinancials'));
+const DispatchOpportunitiesReview = lazy(() => import('./components/admin/DispatchOpportunitiesReview'));
+const DispatchReturns = lazy(() => import('./components/admin/DispatchReturns'));
+const DispatchRequests = lazy(() => import('./components/admin/DispatchRequests'));
+const DispatchPlanner = lazy(() => import('./components/admin/DispatchPlanner'));
+const Drivers = lazy(() => import('./components/admin/Drivers'));
+const DriverApproval = lazy(() => import('./components/admin/DriverApproval'));
+const Collections = lazy(() => import('./components/admin/Collections'));
+const Deposits = lazy(() => import('./components/admin/Deposits'));
+const Expenses = lazy(() => import('./components/admin/Expenses'));
+const FinanceAccounts = lazy(() => import('./components/admin/FinanceAccounts'));
+const Revenue = lazy(() => import('./components/admin/Revenue'));
+const AdminAccountability = lazy(() => import('./components/admin/AdminAccountability'));
+const Customers = lazy(() => import('./components/admin/Customers'));
+const FuelManagement = lazy(() => import('./components/admin/Fuel'));
+const FaultApprovals = lazy(() => import('./components/admin/FaultApprovals'));
+const Maintenance = lazy(() => import('./components/admin/Maintenance'));
+const PreventiveMaintenance = lazy(() => import('./components/admin/PreventiveMaintenance'));
+const Assignments = lazy(() => import('./components/admin/Assignments'));
+const DriverPerformance = lazy(() => import('./components/admin/DriverPerformance'));
+const Rides = lazy(() => import('./components/admin/Rides'));
+const Security = lazy(() => import('./components/admin/Security'));
+const Settings = lazy(() => import('./components/admin/Settings'));
+const DriverDashboard = lazy(() => import('./components/driver/DriverDashboard'));
+const CreateRide = lazy(() => import('./components/driver/CreateRide'));
+const CustomerManagement = lazy(() => import('./components/driver/CustomerManagement'));
+const DriverCalendar = lazy(() => import('./components/driver/DriverCalendar'));
+const MyVehicle = lazy(() => import('./components/driver/MyVehicle'));
+const MyWallet = lazy(() => import('./components/driver/MyWallet'));
+const MyDispatchFinancials = lazy(() => import('./components/driver/MyDispatchFinancials'));
+const DispatchOpportunities = lazy(() => import('./components/driver/DispatchOpportunities'));
+const MyDispatches = lazy(() => import('./components/driver/MyDispatches'));
+const RideHistory = lazy(() => import('./components/driver/RideHistory'));
+const FuelLogs = lazy(() => import('./components/driver/FuelLogs'));
+const FaultHistory = lazy(() => import('./components/driver/FaultHistory'));
+const MyPerformance = lazy(() => import('./components/driver/MyPerformance'));
+const ReportFault = lazy(() => import('./components/driver/ReportFault'));
+const DriverNotifications = lazy(() => import('./components/driver/DriverNotifications'));
+const DriverProfile = lazy(() => import('./components/driver/DriverProfile'));
+const IncidentsModule = lazy(() => import('./components/shared/IncidentsModule'));
 const Reports = lazy(() => import('./components/admin/Reports'));
 const Notifications = lazy(() => import('./components/admin/Notifications'));
 const VehicleDetails = lazy(() => import('./components/admin/VehicleDetails'));
 
 export type UserRole = SessionUserRole;
 export type AuthUser = SessionUser;
+
+function getDefaultPageForRole(role: UserRole | null | undefined) {
+  if (role === 'dispatcher' || role === 'customer_service') {
+    return 'dispatch-requests';
+  }
+  return 'dashboard';
+}
 
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -77,14 +94,18 @@ export default function App() {
   const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
 
+  const loadingFallback = <div className="p-6 text-sm text-gray-500">Loading page...</div>;
+
   const navigateToPage = (page: string, options?: { vehicleId?: string | null; replaceHistory?: boolean }) => {
-    setCurrentPage(page);
     const nextVehicleId = options?.vehicleId ?? (page === 'vehicle-details' ? selectedVehicleId : null);
-    if (page !== 'vehicle-details') {
-      setSelectedVehicleId(null);
-    } else {
-      setSelectedVehicleId(nextVehicleId || null);
-    }
+    startTransition(() => {
+      setCurrentPage(page);
+      if (page !== 'vehicle-details') {
+        setSelectedVehicleId(null);
+      } else {
+        setSelectedVehicleId(nextVehicleId || null);
+      }
+    });
 
     if (typeof window !== 'undefined') {
       const historyState = { page, selectedVehicleId: page === 'vehicle-details' ? nextVehicleId || null : null };
@@ -149,7 +170,7 @@ export default function App() {
         setUserRole(verifiedUser.role);
         setIsLoggedIn(true);
         resetAuthExpirySignal();
-        navigateToPage('dashboard', { replaceHistory: true, vehicleId: null });
+        navigateToPage(getDefaultPageForRole(verifiedUser.role), { replaceHistory: true, vehicleId: null });
       } catch (error) {
         if (error instanceof ApiRequestError && error.status === 401) {
           clearAuthState();
@@ -171,7 +192,7 @@ export default function App() {
     setCurrentUser({ ...user, role: normalizedRole });
     setUserRole(normalizedRole);
     setIsLoggedIn(true);
-    navigateToPage('dashboard', { replaceHistory: true, vehicleId: null });
+    navigateToPage(getDefaultPageForRole(normalizedRole), { replaceHistory: true, vehicleId: null });
   };
 
   const handleOpenVehicleDetails = (vehicleId: string) => {
@@ -345,10 +366,11 @@ export default function App() {
     return <Login onLogin={handleLogin} />;
   }
 
-  if (userRole === 'owner' || userRole === 'admin') {
+  if (userRole === 'owner' || userRole === 'admin' || userRole === 'dispatcher' || userRole === 'customer_service') {
     return (
       <>
         <Toaster position="bottom-right" richColors closeButton />
+        <NotificationSoundController />
         <AdminLayout
           userRole={userRole}
           activeSection={currentPage}
@@ -358,10 +380,16 @@ export default function App() {
           backLabel={getBackLabel()}
           onBack={handlePortalBack}
         >
-          <Suspense fallback={<div className="p-6 text-sm text-gray-500">Loading page...</div>}>
-          {currentPage === 'dashboard' && renderProtectedPage('dashboard', <Dashboard onNavigate={navigateToPage} userRole={userRole} />)}
+          <Suspense fallback={loadingFallback}>
+          {currentPage === 'dashboard' && (userRole === 'owner' || userRole === 'admin') && renderProtectedPage('dashboard', <Dashboard onNavigate={navigateToPage} userRole={userRole} />)}
           {currentPage === 'fleet-tracking' && renderProtectedPage('fleet-tracking', <FleetTracking />)}
           {currentPage === 'vehicles' && renderProtectedPage('vehicles', <Vehicles onOpenVehicleDetails={handleOpenVehicleDetails} />)}
+          {currentPage === 'vehicle-movements' && renderProtectedPage('vehicle-movements', <VehicleMovements />)}
+          {currentPage === 'dispatch-financials' && renderProtectedPage('dispatch-financials', <DispatchFinancials />)}
+          {currentPage === 'dispatch-opportunities' && renderProtectedPage('dispatch-opportunities', <DispatchOpportunitiesReview />)}
+          {currentPage === 'dispatch-returns' && renderProtectedPage('dispatch-returns', <DispatchReturns />)}
+          {currentPage === 'dispatch-requests' && renderProtectedPage('dispatch-requests', <DispatchRequests />)}
+          {currentPage === 'dispatch-planner' && renderProtectedPage('dispatch-planner', <DispatchPlanner />)}
           {currentPage === 'vehicle-details' &&
             renderProtectedPage('vehicle-details', selectedVehicleId ? (
               <VehicleDetails vehicleId={selectedVehicleId} onBack={handleBackToVehicles} onMissingRecord={handleMissingVehicleRecord} />
@@ -378,15 +406,15 @@ export default function App() {
           {currentPage === 'revenue' && renderProtectedPage('revenue', <Revenue />)}
           {currentPage === 'rides' && renderProtectedPage('dashboard', <Rides />)}
           {currentPage === 'accountability' && renderProtectedPage('accountability', <AdminAccountability />)}
-          {currentPage === 'customers' && renderProtectedPage('customers', <Customers userRole={userRole} />)}
+          {currentPage === 'customers' && (userRole === 'owner' || userRole === 'admin') && renderProtectedPage('customers', <Customers userRole={userRole} />)}
           {currentPage === 'fuel' && renderProtectedPage('fuel', <FuelManagement />)}
           {currentPage === 'incidents' && renderProtectedPage('incidents', <IncidentsModule role={userRole} />)}
           {currentPage === 'fault-approvals' && renderProtectedPage('fault-approvals', <FaultApprovals />)}
           {currentPage === 'maintenance' && renderProtectedPage('maintenance', <Maintenance />)}
-          {currentPage === 'preventive-maintenance' && renderProtectedPage('preventive-maintenance', <PreventiveMaintenance />)}
+          {currentPage === 'preventive-maintenance' && renderProtectedPage('preventive-maintenance', <PreventiveMaintenance onNavigate={navigateToPage} />)}
           {currentPage === 'driver-performance' && renderProtectedPage('driver-performance', <DriverPerformance />)}
           {currentPage === 'reports' && renderProtectedPage('reports', <Reports />)}
-          {currentPage === 'notifications' && renderProtectedPage('notifications', <Notifications />)}
+          {currentPage === 'notifications' && renderProtectedPage('notifications', <Notifications onNavigate={navigateToPage} />)}
           {currentPage === 'security' && renderProtectedPage('security', <Security />)}
           {currentPage === 'settings' && renderProtectedPage('settings', <Settings />)}
           </Suspense>
@@ -399,6 +427,7 @@ export default function App() {
     return (
       <>
         <Toaster position="bottom-right" richColors closeButton />
+        <NotificationSoundController />
         <DriverLayout
           activeSection={currentPage}
           onNavigate={navigateToPage}
@@ -409,45 +438,50 @@ export default function App() {
           backLabel={getBackLabel()}
           onBack={handlePortalBack}
         >
-          {currentPage === 'dashboard' && renderProtectedPage('dashboard', (
-            <DriverDashboard
-              currentUser={currentUser}
-              activeAssignment={driverActiveAssignment}
-              dashboardSummary={driverDashboardSummary}
-              onNavigate={navigateToPage}
-            />
-          ))}
-          {currentPage === 'my-vehicle' && (
-            renderProtectedPage('my-vehicle', <MyVehicle
-              currentUser={currentUser}
-              activeAssignment={driverActiveAssignment}
-            />)
-          )}
-          {currentPage === 'my-wallet' && (
-            renderProtectedPage('my-wallet', <MyWallet
-              currentUser={currentUser}
-              walletData={driverWalletData}
-              onRefresh={refreshDriverPortalData}
-            />)
-          )}
-          {currentPage === 'create-ride' && renderProtectedPage('create-ride', <CreateRide />)}
-          {currentPage === 'ride-history' && renderProtectedPage('ride-history', <RideHistory />)}
-          {currentPage === 'customers' && renderProtectedPage('customers', <CustomerManagement />)}
-          {currentPage === 'calendar' && renderProtectedPage('calendar', <DriverCalendar />)}
-          {currentPage === 'fuel-logs' && renderProtectedPage('fuel-logs', <FuelLogs />)}
-          {currentPage === 'my-performance' && renderProtectedPage('my-performance', <MyPerformance />)}
-          {currentPage === 'incidents' && renderProtectedPage('incidents', (
-            <IncidentsModule role="driver" currentUser={currentUser} activeAssignment={driverActiveAssignment} />
-          ))}
-          {currentPage === 'report-fault' && (
-            renderProtectedPage('report-fault', <ReportFault
-              currentUser={currentUser}
-              activeAssignment={driverActiveAssignment}
-            />)
-          )}
-          {currentPage === 'fault-history' && renderProtectedPage('fault-history', <FaultHistory />)}
-          {currentPage === 'notifications' && renderProtectedPage('notifications', <DriverNotifications />)}
-          {currentPage === 'my-profile' && renderProtectedPage('my-profile', <DriverProfile currentUser={currentUser} />)}
+          <Suspense fallback={loadingFallback}>
+            {currentPage === 'dashboard' && renderProtectedPage('dashboard', (
+              <DriverDashboard
+                currentUser={currentUser}
+                activeAssignment={driverActiveAssignment}
+                dashboardSummary={driverDashboardSummary}
+                onNavigate={navigateToPage}
+              />
+            ))}
+            {currentPage === 'my-vehicle' && (
+              renderProtectedPage('my-vehicle', <MyVehicle
+                currentUser={currentUser}
+                activeAssignment={driverActiveAssignment}
+              />)
+            )}
+            {currentPage === 'my-wallet' && (
+              renderProtectedPage('my-wallet', <MyWallet
+                currentUser={currentUser}
+                walletData={driverWalletData}
+                onRefresh={refreshDriverPortalData}
+              />)
+            )}
+            {currentPage === 'my-dispatch-financials' && renderProtectedPage('my-dispatch-financials', <MyDispatchFinancials />)}
+            {currentPage === 'my-dispatch-opportunities' && renderProtectedPage('my-dispatch-opportunities', <DispatchOpportunities />)}
+            {currentPage === 'my-dispatches' && renderProtectedPage('my-dispatches', <MyDispatches />)}
+            {currentPage === 'create-ride' && renderProtectedPage('create-ride', <CreateRide />)}
+            {currentPage === 'ride-history' && renderProtectedPage('ride-history', <RideHistory />)}
+            {currentPage === 'customers' && renderProtectedPage('customers', <CustomerManagement />)}
+            {currentPage === 'calendar' && renderProtectedPage('calendar', <DriverCalendar />)}
+            {currentPage === 'fuel-logs' && renderProtectedPage('fuel-logs', <FuelLogs />)}
+            {currentPage === 'my-performance' && renderProtectedPage('my-performance', <MyPerformance />)}
+            {currentPage === 'incidents' && renderProtectedPage('incidents', (
+              <IncidentsModule role="driver" currentUser={currentUser} activeAssignment={driverActiveAssignment} />
+            ))}
+            {currentPage === 'report-fault' && (
+              renderProtectedPage('report-fault', <ReportFault
+                currentUser={currentUser}
+                activeAssignment={driverActiveAssignment}
+              />)
+            )}
+            {currentPage === 'fault-history' && renderProtectedPage('fault-history', <FaultHistory />)}
+            {currentPage === 'notifications' && renderProtectedPage('notifications', <DriverNotifications onNavigate={navigateToPage} />)}
+            {currentPage === 'my-profile' && renderProtectedPage('my-profile', <DriverProfile currentUser={currentUser} />)}
+          </Suspense>
         </DriverLayout>
       </>
     );

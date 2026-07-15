@@ -102,7 +102,6 @@ SECRET_KEY=<long-random-secret>
 JWT_SECRET_KEY=<long-random-jwt-secret>
 MONGO_URI=<production-mongodb-uri>
 CORS_ORIGINS=https://your-frontend-domain.com
-SEED_DEMO_ON_STARTUP=false
 ```
 
 Do not use `flask --debug run` or `app.run(debug=True)` in production.
@@ -119,16 +118,18 @@ Both start the app with:
 gunicorn app:flask_app --bind 0.0.0.0:$PORT
 ```
 
-## Demo accounts
+### Preventive maintenance reminder sweep
 
-Seed demo users with:
+Run the bounded reconciliation command from a protected scheduler every 15
+minutes (for example, a Render/Railway cron job):
 
 ```bash
-flask --app app.py seed-demo
+flask --app backend.app maintenance-reminder-sweep
+# or, from the repository root:
+python backend/scripts/run_maintenance_reminder_sweep.py
 ```
 
-Seeded accounts:
-
-- `owner@fluxfleet.com` / `Owner@12345`
-- `admin@fluxfleet.com` / `Admin@12345`
-- `driver@fluxfleet.com` / `Driver12345`
+Configure `MAINTENANCE_REMINDER_SWEEP_ENABLED`,
+`MAINTENANCE_REMINDER_SWEEP_INTERVAL_MINUTES`, and
+`MAINTENANCE_REMINDER_SWEEP_BATCH_SIZE` in the backend environment. The command
+uses a MongoDB lease so overlapping workers skip safely.

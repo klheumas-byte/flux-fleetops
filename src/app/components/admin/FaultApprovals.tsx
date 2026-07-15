@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -44,6 +44,7 @@ interface FaultRecord {
   status: FaultStatus;
   description: string;
   photos: string[];
+  vehicle_unsafe: boolean;
   admin_notes: string | null;
   owner_notes: string | null;
   resolution_notes: string | null;
@@ -154,51 +155,28 @@ function severityClassName(severity: FaultSeverity) {
   }
 }
 
-function getSettledData<T>(result: PromiseSettledResult<T>) {
-  return result.status === 'fulfilled' ? result.value : null;
-}
-
-function getSettledError(result: PromiseSettledResult<unknown>) {
-  if (result.status !== 'rejected') {
-    return null;
-  }
-  return result.reason instanceof ApiRequestError
-    ? result.reason.message
-    : 'Unable to load the fault approval queue right now.';
-}
-
 export default function FaultApprovals() {
   const currentRole = getStoredSessionUser()?.role || null;
   const isOwner = currentRole === 'owner';
   const [faults, setFaults] = useState<FaultRecord[]>([]);
-  const [criticalFaults, setCriticalFaults] = useState<FaultRecord[]>([]);
   const [activeFilter, setActiveFilter] = useState<FilterKey>('reported');
   const [selectedFault, setSelectedFault] = useState<FaultRecord | null>(null);
   const [reviewNote, setReviewNote] = useState('');
   const [isLoading, setIsLoading] = useState(true);
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [activeAction, setActiveAction] = useState<'approve' | 'reject' | 'request-info' | 'convert' | null>(null);
+  const [isDetailLoading, setIsDetailLoading] = useState(false);
   const [pageError, setPageError] = useState('');
   const [actionError, setActionError] = useState('');
+  const [actionSuccess, setActionSuccess] = useState('');
+  const actionInFlight = useRef(false);
+  const detailRequestId = useRef(0);
 
   const loadFaults = async () => {
     setIsLoading(true);
     setPageError('');
     try {
-      const [queueResult, criticalResult] = await Promise.allSettled([
-        apiRequest<FaultsResponse>('/faults/approvals', { cacheTtlMs: 10000, timeoutMs: 15000 }),
-        apiRequest<FaultsResponse>('/faults/critical', { cacheTtlMs: 10000, timeoutMs: 15000 }),
-      ]);
-
-      const queueResponse = getSettledData(queueResult);
-      const criticalResponse = getSettledData(criticalResult);
-
-      setFaults(Array.isArray(queueResponse?.data?.faults) ? queueResponse.data.faults : []);
-      setCriticalFaults(Array.isArray(criticalResponse?.data?.faults) ? criticalResponse.data.faults : []);
-
-      const primaryError = getSettledError(queueResult);
-      if (primaryError) {
-        setPageError(primaryError);
-      }
+      const response = await apiRequest<FaultsResponse>('/faults/approvals', { cacheTtlMs: 10000, timeoutMs: 15000 });
+      setFaults(Array.isArray(response.data?.faults) ? response.data.faults : []);
     } catch (error) {
       if (error instanceof ApiRequestError) {
         setPageError(error.message);
@@ -215,6 +193,7 @@ export default function FaultApprovals() {
   }, []);
 
   const summary = useMemo(() => {
+    const criticalFaults = faults.filter((fault) => fault.severity === 'critical');
     const pending = faults.filter((fault) => ['reported', 'under_review'].includes(fault.status)).length;
     const pendingCritical = criticalFaults.filter((fault) => ['reported', 'under_review'].includes(fault.status)).length;
     const approved = faults.filter((fault) => fault.status === 'approved').length;
@@ -226,7 +205,7 @@ export default function FaultApprovals() {
       approved,
       converted,
     };
-  }, [criticalFaults, faults]);
+  }, [faults]);
 
   const filteredFaults = useMemo(() => {
     switch (activeFilter) {
@@ -259,38 +238,89 @@ export default function FaultApprovals() {
     };
   }, [faults]);
 
-  const openReviewModal = (fault: FaultRecord) => {
+  const openReviewModal = async (fault: FaultRecord) => {
+    const requestId = ++detailRequestId.current;
     setSelectedFault(fault);
     setReviewNote(fault.request_info_note || fault.rejection_reason || fault.admin_notes || '');
     setActionError('');
+    setActionSuccess('');
+    setIsDetailLoading(true);
+    try {
+      const response = await apiRequest<FaultMutationResponse>(`/faults/${fault.id}`);
+      if (requestId === detailRequestId.current && response.data?.fault) {
+        setSelectedFault(response.data.fault);
+        setReviewNote(response.data.fault.request_info_note || response.data.fault.rejection_reason || response.data.fault.admin_notes || '');
+      }
+    } catch (error) {
+      if (requestId === detailRequestId.current) {
+        setActionError(error instanceof ApiRequestError ? error.message : 'Unable to load the full fault record.');
+      }
+    } finally {
+      if (requestId === detailRequestId.current) setIsDetailLoading(false);
+    }
   };
 
   const closeReviewModal = () => {
+    detailRequestId.current += 1;
+    setIsDetailLoading(false);
     setSelectedFault(null);
     setReviewNote('');
     setActionError('');
+    setActionSuccess('');
   };
 
+  useEffect(() => {
+    if (!selectedFault) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [selectedFault]);
+
+  useEffect(() => {
+    if (!selectedFault) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !activeAction) closeReviewModal();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [selectedFault, activeAction]);
+
   const runFaultAction = async (faultId: string, action: 'approve' | 'reject' | 'request-info' | 'convert') => {
+    if (actionInFlight.current) return;
+    if ((action === 'reject' || action === 'request-info') && !reviewNote.trim()) {
+      setActionError(action === 'reject' ? 'Add a rejection reason before rejecting this fault.' : 'Add the requested details before requesting more information.');
+      return;
+    }
+    actionInFlight.current = true;
     setActionError('');
-    setIsSubmitting(true);
+    setActionSuccess('');
+    setActiveAction(action);
     try {
+      let nextFault: FaultRecord | null = null;
       if (action === 'convert') {
-        await apiRequest<FaultMutationResponse>(`/faults/${faultId}/convert-to-maintenance`, {
+        const response = await apiRequest<FaultMutationResponse>(`/faults/${faultId}/convert-to-maintenance`, {
           method: 'POST',
         });
+        nextFault = selectedFault?.id === faultId
+          ? { ...selectedFault, status: 'converted_to_maintenance', maintenance_job_id: response.data.job?.id || null }
+          : null;
       } else {
-        await apiRequest<FaultMutationResponse>(`/faults/${faultId}/${action}`, {
+        const response = await apiRequest<FaultMutationResponse>(`/faults/${faultId}/${action}`, {
           method: 'PATCH',
           body: JSON.stringify({
             admin_notes: reviewNote,
           }),
         });
+        nextFault = response.data.fault || null;
       }
-      await loadFaults();
-      if (selectedFault?.id === faultId) {
-        closeReviewModal();
+      if (nextFault) {
+        setFaults((current) => current.map((fault) => (fault.id === faultId ? nextFault as FaultRecord : fault)));
+        setSelectedFault(nextFault);
       }
+      const labels = { approve: 'Fault approved.', reject: 'Fault rejected.', 'request-info': 'Information request sent to the driver.', convert: 'Maintenance job created.' };
+      setActionSuccess(labels[action]);
     } catch (error) {
       if (error instanceof ApiRequestError) {
         setActionError(error.message);
@@ -298,7 +328,8 @@ export default function FaultApprovals() {
         setActionError('Unable to complete that fault action right now.');
       }
     } finally {
-      setIsSubmitting(false);
+      setActiveAction(null);
+      actionInFlight.current = false;
     }
   };
 
@@ -452,7 +483,8 @@ export default function FaultApprovals() {
                     <td className="px-6 py-4 text-sm">
                       <div className="flex flex-wrap gap-2">
                         <button
-                          onClick={() => openReviewModal(fault)}
+                          disabled={isDetailLoading}
+                          onClick={() => void openReviewModal(fault)}
                           className="inline-flex items-center gap-1 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
                         >
                           <Eye className="h-3.5 w-3.5" />
@@ -460,7 +492,8 @@ export default function FaultApprovals() {
                         </button>
                         {fault.status !== 'approved' && fault.status !== 'converted_to_maintenance' && fault.status !== 'resolved' && (
                           <button
-                            onClick={() => openReviewModal(fault)}
+                            disabled={isDetailLoading}
+                            onClick={() => void openReviewModal(fault)}
                             className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100"
                           >
                             Approve
@@ -468,7 +501,8 @@ export default function FaultApprovals() {
                         )}
                         {fault.status !== 'converted_to_maintenance' && fault.status !== 'resolved' && (
                           <button
-                            onClick={() => openReviewModal(fault)}
+                            disabled={isDetailLoading}
+                            onClick={() => void openReviewModal(fault)}
                             className="inline-flex items-center gap-1 rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100"
                           >
                             Reject
@@ -476,7 +510,8 @@ export default function FaultApprovals() {
                         )}
                         {fault.status !== 'converted_to_maintenance' && fault.status !== 'resolved' && (
                           <button
-                            onClick={() => openReviewModal(fault)}
+                            disabled={isDetailLoading}
+                            onClick={() => void openReviewModal(fault)}
                             className="inline-flex items-center gap-1 rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-800 hover:bg-amber-100"
                           >
                             Request More Info
@@ -484,7 +519,8 @@ export default function FaultApprovals() {
                         )}
                         {fault.status === 'approved' && !fault.maintenance_job_id && (
                           <button
-                            onClick={() => void runFaultAction(fault.id, 'convert')}
+                            disabled={isDetailLoading}
+                            onClick={() => void openReviewModal(fault)}
                             className="inline-flex items-center gap-1 rounded-lg border border-green-200 bg-green-50 px-3 py-1.5 text-xs font-medium text-green-700 hover:bg-green-100"
                           >
                             Convert
@@ -521,11 +557,11 @@ export default function FaultApprovals() {
       )}
 
       {selectedFault && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4 py-6">
-          <div className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4 py-6" role="presentation">
+          <div className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl" role="dialog" aria-modal="true" aria-labelledby="fault-review-title">
             <div className="flex items-start justify-between border-b border-gray-200 px-6 py-4">
               <div>
-                <h2 className="text-xl font-semibold text-[#0F172A]">Fault Review</h2>
+                <h2 id="fault-review-title" className="text-xl font-semibold text-[#0F172A]">Fault Review</h2>
                 <p className="mt-1 text-sm text-gray-500">
                   {selectedFault.vehicle?.registration_number || 'Vehicle'} • {selectedFault.driver?.full_name || 'Driver'}
                 </p>
@@ -539,6 +575,16 @@ export default function FaultApprovals() {
               {actionError && (
                 <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
                   {actionError}
+                </div>
+              )}
+              {actionSuccess && (
+                <div className="mb-4 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700" role="status">
+                  {actionSuccess}
+                </div>
+              )}
+              {isDetailLoading && (
+                <div className="mb-4 flex items-center gap-2 text-sm text-gray-500">
+                  <Loader2 className="h-4 w-4 animate-spin" /> Loading evidence and full fault details...
                 </div>
               )}
 
@@ -560,6 +606,7 @@ export default function FaultApprovals() {
                       <DetailItem label="Component" value={selectedFault.component?.name || 'Not available'} />
                       <DetailItem label="Date Submitted" value={formatDate(selectedFault.reported_at)} />
                       <DetailItem label="Vehicle Status" value={selectedFault.vehicle?.status ? formatLabel(selectedFault.vehicle.status) : 'Not available'} />
+                      <DetailItem label="Safe To Operate" value={selectedFault.vehicle_unsafe ? 'No' : 'Yes'} />
                     </div>
                   </div>
 
@@ -587,13 +634,15 @@ export default function FaultApprovals() {
 
                   <div className="rounded-xl border border-gray-200 bg-white p-5">
                     <h3 className="text-sm font-semibold text-[#0F172A]">Photos</h3>
-                    {selectedFault.photos.length === 0 ? (
+                    {isDetailLoading ? (
+                      <p className="mt-2 text-sm text-gray-500">Loading evidence...</p>
+                    ) : selectedFault.photos.length === 0 ? (
                       <p className="mt-2 text-sm text-gray-500">No photos attached to this fault report.</p>
                     ) : (
                       <div className="mt-3 grid grid-cols-2 gap-3 lg:grid-cols-3">
                         {selectedFault.photos.map((photo, index) => (
                           <div key={`${selectedFault.id}-photo-${index}`} className="overflow-hidden rounded-xl border border-gray-200 bg-gray-50">
-                            <img src={photo} alt={`Fault photo ${index + 1}`} className="h-36 w-full object-cover" />
+                            <FaultEvidence src={photo} index={index} />
                           </div>
                         ))}
                       </div>
@@ -653,29 +702,29 @@ export default function FaultApprovals() {
                     <>
                       <button
                         type="button"
-                        disabled={isSubmitting}
+                        disabled={activeAction !== null || isDetailLoading}
                         onClick={() => void runFaultAction(selectedFault.id, 'request-info')}
                         className="inline-flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 font-medium text-amber-800 transition-all hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-70"
                       >
-                        {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageSquareMore className="h-4 w-4" />}
+                        {activeAction === 'request-info' ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageSquareMore className="h-4 w-4" />}
                         Request More Info
                       </button>
                       <button
                         type="button"
-                        disabled={isSubmitting}
+                        disabled={activeAction !== null || isDetailLoading}
                         onClick={() => void runFaultAction(selectedFault.id, 'reject')}
                         className="inline-flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 font-medium text-red-700 transition-all hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-70"
                       >
-                        {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <XCircle className="h-4 w-4" />}
+                        {activeAction === 'reject' ? <Loader2 className="h-4 w-4 animate-spin" /> : <XCircle className="h-4 w-4" />}
                         Reject
                       </button>
                       <button
                         type="button"
-                        disabled={isSubmitting}
+                        disabled={activeAction !== null || isDetailLoading}
                         onClick={() => void runFaultAction(selectedFault.id, 'approve')}
                         className="inline-flex items-center gap-2 rounded-lg bg-[#2563EB] px-4 py-2.5 font-medium text-white transition-all hover:bg-[#1d4ed8] disabled:cursor-not-allowed disabled:opacity-70"
                       >
-                        {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                        {activeAction === 'approve' ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
                         Approve
                       </button>
                     </>
@@ -683,11 +732,11 @@ export default function FaultApprovals() {
                 {selectedFault.status === 'approved' && !selectedFault.maintenance_job_id && (
                   <button
                     type="button"
-                    disabled={isSubmitting}
+                    disabled={activeAction !== null || isDetailLoading}
                     onClick={() => void runFaultAction(selectedFault.id, 'convert')}
                     className="inline-flex items-center gap-2 rounded-lg bg-green-600 px-4 py-2.5 font-medium text-white transition-all hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-70"
                   >
-                    {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wrench className="h-4 w-4" />}
+                    {activeAction === 'convert' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wrench className="h-4 w-4" />}
                     Convert To Maintenance
                   </button>
                 )}
@@ -726,6 +775,21 @@ function SummaryCard({
       <div className="text-2xl font-semibold text-[#0F172A]">{value}</div>
       <div className="text-sm text-gray-600">{label}</div>
     </div>
+  );
+}
+
+function FaultEvidence({ src, index }: { src: string; index: number }) {
+  const [unavailable, setUnavailable] = useState(false);
+  if (unavailable) {
+    return <div className="flex h-36 items-center justify-center px-3 text-center text-sm text-gray-500">Evidence file unavailable</div>;
+  }
+  return (
+    <img
+      src={src}
+      alt={`Fault evidence ${index + 1}`}
+      className="h-36 w-full object-cover"
+      onError={() => setUnavailable(true)}
+    />
   );
 }
 

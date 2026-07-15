@@ -32,6 +32,16 @@ import {
   type SessionUser,
 } from '../../lib/auth-session';
 import type { DriverActiveAssignment, DriverDashboardSummary } from '../../lib/driver-api';
+import {
+  acceptDriverDispatchJob,
+  clarifyDriverDispatchJob,
+  fetchDriverDispatchWorkspace,
+  rejectDriverDispatchJob,
+  updateDriverDispatchWorkflow,
+  type DriverDispatchJob,
+  type DriverDispatchWorkspaceSummary,
+} from '../../lib/driver-api';
+import { getDriverDispatchActionState, matchesDriverDispatchSection } from '../../lib/driver-dispatch-ui';
 import { apiRequestSafe } from '../../lib/api';
 import {
   createCustomer,
@@ -163,6 +173,12 @@ export default function DriverDashboard({
   const [locationAccuracy, setLocationAccuracy] = useState('');
   const [showQuickAddCustomer, setShowQuickAddCustomer] = useState(false);
   const [quickAddCustomerError, setQuickAddCustomerError] = useState('');
+  const [dispatchJobs, setDispatchJobs] = useState<DriverDispatchJob[]>([]);
+  const [dispatchSummary, setDispatchSummary] = useState<DriverDispatchWorkspaceSummary | null>(null);
+  const [isLoadingDispatchJobs, setIsLoadingDispatchJobs] = useState(false);
+  const [dispatchJobsError, setDispatchJobsError] = useState('');
+  const [dispatchActionJobId, setDispatchActionJobId] = useState('');
+  const [dispatchReasonDrafts, setDispatchReasonDrafts] = useState<Record<string, string>>({});
   const [startTripForm, setStartTripForm] = useState({
     booking_id: '',
     customer_id: '',
@@ -201,12 +217,65 @@ export default function DriverDashboard({
     }
   };
 
+  const loadDispatchJobs = async () => {
+    setIsLoadingDispatchJobs(true);
+    setDispatchJobsError('');
+    try {
+      const workspace = await fetchDriverDispatchWorkspace({
+        section: 'upcoming',
+        page: 1,
+        pageSize: 6,
+        includeSummary: true,
+      });
+      setDispatchJobs(workspace.jobs);
+      setDispatchSummary(workspace.summary || null);
+    } catch (error) {
+      setDispatchJobs([]);
+      setDispatchSummary(null);
+      setDispatchJobsError(error instanceof Error ? error.message : 'Unable to load your dispatch assignments right now.');
+    } finally {
+      setIsLoadingDispatchJobs(false);
+    }
+  };
+
+  const syncDashboardDispatchState = (previousJob: DriverDispatchJob | null, nextJob: DriverDispatchJob) => {
+    setDispatchJobs((current) => {
+      const otherJobs = current.filter((job) => job.id !== nextJob.id);
+      return matchesDriverDispatchSection(nextJob, 'upcoming') ? [nextJob, ...otherJobs] : otherJobs;
+    });
+    setDispatchSummary((current) => {
+      if (!current) {
+        return current;
+      }
+      const wasPendingAcceptance = previousJob?.status === 'assigned' && previousJob?.driver_response_status === 'pending';
+      const isPendingAcceptance = nextJob.status === 'assigned' && nextJob.driver_response_status === 'pending';
+      const wasUpcoming = previousJob ? matchesDriverDispatchSection(previousJob, 'upcoming') : false;
+      const isUpcoming = matchesDriverDispatchSection(nextJob, 'upcoming');
+      const isActive = matchesDriverDispatchSection(nextJob, 'active');
+      const wasActive = previousJob ? matchesDriverDispatchSection(previousJob, 'active') : false;
+      return {
+        ...current,
+        pending_acceptance: Math.max(0, current.pending_acceptance - (wasPendingAcceptance ? 1 : 0) + (isPendingAcceptance ? 1 : 0)),
+        upcoming_dispatches: Math.max(0, current.upcoming_dispatches - (wasUpcoming ? 1 : 0) + (isUpcoming ? 1 : 0)),
+        current_active_dispatch: isActive ? nextJob : wasActive ? null : current.current_active_dispatch,
+        completed_today:
+          nextJob.status === 'completed' && previousJob?.status !== 'completed'
+            ? current.completed_today + 1
+            : current.completed_today,
+      };
+    });
+  };
+
   useEffect(() => {
     if (!shouldLoadBookingSummary || bookingSummary || bookingSummaryError || bookingSummaryNotice) {
       return;
     }
     void loadBookingSummary();
   }, [bookingSummary, bookingSummaryError, bookingSummaryNotice, shouldLoadBookingSummary]);
+
+  useEffect(() => {
+    void loadDispatchJobs();
+  }, []);
 
   const selectedBooking = useMemo(
     () => rideOptions?.bookings.find((booking) => booking.id === startTripForm.booking_id) || null,
@@ -514,6 +583,52 @@ export default function DriverDashboard({
     toast.info('Location captured. Live dispatch sync is coming soon.');
   };
 
+  const handleDispatchAction = async (jobId: string, action: 'accept' | 'clarify' | 'reject') => {
+    const reason = dispatchReasonDrafts[jobId]?.trim() || '';
+    if ((action === 'clarify' || action === 'reject') && !reason) {
+      toast.error(action === 'clarify' ? 'Add a clarification note first.' : 'Add a rejection reason first.');
+      return;
+    }
+
+    setDispatchActionJobId(jobId);
+    try {
+      const previousJob = dispatchJobs.find((job) => job.id === jobId) || null;
+      let nextJob: DriverDispatchJob;
+      if (action === 'accept') {
+        nextJob = await acceptDriverDispatchJob(jobId);
+        toast.success('Dispatch accepted successfully.');
+      } else if (action === 'clarify') {
+        nextJob = await clarifyDriverDispatchJob(jobId, { reason });
+        toast.success('Clarification request sent.');
+      } else {
+        nextJob = await rejectDriverDispatchJob(jobId, { reason });
+        toast.success('Dispatch rejected.');
+      }
+      syncDashboardDispatchState(previousJob, nextJob);
+      setDispatchReasonDrafts((current) => ({ ...current, [jobId]: '' }));
+      await loadDispatchJobs();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Unable to update this dispatch right now.');
+    } finally {
+      setDispatchActionJobId('');
+    }
+  };
+
+  const handleDispatchWorkflowAction = async (jobId: string, action: 'start') => {
+    setDispatchActionJobId(jobId);
+    try {
+      const previousJob = dispatchJobs.find((job) => job.id === jobId) || null;
+      const nextJob = await updateDriverDispatchWorkflow(jobId, { action });
+      syncDashboardDispatchState(previousJob, nextJob);
+      toast.success(action === 'start' ? 'Dispatch started.' : 'Dispatch updated.');
+      await loadDispatchJobs();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Unable to update this dispatch right now.');
+    } finally {
+      setDispatchActionJobId('');
+    }
+  };
+
   const quickActionGroups = [
     {
       title: 'Operations',
@@ -722,6 +837,148 @@ export default function DriverDashboard({
           <div className="mb-2 text-3xl font-semibold text-gray-900">{formatCurrency(stats.todaysCollections)}</div>
           <div className="text-sm text-gray-600">Today&apos;s Collections</div>
           <div className="mt-2 text-xs text-gray-500">0 when nothing has been recorded today</div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
+        <DashboardDispatchWidget label="Today's Dispatches" value={dispatchSummary?.todays_dispatches || 0} accent="bg-blue-50 text-blue-700" onClick={() => onNavigate('my-dispatches')} />
+        <DashboardDispatchWidget label="Upcoming Dispatches" value={dispatchSummary?.upcoming_dispatches || 0} accent="bg-amber-50 text-amber-700" onClick={() => onNavigate('my-dispatches')} />
+        <DashboardDispatchWidget label="Current Active Dispatch" value={dispatchSummary?.current_active_dispatch ? 1 : 0} accent="bg-emerald-50 text-emerald-700" onClick={() => onNavigate('my-dispatches')} />
+        <DashboardDispatchWidget label="Pending Acceptance" value={dispatchSummary?.pending_acceptance || 0} accent="bg-rose-50 text-rose-700" onClick={() => onNavigate('my-dispatches')} />
+        <DashboardDispatchWidget label="Completed Today" value={dispatchSummary?.completed_today || 0} accent="bg-slate-100 text-slate-700" onClick={() => onNavigate('my-dispatches')} />
+      </div>
+
+      <div className="rounded-lg border border-gray-200 bg-white p-6">
+        <div className="flex flex-col gap-2 border-b border-gray-100 pb-4 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h3 className="text-lg font-semibold text-gray-900">Upcoming Dispatch</h3>
+            <p className="text-sm text-gray-500">Assignments sent from operations appear here for quick response.</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void loadDispatchJobs()}
+            className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
+          >
+            {isLoadingDispatchJobs ? <Loader2 className="h-4 w-4 animate-spin" /> : <Route className="h-4 w-4" />}
+            Refresh
+          </button>
+        </div>
+
+        {dispatchJobsError ? (
+          <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{dispatchJobsError}</div>
+        ) : null}
+
+        <div className="mt-5 space-y-4">
+          {isLoadingDispatchJobs ? (
+            <div className="space-y-3">
+              <div className="h-36 animate-pulse rounded-xl bg-gray-100" />
+              <div className="h-36 animate-pulse rounded-xl bg-gray-100" />
+            </div>
+          ) : dispatchJobs.length ? (
+            dispatchJobs.map((job) => {
+              const isActing = dispatchActionJobId === job.id;
+              const actionState = getDriverDispatchActionState(job);
+              return (
+                <div key={job.id} className="rounded-xl border border-gray-200 bg-gray-50 p-5">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-[0.16em] text-blue-600">{job.dispatch_job_id}</div>
+                      <div className="mt-2 text-lg font-semibold text-gray-900">
+                        {job.pickup || 'Pickup pending'} to {job.destination || 'Destination pending'}
+                      </div>
+                      <div className="mt-2 flex flex-wrap gap-2 text-xs text-gray-500">
+                        <span className="rounded-full bg-white px-2.5 py-1 ring-1 ring-gray-200">{formatDateTime(job.scheduled_start_time)}</span>
+                        <span className="rounded-full bg-white px-2.5 py-1 ring-1 ring-gray-200">{job.vehicle?.registration_number || 'Vehicle pending'}</span>
+                        <span className="rounded-full bg-white px-2.5 py-1 ring-1 ring-gray-200">{job.status}</span>
+                        <span className="rounded-full bg-white px-2.5 py-1 ring-1 ring-gray-200">{job.driver_response_status}</span>
+                      </div>
+                    </div>
+                    <div className="rounded-lg bg-white px-3 py-2 text-xs text-gray-500 ring-1 ring-gray-200">
+                      Return by: {formatDateTime(job.expected_return_time)}
+                    </div>
+                  </div>
+
+                  <div className="mt-4 grid gap-4 md:grid-cols-2">
+                    <InfoMini label="Goods" value={job.goods_description || 'Not provided'} />
+                    <InfoMini label="Instructions" value={job.dispatch_instructions || 'No special instructions'} />
+                    <InfoMini label="Stops" value={job.stops?.length ? `${job.stops.length} planned stop(s)` : 'No extra stops'} />
+                    <InfoMini label="Dispatcher" value={job.dispatcher?.full_name || 'Operations'} />
+                  </div>
+
+                  <div className="mt-4">
+                    <textarea
+                      value={dispatchReasonDrafts[job.id] || ''}
+                      onChange={(event) => setDispatchReasonDrafts((current) => ({ ...current, [job.id]: event.target.value }))}
+                      placeholder="Optional note for clarification or reason for rejection"
+                      rows={2}
+                      className="w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-blue-300"
+                    />
+                  </div>
+
+                  <div className="mt-4 flex flex-wrap gap-3">
+                    {actionState.canAccept ? (
+                      <button
+                        type="button"
+                        onClick={() => void handleDispatchAction(job.id, 'accept')}
+                        disabled={isActing}
+                        className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-60"
+                      >
+                        {isActing ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle className="h-4 w-4" />}
+                        Accept Dispatch
+                      </button>
+                    ) : null}
+                    {actionState.canClarify ? (
+                      <button
+                        type="button"
+                        onClick={() => void handleDispatchAction(job.id, 'clarify')}
+                        disabled={isActing}
+                        className="inline-flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm font-medium text-amber-700 disabled:opacity-60"
+                      >
+                        {isActing ? <Loader2 className="h-4 w-4 animate-spin" /> : <AlertTriangle className="h-4 w-4" />}
+                        Request Clarification
+                      </button>
+                    ) : null}
+                    {actionState.canReject ? (
+                      <button
+                        type="button"
+                        onClick={() => void handleDispatchAction(job.id, 'reject')}
+                        disabled={isActing}
+                        className="inline-flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-sm font-medium text-red-700 disabled:opacity-60"
+                      >
+                        {isActing ? <Loader2 className="h-4 w-4 animate-spin" /> : <X className="h-4 w-4" />}
+                        Reject Assignment
+                      </button>
+                    ) : null}
+                    {actionState.canStart ? (
+                      <button
+                        type="button"
+                        onClick={() => void handleDispatchWorkflowAction(job.id, 'start')}
+                        disabled={isActing}
+                        className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-60"
+                      >
+                        {isActing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Route className="h-4 w-4" />}
+                        Start Dispatch
+                      </button>
+                    ) : null}
+                    {!actionState.canAccept && !actionState.canReject && !actionState.canClarify && !actionState.canStart ? (
+                      <button
+                        type="button"
+                        onClick={() => onNavigate('my-dispatches')}
+                        className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2.5 text-sm font-medium text-gray-700"
+                      >
+                        <Route className="h-4 w-4" />
+                        Open My Dispatches
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })
+          ) : (
+            <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 px-4 py-8 text-center text-sm text-gray-500">
+              No upcoming dispatch assignments yet.
+            </div>
+          )}
         </div>
       </div>
 
@@ -1175,6 +1432,40 @@ export default function DriverDashboard({
         </ActionModal>
       )}
     </div>
+  );
+}
+
+function InfoMini({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="rounded-lg bg-white p-3 ring-1 ring-gray-200">
+      <div className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-400">{label}</div>
+      <div className="mt-1 text-sm text-gray-700">{value}</div>
+    </div>
+  );
+}
+
+function DashboardDispatchWidget({
+  label,
+  value,
+  accent,
+  onClick,
+}: {
+  label: string;
+  value: number;
+  accent: string;
+  onClick: () => void;
+}) {
+  return (
+    <button type="button" onClick={onClick} className={`rounded-lg px-4 py-4 text-left transition hover:shadow-sm ${accent}`}>
+      <div className="text-2xl font-semibold">{value}</div>
+      <div className="mt-1 text-sm">{label}</div>
+    </button>
   );
 }
 

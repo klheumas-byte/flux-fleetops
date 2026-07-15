@@ -4,22 +4,36 @@ import type { UserRole } from '../../App';
 const LOGO_URL = 'https://imagedelivery.net/h9fmMoa1o2c2P55TcWJGOg/42b18599-8959-49b5-c7a2-b78a9602ce00/public';
 
 interface TopNavProps {
-  userRole: Extract<UserRole, 'owner' | 'admin'>;
+  userRole: Extract<UserRole, 'owner' | 'admin' | 'dispatcher' | 'customer_service'>;
   onMenuToggle: () => void;
+  onNavigate: (section: string) => void;
+  actionableCount: number;
 }
 
-export default function TopNav({ userRole, onMenuToggle }: TopNavProps) {
+export default function TopNav({ userRole, onMenuToggle, onNavigate, actionableCount }: TopNavProps) {
   const profile =
     userRole === 'owner'
       ? {
           name: 'Owner User',
-          email: 'owner@fluxfleet.com',
+          email: 'owner@company.com',
           badge: 'Owner',
         }
-      : {
+      : userRole === 'admin'
+      ? {
           name: 'Admin User',
-          email: 'admin@fluxfleet.com',
+          email: 'admin@company.com',
           badge: 'Admin',
+        }
+      : userRole === 'dispatcher'
+      ? {
+          name: 'Dispatcher User',
+          email: 'dispatcher@company.com',
+          badge: 'Dispatcher',
+        }
+      : {
+          name: 'Customer Service User',
+          email: 'customer.service@company.com',
+          badge: 'Customer Service',
         };
 
   return (
@@ -50,9 +64,9 @@ export default function TopNav({ userRole, onMenuToggle }: TopNavProps) {
       {/* Right Section */}
       <div className="ml-2 flex min-w-0 items-center gap-2 sm:ml-4 sm:gap-4">
         {/* Notifications */}
-        <button className="relative p-2 hover:bg-gray-100 rounded-lg transition-colors">
+        <button aria-label={`Notifications${actionableCount ? `, ${actionableCount} pending actions` : ''}`} onClick={() => onNavigate('notifications')} className="relative p-2 hover:bg-gray-100 rounded-lg transition-colors">
           <Bell className="w-5 h-5 text-gray-600" />
-          <span className="absolute top-1 right-1 w-2 h-2 bg-[#EF4444] rounded-full"></span>
+          {actionableCount > 0 && <span className="absolute right-0 top-0 min-w-4 rounded-full bg-orange-500 px-1 text-center text-[10px] font-semibold leading-4 text-white">{actionableCount > 99 ? '99+' : actionableCount}</span>}
         </button>
 
         {/* User Profile */}

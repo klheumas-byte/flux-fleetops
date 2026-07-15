@@ -17,6 +17,12 @@ export type AppModule =
   | 'drivers'
   | 'driver-approval'
   | 'assignments'
+  | 'vehicle-movements'
+  | 'dispatch-financials'
+  | 'dispatch-opportunities'
+  | 'dispatch-returns'
+  | 'dispatch-requests'
+  | 'dispatch-planner'
   | 'collections'
   | 'deposits'
   | 'expenses'
@@ -37,6 +43,9 @@ export type AppModule =
   | 'settings'
   | 'my-vehicle'
   | 'my-wallet'
+  | 'my-dispatch-financials'
+  | 'my-dispatch-opportunities'
+  | 'my-dispatches'
   | 'create-ride'
   | 'ride-history'
   | 'calendar'
@@ -47,7 +56,7 @@ export type AppModule =
   | 'my-profile';
 
 type RolePermissions = Record<RoleCapability, boolean>;
-type RoleMatrix = Record<SessionUserRole, RolePermissions>;
+type RoleMatrix = Partial<Record<SessionUserRole, RolePermissions>>;
 
 const FULL_ACCESS: RolePermissions = {
   can_view: true,
@@ -79,6 +88,16 @@ const DRIVER_ACCESS: RolePermissions = {
   can_view_sensitive_finance: false,
 };
 
+const DISPATCH_PORTAL_ACCESS: RolePermissions = {
+  can_view: true,
+  can_create: true,
+  can_edit: true,
+  can_delete: false,
+  can_export: false,
+  can_approve: false,
+  can_view_sensitive_finance: false,
+};
+
 const NO_ACCESS: RolePermissions = {
   can_view: false,
   can_create: false,
@@ -97,6 +116,36 @@ export const MODULE_ACCESS_MATRIX: Record<AppModule, RoleMatrix> = {
   drivers: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
   'driver-approval': { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
   assignments: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
+  'vehicle-movements': { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
+  'dispatch-financials': { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
+  'dispatch-opportunities': {
+    owner: FULL_ACCESS,
+    admin: OPERATIONAL_ADMIN,
+    dispatcher: DISPATCH_PORTAL_ACCESS,
+    customer_service: DISPATCH_PORTAL_ACCESS,
+    driver: NO_ACCESS,
+  },
+  'dispatch-returns': {
+    owner: FULL_ACCESS,
+    admin: OPERATIONAL_ADMIN,
+    dispatcher: DISPATCH_PORTAL_ACCESS,
+    customer_service: NO_ACCESS,
+    driver: NO_ACCESS,
+  },
+  'dispatch-requests': {
+    owner: FULL_ACCESS,
+    admin: OPERATIONAL_ADMIN,
+    dispatcher: DISPATCH_PORTAL_ACCESS,
+    customer_service: DISPATCH_PORTAL_ACCESS,
+    driver: NO_ACCESS,
+  },
+  'dispatch-planner': {
+    owner: FULL_ACCESS,
+    admin: OPERATIONAL_ADMIN,
+    dispatcher: DISPATCH_PORTAL_ACCESS,
+    customer_service: DISPATCH_PORTAL_ACCESS,
+    driver: NO_ACCESS,
+  },
   collections: { owner: FULL_ACCESS, admin: { ...OPERATIONAL_ADMIN, can_approve: true }, driver: NO_ACCESS },
   deposits: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
   expenses: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
@@ -120,6 +169,9 @@ export const MODULE_ACCESS_MATRIX: Record<AppModule, RoleMatrix> = {
   settings: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
   'my-vehicle': { owner: NO_ACCESS, admin: NO_ACCESS, driver: DRIVER_ACCESS },
   'my-wallet': { owner: NO_ACCESS, admin: NO_ACCESS, driver: DRIVER_ACCESS },
+  'my-dispatch-financials': { owner: NO_ACCESS, admin: NO_ACCESS, driver: DRIVER_ACCESS },
+  'my-dispatch-opportunities': { owner: NO_ACCESS, admin: NO_ACCESS, driver: DRIVER_ACCESS },
+  'my-dispatches': { owner: NO_ACCESS, admin: NO_ACCESS, driver: DRIVER_ACCESS },
   'create-ride': { owner: NO_ACCESS, admin: NO_ACCESS, driver: DRIVER_ACCESS },
   'ride-history': { owner: NO_ACCESS, admin: NO_ACCESS, driver: DRIVER_ACCESS },
   calendar: { owner: NO_ACCESS, admin: NO_ACCESS, driver: DRIVER_ACCESS },

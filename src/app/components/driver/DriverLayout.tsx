@@ -1,9 +1,11 @@
-import { ReactNode, useState } from 'react';
+import { ReactNode } from 'react';
 import DriverSidebar from './DriverSidebar';
 import DriverTopNav from './DriverTopNav';
 import type { SessionUser } from '../../lib/auth-session';
 import type { DriverActiveAssignment } from '../../lib/driver-api';
 import PortalBackButton from '../shared/PortalBackButton';
+import { useActionableNotificationCount } from '../../lib/notification-count';
+import { useResponsiveSidebar } from '../../lib/responsive-sidebar';
 
 interface DriverLayoutProps {
   children: ReactNode;
@@ -28,11 +30,12 @@ export default function DriverLayout({
   backLabel = 'Back',
   onBack,
 }: DriverLayoutProps) {
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const sidebar = useResponsiveSidebar();
+  const { actionableCount, actionableCounts, moduleCounts } = useActionableNotificationCount();
   const handleNavigate = (section: string) => {
     onNavigate(section);
     if (typeof window !== 'undefined' && window.innerWidth < 1024) {
-      setSidebarOpen(false);
+      sidebar.setMobileOpen(false);
     }
   };
 
@@ -43,17 +46,27 @@ export default function DriverLayout({
         activeAssignment={activeAssignment}
         activeSection={activeSection}
         onNavigate={handleNavigate}
-        isOpen={sidebarOpen}
-        onToggle={() => setSidebarOpen(!sidebarOpen)}
+        isOpen={sidebar.mobileOpen}
+        onToggle={sidebar.closeMobile}
         onLogout={onLogout}
+        actionableCount={actionableCount}
+        actionableBadgeTone={actionableCounts.highest_priority}
+        moduleCounts={moduleCounts}
+        isCollapsed={sidebar.isDesktop && !sidebar.expanded}
+        isPinned={sidebar.pinned}
+        onPinToggle={sidebar.togglePinned}
+        onPointerEnter={sidebar.pointerEnter}
+        onPointerLeave={sidebar.pointerLeave}
       />
       <div className={`flex min-w-0 flex-1 flex-col overflow-x-hidden transition-all duration-300 ${
-        sidebarOpen ? 'lg:ml-64' : 'ml-0'
+        sidebar.pinned ? 'lg:ml-72' : 'lg:ml-20'
       }`}>
         <DriverTopNav
           currentUser={currentUser}
           activeAssignment={activeAssignment}
-          onMenuToggle={() => setSidebarOpen(!sidebarOpen)}
+          onMenuToggle={sidebar.toggle}
+          onNavigate={handleNavigate}
+          actionableCount={actionableCount}
         />
         <main className="flex-1 overflow-x-hidden overflow-y-auto">
           {showBackButton && onBack ? <PortalBackButton label={backLabel} onClick={onBack} /> : null}

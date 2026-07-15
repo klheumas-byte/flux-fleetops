@@ -1,4 +1,6 @@
-from flask import Blueprint, request
+from time import perf_counter
+
+from flask import Blueprint, current_app, request
 from flask_jwt_extended import get_jwt, get_jwt_identity
 
 from services.preventive_maintenance_service import (
@@ -31,16 +33,34 @@ preventive_maintenance_bp = Blueprint("preventive_maintenance", __name__)
 @preventive_maintenance_bp.get("")
 @role_required("owner", "admin", "driver")
 def get_preventive_maintenance_route():
+    started_at = perf_counter()
     vehicle_id = request.args.get("vehicle_id")
-    return success_response(
-        data={
-            "schedules": list_preventive_maintenance(
-                current_user_id=get_jwt_identity(),
-                current_role=get_jwt().get("role"),
-                vehicle_id=vehicle_id,
-            )
-        }
+    identity_started_at = perf_counter()
+    current_user_id = get_jwt_identity()
+    identity_duration_ms = (perf_counter() - identity_started_at) * 1000
+    role_started_at = perf_counter()
+    current_role = get_jwt().get("role")
+    role_duration_ms = (perf_counter() - role_started_at) * 1000
+    service_started_at = perf_counter()
+    schedules = list_preventive_maintenance(
+        current_user_id=current_user_id,
+        current_role=current_role,
+        vehicle_id=vehicle_id,
     )
+    service_duration_ms = (perf_counter() - service_started_at) * 1000
+    response_started_at = perf_counter()
+    response = success_response(data={"schedules": schedules})
+    response_duration_ms = (perf_counter() - response_started_at) * 1000
+    current_app.logger.info(
+        "[Flux Preventive Maintenance Route] identity_ms=%.2f role_ms=%.2f service_ms=%.2f response_ms=%.2f total_ms=%.2f count=%s",
+        identity_duration_ms,
+        role_duration_ms,
+        service_duration_ms,
+        response_duration_ms,
+        (perf_counter() - started_at) * 1000,
+        len(schedules),
+    )
+    return response
 
 
 @preventive_maintenance_bp.get("/due-soon")
@@ -154,7 +174,14 @@ def generate_maintenance_job_from_schedule_route(schedule_id: str):
         current_role=get_jwt().get("role"),
     )
     return success_response(
-        data={"job": job},
+        data={
+            "job": job,
+            "maintenance_job_id": job.get("id"),
+            "preventive_schedule_id": job.get("preventive_schedule_id"),
+            "vehicle_id": job.get("vehicle_id"),
+            "status": job.get("status"),
+            "created_at": job.get("created_at"),
+        },
         message="Maintenance job generated from preventive schedule successfully.",
         status_code=201,
     )
@@ -213,14 +240,17 @@ def update_compliance_item_type_route(type_id: str):
 @role_required("owner", "admin", "driver")
 def get_compliance_records_route():
     vehicle_id = request.args.get("vehicle_id")
+    current_user_id = get_jwt_identity()
+    current_role = get_jwt().get("role")
     records = list_compliance_records(
-        current_user_id=get_jwt_identity(),
-        current_role=get_jwt().get("role"),
+        current_user_id=current_user_id,
+        current_role=current_role,
         vehicle_id=vehicle_id,
     )
     summary = get_compliance_dashboard_summary(
-        current_user_id=get_jwt_identity(),
-        current_role=get_jwt().get("role"),
+        current_user_id=current_user_id,
+        current_role=current_role,
+        records=records,
     )
     return success_response(data={"records": records, "summary": summary})
 

@@ -14,7 +14,7 @@ from models.user import serialize_user
 from models.vehicle import serialize_vehicle
 from services.assignment_service import get_active_assignment_for_driver
 from services.expense_service import create_expense
-from services.notification_service import create_notification, notify_roles
+from services.notification_service import create_notification, notify_roles, resolve_action_notifications
 from utils.api_error import ApiError
 from utils.mongo_indexes import ensure_indexes_for_collection
 
@@ -71,6 +71,19 @@ def now_utc():
     return datetime.now(timezone.utc)
 
 
+def _coerce_datetime(value):
+    """Normalize legacy ISO strings before reminder arithmetic."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    return None
+
+
 def maintenance_jobs_collection():
     return get_collection("maintenance_jobs")
 
@@ -103,10 +116,20 @@ def expenses_collection():
     return get_collection("expenses")
 
 
+def _drop_legacy_maintenance_indexes():
+    indexes = maintenance_jobs_collection().index_information()
+    legacy_fault_index = indexes.get("fault_id_1")
+    if not legacy_fault_index:
+        return
+    maintenance_jobs_collection().drop_index("fault_id_1")
+
+
 def ensure_maintenance_indexes():
+    _drop_legacy_maintenance_indexes()
     ensure_indexes_for_collection(
         maintenance_jobs_collection(),
         [
+            {"keys": [("preventive_schedule_id", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("vehicle_id", ASCENDING)]},
             {"keys": [("driver_id", ASCENDING)]},
             {"keys": [("fault_report_id", ASCENDING)], "options": {"unique": True, "sparse": True}},
@@ -125,7 +148,11 @@ def ensure_maintenance_indexes():
             {"keys": [("vehicle_id", ASCENDING), ("updated_at", DESCENDING), ("created_at", DESCENDING)]},
             {"keys": [("driver_id", ASCENDING), ("created_at", DESCENDING)]},
             {"keys": [("status", ASCENDING), ("created_at", DESCENDING)]},
+            {"keys": [("maintenance_coordinator_id", ASCENDING), ("status", ASCENDING), ("next_follow_up_date", ASCENDING)]},
+            {"keys": [("completed_at", DESCENDING)], "options": {"sparse": True}},
             {"keys": [("vehicle_id", ASCENDING), ("status", ASCENDING)]},
+            {"keys": [("status", ASCENDING), ("priority", ASCENDING), ("is_overdue", ASCENDING)]},
+            {"keys": [("driver_id", ASCENDING), ("status", ASCENDING), ("current_stage", ASCENDING)]},
         ],
         collection_name="maintenance_jobs",
     )
@@ -255,6 +282,27 @@ def _get_user_document(user_id: str | ObjectId, field_name: str = "user_id"):
     return document
 
 
+def _get_authenticated_actor_document(current_user_id: str, current_role: str | None) -> dict:
+    if not ObjectId.is_valid(str(current_user_id)):
+        raise ApiError(
+            "Your login session no longer matches an active user. Please sign in again.",
+            status_code=401,
+        )
+    document = users_collection().find_one({"_id": ObjectId(str(current_user_id))})
+    normalized_role = str(current_role or "").strip().lower() or None
+    if not document or document.get("status") != "active":
+        raise ApiError(
+            "Your login session no longer matches an active user. Please sign in again.",
+            status_code=401,
+        )
+    if normalized_role and str(document.get("role") or "").strip().lower() != normalized_role:
+        raise ApiError(
+            "Your login session no longer matches an active user. Please sign in again.",
+            status_code=401,
+        )
+    return document
+
+
 def _get_vehicle_document(vehicle_id: str | ObjectId):
     vehicle_object_id = _to_object_id(vehicle_id, "vehicle_id")
     document = vehicles_collection().find_one({"_id": vehicle_object_id})
@@ -336,8 +384,58 @@ def _set_vehicle_status_for_maintenance(vehicle_document: dict, priority: str, s
     vehicle_document["updated_at"] = timestamp
 
 
-def _restore_vehicle_status_after_completion(vehicle_document: dict):
-    next_status = "assigned" if vehicle_document.get("assigned_driver_id") else "available"
+def _restore_vehicle_status_after_completion(
+    vehicle_document: dict,
+    *,
+    excluding_maintenance_job_id: ObjectId | None = None,
+):
+    vehicle_id = vehicle_document["_id"]
+    maintenance_query = {
+        "vehicle_id": vehicle_id,
+        "status": {"$nin": ["completed", "cancelled"]},
+    }
+    if excluding_maintenance_job_id:
+        maintenance_query["_id"] = {"$ne": excluding_maintenance_job_id}
+    if maintenance_jobs_collection().find_one(maintenance_query, {"_id": 1}):
+        next_status = "maintenance"
+    else:
+        unresolved_fault = faults_collection().find_one(
+            {
+                "vehicle_id": vehicle_id,
+                "status": {"$in": ["reported", "under_review", "approved", "converted_to_maintenance"]},
+                "$or": [{"severity": "critical"}, {"vehicle_unsafe": True}],
+            },
+            {"_id": 1},
+        )
+        if unresolved_fault:
+            next_status = "maintenance"
+        else:
+            open_incidents = list(
+                get_collection("incidents").find(
+                    {
+                        "vehicle_id": vehicle_id,
+                        "status": {"$nin": ["resolved", "rejected", "closed"]},
+                    },
+                    {"can_vehicle_move": 1},
+                ).limit(20)
+            )
+            if open_incidents:
+                next_status = (
+                    "out_of_service"
+                    if any(not incident.get("can_vehicle_move") for incident in open_incidents)
+                    else "accident"
+                )
+            else:
+                open_movement = get_collection("vehicle_movements").find_one(
+                    {
+                        "vehicle_id": vehicle_id,
+                        "status": {"$in": ["draft", "pending_approval", "approved", "checked_out", "in_progress"]},
+                    },
+                    {"_id": 1},
+                )
+                if open_movement:
+                    return
+                next_status = "assigned" if vehicle_document.get("assigned_driver_id") else "available"
     timestamp = now_utc()
     vehicles_collection().update_one(
         {"_id": vehicle_document["_id"]},
@@ -359,6 +457,9 @@ def _append_vehicle_maintenance_history(vehicle_id: ObjectId, maintenance_docume
         "actual_cost": maintenance_document.get("actual_cost"),
         "vendor_name": maintenance_document.get("vendor_name"),
         "completed_at": maintenance_document.get("completion_date") or maintenance_document.get("updated_at"),
+        "completion_odometer": maintenance_document.get("completion_odometer") or maintenance_document.get("odometer_reading"),
+        "work_performed": maintenance_document.get("work_performed") or maintenance_document.get("notes"),
+        "parts_changed": maintenance_document.get("parts_changed"),
     }
     vehicles_collection().update_one(
         {"_id": vehicle_id},
@@ -536,7 +637,7 @@ def _process_maintenance_reminders(documents: list[dict]):
         update_fields = {}
         coordinator_id = document.get("maintenance_coordinator_id")
         next_follow_up_date = _parse_date(document.get("next_follow_up_date"), "next_follow_up_date", required=False)
-        last_progress_updated_at = document.get("last_progress_updated_at")
+        last_progress_updated_at = _coerce_datetime(document.get("last_progress_updated_at"))
         target_completion_date = _parse_date(document.get("target_completion_date"), "target_completion_date", required=False)
         current_stage = document.get("current_stage")
 
@@ -588,7 +689,7 @@ def _process_maintenance_reminders(documents: list[dict]):
             )
             update_fields["critical_overdue_notification_sent_for"] = today.isoformat()
 
-        waiting_parts_since = document.get("waiting_parts_since")
+        waiting_parts_since = _coerce_datetime(document.get("waiting_parts_since"))
         if current_stage == "waiting_parts" and waiting_parts_since:
             waiting_parts_age = timestamp - waiting_parts_since
             if (
@@ -606,7 +707,7 @@ def _process_maintenance_reminders(documents: list[dict]):
                 )
                 update_fields["waiting_parts_notification_sent_for"] = today.isoformat()
 
-        ready_for_driver_test_since = document.get("ready_for_driver_test_since")
+        ready_for_driver_test_since = _coerce_datetime(document.get("ready_for_driver_test_since"))
         if current_stage == "ready_for_driver_test":
             if not document.get("ready_for_driver_test_notified_at") and document.get("driver_id"):
                 _create_user_notification(
@@ -675,6 +776,52 @@ def _enrich_maintenance_job(document: dict) -> dict:
     return job
 
 
+def _enrich_maintenance_jobs(documents: list[dict]) -> list[dict]:
+    if not documents:
+        return []
+
+    def build_lookup(collection, values: set[ObjectId]):
+        if not values:
+            return {}
+        return {item["_id"]: item for item in collection.find({"_id": {"$in": list(values)}})}
+
+    vehicle_map = build_lookup(vehicles_collection(), {item.get("vehicle_id") for item in documents if isinstance(item.get("vehicle_id"), ObjectId)})
+    user_ids = {
+        value
+        for item in documents
+        for value in (
+            item.get("driver_id"),
+            item.get("created_by"),
+            item.get("approved_by"),
+            item.get("completed_by"),
+            item.get("maintenance_coordinator_id"),
+        )
+        if isinstance(value, ObjectId)
+    }
+    user_map = build_lookup(users_collection(), user_ids)
+    fault_map = build_lookup(faults_collection(), {item.get("fault_report_id") for item in documents if isinstance(item.get("fault_report_id"), ObjectId)})
+    expense_map = build_lookup(expenses_collection(), {item.get("expense_id") for item in documents if isinstance(item.get("expense_id"), ObjectId)})
+
+    enriched = []
+    for document in documents:
+        job = serialize_maintenance_job(document)
+        vehicle = vehicle_map.get(document.get("vehicle_id"))
+        driver = user_map.get(document.get("driver_id"))
+        fault = fault_map.get(document.get("fault_report_id"))
+        expense = expense_map.get(document.get("expense_id"))
+        job["vehicle"] = serialize_vehicle(vehicle) if vehicle else None
+        job["driver"] = serialize_user(driver) if driver else None
+        job["fault_report"] = serialize_fault(fault) if fault else None
+        job["expense"] = serialize_expense(expense) if expense else None
+        job["created_by_user"] = serialize_user(user_map.get(document.get("created_by"))) if user_map.get(document.get("created_by")) else None
+        job["approved_by_user"] = serialize_user(user_map.get(document.get("approved_by"))) if user_map.get(document.get("approved_by")) else None
+        job["completed_by_user"] = serialize_user(user_map.get(document.get("completed_by"))) if user_map.get(document.get("completed_by")) else None
+        coordinator = user_map.get(document.get("maintenance_coordinator_id"))
+        job["maintenance_coordinator"] = serialize_user(coordinator) if coordinator else None
+        enriched.append(job)
+    return enriched
+
+
 def list_maintenance_jobs(current_user_id: str, current_role: str) -> list[dict]:
     query = {}
 
@@ -682,25 +829,37 @@ def list_maintenance_jobs(current_user_id: str, current_role: str) -> list[dict]
         maintenance_jobs_collection()
         .find(query)
         .sort([("priority", ASCENDING), ("start_date", DESCENDING), ("created_at", DESCENDING)])
+        .limit(250)
     )
-    _process_maintenance_reminders(documents)
-    return [_enrich_maintenance_job(document) for document in documents]
+    return _enrich_maintenance_jobs(documents)
 
 
 def get_maintenance_job_by_id(maintenance_id: str, current_user_id: str, current_role: str) -> dict:
     document = _get_maintenance_document(maintenance_id)
-    _process_maintenance_reminders([document])
     return _enrich_maintenance_job(document)
 
 
 def list_maintenance_progress_logs(maintenance_id: str, current_user_id: str, current_role: str) -> list[dict]:
-    _ = get_maintenance_job_by_id(maintenance_id, current_user_id, current_role)
-    logs = (
+    if current_role not in {"owner", "admin"}:
+        raise ApiError("You do not have permission to view maintenance progress.", status_code=403)
+    _get_maintenance_document(maintenance_id)
+    logs = list(
         maintenance_progress_collection()
         .find({"maintenance_job_id": _to_object_id(maintenance_id, "maintenance_id")})
         .sort([("updated_at", DESCENDING)])
     )
-    return [_serialize_progress_timeline_entry(log) for log in logs]
+    user_ids = {log.get("updated_by") for log in logs if isinstance(log.get("updated_by"), ObjectId)}
+    user_map = {
+        user["_id"]: user
+        for user in users_collection().find({"_id": {"$in": list(user_ids)}})
+    } if user_ids else {}
+    timeline = []
+    for log in logs:
+        entry = serialize_maintenance_progress_log(log)
+        updated_by = user_map.get(log.get("updated_by"))
+        entry["updated_by_user"] = serialize_user(updated_by) if updated_by else None
+        timeline.append(entry)
+    return timeline
 
 
 def list_due_follow_ups(current_user_id: str, current_role: str) -> list[dict]:
@@ -719,9 +878,9 @@ def list_due_follow_ups(current_user_id: str, current_role: str) -> list[dict]:
         maintenance_jobs_collection()
         .find(query)
         .sort([("priority", ASCENDING), ("next_follow_up_date", ASCENDING), ("updated_at", DESCENDING)])
+        .limit(100)
     )
-    _process_maintenance_reminders(documents)
-    return [_enrich_maintenance_job(document) for document in documents]
+    return _enrich_maintenance_jobs(documents)
 
 
 def list_overdue_follow_ups(current_user_id: str, current_role: str) -> list[dict]:
@@ -740,9 +899,9 @@ def list_overdue_follow_ups(current_user_id: str, current_role: str) -> list[dic
         maintenance_jobs_collection()
         .find(query)
         .sort([("priority", ASCENDING), ("next_follow_up_date", ASCENDING), ("updated_at", DESCENDING)])
+        .limit(100)
     )
-    _process_maintenance_reminders(documents)
-    return [_enrich_maintenance_job(document) for document in documents]
+    return _enrich_maintenance_jobs(documents)
 
 
 def list_driver_maintenance_jobs(current_user_id: str) -> list[dict]:
@@ -755,19 +914,16 @@ def list_driver_maintenance_jobs(current_user_id: str) -> list[dict]:
         .find({"vehicle_id": assigned_vehicle_id})
         .sort([("start_date", DESCENDING), ("created_at", DESCENDING)])
     )
-    _process_maintenance_reminders(documents)
     return [_serialize_driver_maintenance_job(document, current_user_id) for document in documents]
 
 
 def get_driver_maintenance_job_by_id(maintenance_id: str, current_user_id: str) -> dict:
     document = _get_driver_accessible_maintenance_document(maintenance_id, current_user_id)
-    _process_maintenance_reminders([document])
     return _serialize_driver_maintenance_job(document, current_user_id)
 
 
 def list_driver_maintenance_progress_logs(maintenance_id: str, current_user_id: str) -> list[dict]:
     document = _get_driver_accessible_maintenance_document(maintenance_id, current_user_id)
-    _process_maintenance_reminders([document])
     logs = (
         maintenance_progress_collection()
         .find({"maintenance_job_id": document["_id"]})
@@ -780,6 +936,7 @@ def create_maintenance_job(payload: dict, current_user_id: str, current_role: st
     if current_role not in {"owner", "admin"}:
         raise ApiError("You do not have permission to create maintenance jobs.", status_code=403)
 
+    _get_authenticated_actor_document(current_user_id, current_role)
     vehicle_document = _get_vehicle_document(payload.get("vehicle_id"))
     driver_object_id = _to_object_id(payload.get("driver_id"), "driver_id", required=False)
     if driver_object_id is not None:
@@ -808,6 +965,24 @@ def create_maintenance_job(payload: dict, current_user_id: str, current_role: st
     derived_status = _derive_status_from_stage(current_stage, status)
     estimated_cost = _validate_non_negative_amount(payload.get("estimated_cost"), "estimated_cost")
     actual_cost = _validate_non_negative_amount(payload.get("actual_cost"), "actual_cost")
+    preventive_schedule_object_id = _to_object_id(
+        payload.get("preventive_schedule_id"),
+        "preventive_schedule_id",
+        required=False,
+    )
+    if preventive_schedule_object_id is not None:
+        existing_schedule_job = maintenance_jobs_collection().find_one(
+            {
+                "preventive_schedule_id": preventive_schedule_object_id,
+                "status": {"$nin": ["completed", "cancelled"]},
+            },
+            {"_id": 1},
+        )
+        if existing_schedule_job:
+            raise ApiError(
+                "An active maintenance job already exists for this preventive schedule.",
+                status_code=409,
+            )
     coordinator_document = _get_coordinator_document(
         payload.get("maintenance_coordinator_id"),
         current_user_id=current_user_id,
@@ -828,9 +1003,9 @@ def create_maintenance_job(payload: dict, current_user_id: str, current_role: st
     target_completion_date = _parse_date(payload.get("target_completion_date"), "target_completion_date", required=False)
 
     document = {
+        "preventive_schedule_id": preventive_schedule_object_id,
         "vehicle_id": vehicle_document["_id"],
         "driver_id": driver_object_id,
-        "fault_report_id": fault_document["_id"] if fault_document else None,
         "maintenance_type": maintenance_type,
         "title": title,
         "description": description,
@@ -841,6 +1016,7 @@ def create_maintenance_job(payload: dict, current_user_id: str, current_role: st
         "actual_cost": actual_cost,
         "expense_id": expense_object_id,
         "odometer_reading": _validate_odometer(payload.get("odometer_reading")),
+        "due_odometer": _validate_odometer(payload.get("due_odometer")),
         "start_date": (payload.get("start_date") or "").strip() or None,
         "target_completion_date": _serialize_date(target_completion_date),
         "completion_date": (payload.get("completion_date") or "").strip() or None,
@@ -864,11 +1040,17 @@ def create_maintenance_job(payload: dict, current_user_id: str, current_role: st
         "waiting_parts_notification_sent_for": None,
         "critical_overdue_notification_sent_for": None,
         "created_by": _to_object_id(current_user_id, "created_by"),
+        "generated_by": _to_object_id(current_user_id, "generated_by") if preventive_schedule_object_id else None,
+        "generated_at": timestamp if preventive_schedule_object_id else None,
         "approved_by": _to_object_id(current_user_id, "approved_by") if derived_status != "pending" else None,
         "completed_by": _to_object_id(current_user_id, "completed_by") if derived_status == "completed" else None,
         "created_at": timestamp,
         "updated_at": timestamp,
     }
+    if fault_document:
+        document["fault_report_id"] = fault_document["_id"]
+    if expense_object_id is not None:
+        document["expense_id"] = expense_object_id
     result = maintenance_jobs_collection().insert_one(document)
     document["_id"] = result.inserted_id
 
@@ -886,6 +1068,12 @@ def create_maintenance_job(payload: dict, current_user_id: str, current_role: st
                     "updated_at": timestamp,
                 }
             },
+        )
+        resolve_action_notifications(
+            "fault",
+            fault_document["_id"],
+            action_type="link_fault_maintenance",
+            completed_by=current_user_id,
         )
 
     _set_vehicle_status_for_maintenance(vehicle_document, priority, derived_status)
@@ -916,14 +1104,21 @@ def create_maintenance_job(payload: dict, current_user_id: str, current_role: st
                     }
                 },
             )
-        _restore_vehicle_status_after_completion(vehicle_document)
+        _restore_vehicle_status_after_completion(
+            vehicle_document,
+            excluding_maintenance_job_id=document["_id"],
+        )
         _append_vehicle_maintenance_history(vehicle_document["_id"], document)
 
     maintenance_progress_collection().insert_one(
         {
             "maintenance_job_id": document["_id"],
             "update_type": "general",
-            "progress_note": f"Maintenance job created and assigned to {document.get('assigned_admin_name')}.",
+            "progress_note": (
+                f"Maintenance job created and assigned to {document.get('assigned_admin_name')}."
+                if document.get("assigned_admin_name")
+                else "Maintenance job created without a coordinator assignment."
+            ),
             "current_stage": current_stage,
             "next_action": document.get("next_action"),
             "next_follow_up_date": document.get("next_follow_up_date"),
@@ -1107,6 +1302,26 @@ def update_maintenance_status(
     if next_status == "completed":
         update_fields["completed_by"] = _to_object_id(current_user_id, "completed_by")
         update_fields["completion_date"] = update_fields.get("completion_date") or timestamp.date().isoformat()
+        update_fields["completed_at"] = timestamp
+        # A job's opening/current odometer is not proof of the completion
+        # odometer. Only persist mileage when the completion payload supplies
+        # it explicitly; missing mileage must remain unavailable.
+        update_fields["completion_odometer"] = _validate_odometer(
+            payload.get("completion_odometer", payload.get("odometer_reading"))
+        )
+        update_fields["work_performed"] = (
+            payload.get("work_performed")
+            or payload.get("work_done")
+            or payload.get("notes")
+            or document.get("notes")
+            or ""
+        ).strip() or None
+        parts_changed = payload.get("parts_changed")
+        if isinstance(parts_changed, str):
+            parts_changed = [part.strip() for part in parts_changed.split(",") if part.strip()]
+        if parts_changed is not None and not isinstance(parts_changed, list):
+            raise ApiError("parts_changed must be a string or list.", status_code=400)
+        update_fields["parts_changed"] = parts_changed or None
         update_fields["current_stage"] = "completed"
         if fault_document:
             faults_collection().update_one(
@@ -1121,9 +1336,15 @@ def update_maintenance_status(
                     }
                 },
             )
-        _restore_vehicle_status_after_completion(vehicle_document)
+        _restore_vehicle_status_after_completion(
+            vehicle_document,
+            excluding_maintenance_job_id=document["_id"],
+        )
     elif next_status == "cancelled":
-        _restore_vehicle_status_after_completion(vehicle_document)
+        _restore_vehicle_status_after_completion(
+            vehicle_document,
+            excluding_maintenance_job_id=document["_id"],
+        )
     else:
         _set_vehicle_status_for_maintenance(vehicle_document, document.get("priority"), next_status)
 
@@ -1131,7 +1352,27 @@ def update_maintenance_status(
     document.update(update_fields)
 
     if next_status == "completed":
-        _append_vehicle_maintenance_history(vehicle_document["_id"], document)
+        preventive_schedule_id = document.get("preventive_schedule_id")
+        if preventive_schedule_id:
+            from services.preventive_maintenance_service import complete_preventive_schedule
+
+            complete_preventive_schedule(
+                schedule_id=str(preventive_schedule_id),
+                payload={
+                    "source_job_id": str(document["_id"]),
+                    "completed_date": document.get("completion_date"),
+                    "completed_odometer": document.get("completion_odometer"),
+                    "work_done": document.get("work_performed"),
+                    "parts_changed": document.get("parts_changed"),
+                    "condition_notes": document.get("notes"),
+                },
+                current_user_id=current_user_id,
+                current_role=current_role,
+            )
+        else:
+            # Preventive completion writes the richer schedule history entry
+            # itself.  Avoid pushing a second, duplicate vehicle history row.
+            _append_vehicle_maintenance_history(vehicle_document["_id"], document)
 
     _process_maintenance_reminders([document])
     return _enrich_maintenance_job(document)

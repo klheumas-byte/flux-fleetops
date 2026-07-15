@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
 import { fetchDriverActiveAssignment, type DriverActiveAssignment } from '../../lib/driver-api';
+import { FuelGaugeSelector } from '../shared/FuelGaugeSelector';
 import { clearDriverQuickActionIntent, peekDriverQuickActionIntent } from '../../lib/driver-quick-actions';
 
 type FuelLogStatus = 'submitted' | 'approved' | 'rejected';
@@ -36,8 +37,9 @@ interface FuelLog {
   litres: number;
   amount: number;
   price_per_litre: number;
-  odometer_reading: number;
-  receipt_image: string | null;
+  odometer_reading: number | null;
+  fuel_level: number | null;
+  receipt_image: string | { provider?: string; thumbnail_url?: string; public_url?: string } | null;
   notes: string | null;
   status: FuelLogStatus;
   rejection_reason: string | null;
@@ -82,6 +84,7 @@ interface FuelFormState {
   litres: string;
   amount: string;
   odometer_reading: string;
+  fuel_level: number | null;
   notes: string;
   receipt_image: string | null;
   receipt_file_name: string;
@@ -94,6 +97,7 @@ const initialFuelForm: FuelFormState = {
   litres: '',
   amount: '',
   odometer_reading: '',
+  fuel_level: null,
   notes: '',
   receipt_image: null,
   receipt_file_name: '',
@@ -272,7 +276,8 @@ export default function FuelLogs() {
           fuel_type: formState.fuel_type,
           litres: Number(formState.litres),
           amount: Number(formState.amount),
-          odometer_reading: Number(formState.odometer_reading),
+          odometer_reading: formState.odometer_reading ? Number(formState.odometer_reading) : null,
+          fuel_level: formState.fuel_level,
           receipt_image: formState.receipt_image,
           notes: formState.notes,
         }),
@@ -411,7 +416,8 @@ export default function FuelLogs() {
                         <span className="font-medium text-[#0F172A]">Price / Litre:</span> {formatCurrency(log.price_per_litre)}
                       </div>
                       <div>
-                        <span className="font-medium text-[#0F172A]">Odometer:</span> {log.odometer_reading.toLocaleString()} km
+                        <span className="font-medium text-[#0F172A]">Odometer:</span>{' '}
+                        {log.odometer_reading != null ? `${log.odometer_reading.toLocaleString()} km` : 'Unavailable'}
                       </div>
                       <div>
                         <span className="font-medium text-[#0F172A]">Cost / KM:</span>{' '}
@@ -520,6 +526,11 @@ export default function FuelLogs() {
                 <InputField label="Litres" type="number" step="0.01" value={formState.litres} onChange={(value) => setFormState((current) => ({ ...current, litres: value }))} />
                 <InputField label="Amount" type="number" step="0.01" value={formState.amount} onChange={(value) => setFormState((current) => ({ ...current, amount: value }))} />
                 <InputField label="Odometer Reading" type="number" step="0.01" value={formState.odometer_reading} onChange={(value) => setFormState((current) => ({ ...current, odometer_reading: value }))} />
+                <FuelGaugeSelector
+                  label="Fuel Level"
+                  value={formState.fuel_level}
+                  onChange={(value) => setFormState((current) => ({ ...current, fuel_level: value }))}
+                />
               </div>
 
               <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-700">

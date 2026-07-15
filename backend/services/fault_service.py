@@ -1,17 +1,20 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from time import perf_counter
 
 from bson import ObjectId
 from flask import current_app
 from pymongo import ASCENDING, DESCENDING
+from pymongo.errors import DuplicateKeyError
 
 from extensions import get_collection
 from models.fault import serialize_fault
 from models.fault_catalog import serialize_fault_category, serialize_fault_component
+from models.maintenance import serialize_maintenance_job
 from models.user import serialize_user
 from models.vehicle import serialize_vehicle
 from services.assignment_service import get_active_assignment_for_driver
-from services.notification_service import notify_roles
+from services.notification_service import create_notification, notify_roles, resolve_action_notifications
 from utils.api_error import ApiError
 from utils.file_validation import validate_file_reference_list
 from utils.mongo_indexes import ensure_indexes_for_collection
@@ -50,7 +53,12 @@ FAULT_LIST_PROJECTION = {
     "component_id": 1,
     "severity": 1,
     "description": 1,
-    "photos": 1,
+    # Evidence is intentionally excluded from list/approval projections.  Fault
+    # lists can contain up to 250 records and attachments are potentially large;
+    # details are loaded through GET /api/faults/<id>, which reads the full
+    # document.  Keeping photos out of this projection avoids bloated responses
+    # and slow/timeout-prone page loads while preserving detail evidence.
+    "vehicle_unsafe": 1,
     "status": 1,
     "admin_notes": 1,
     "owner_notes": 1,
@@ -64,6 +72,7 @@ FAULT_LIST_PROJECTION = {
     "rejection_reason": 1,
     "requested_info_at": 1,
     "request_info_note": 1,
+    "clarification_responded_at": 1,
     "converted_to_maintenance_by": 1,
     "converted_to_maintenance_at": 1,
     "resolved_at": 1,
@@ -233,6 +242,10 @@ def vehicles_collection():
     return get_collection("vehicles")
 
 
+def vehicle_movements_collection():
+    return get_collection("vehicle_movements")
+
+
 def ensure_fault_indexes():
     ensure_indexes_for_collection(
         faults_collection(),
@@ -253,6 +266,7 @@ def ensure_fault_indexes():
             {"keys": [("driver_id", ASCENDING), ("created_at", DESCENDING)]},
             {"keys": [("status", ASCENDING), ("created_at", DESCENDING)]},
             {"keys": [("vehicle_id", ASCENDING), ("status", ASCENDING)]},
+            {"keys": [("submission_key", ASCENDING)], "options": {"unique": True, "sparse": True}},
         ],
         collection_name="faults",
     )
@@ -396,18 +410,31 @@ def _ensure_category_component_match(category_document: dict, component_document
 
 
 def _validate_driver_fault_scope(current_user_id: str, vehicle_id: str | None, driver_id: str | None):
+    current_user_object_id = _to_object_id(current_user_id, "current_user_id")
     active_assignment = get_active_assignment_for_driver(current_user_id)
-    if not active_assignment:
-        raise ApiError("You must have an active vehicle assignment to report a fault.", status_code=403)
-
-    assigned_vehicle_id = active_assignment.get("vehicle_id")
+    assigned_vehicle_id = active_assignment.get("vehicle_id") if active_assignment else None
     resolved_vehicle_id = vehicle_id or assigned_vehicle_id
     resolved_driver_id = driver_id or current_user_id
 
     if resolved_driver_id != current_user_id:
         raise ApiError("Drivers can only report faults for themselves.", status_code=403)
+    if not resolved_vehicle_id:
+        raise ApiError("You must have an assigned or movement-linked vehicle to report a fault.", status_code=403)
     if resolved_vehicle_id != assigned_vehicle_id:
-        raise ApiError("Drivers can only report faults for their assigned vehicle.", status_code=403)
+        resolved_vehicle_object_id = _to_object_id(resolved_vehicle_id, "vehicle_id")
+        permitted_movement = vehicle_movements_collection().find_one(
+            {
+                "vehicle_id": resolved_vehicle_object_id,
+                "status": {"$in": ["approved", "checked_out", "in_progress"]},
+                "$or": [
+                    {"movement_custodian_id": current_user_object_id},
+                    {"driver_id": current_user_object_id},
+                ],
+            },
+            {"_id": 1},
+        )
+        if not permitted_movement:
+            raise ApiError("Drivers can only report faults for assigned or active movement-linked vehicles.", status_code=403)
 
     return _to_object_id(resolved_driver_id, "driver_id"), _to_object_id(resolved_vehicle_id, "vehicle_id")
 
@@ -505,6 +532,17 @@ def _enrich_fault(
     return fault
 
 
+def _enrich_single_fault(document: dict) -> dict:
+    vehicle_map, user_map, category_map, component_map = _load_fault_relationship_maps([document])
+    return _enrich_fault(
+        document,
+        vehicle_map=vehicle_map,
+        user_map=user_map,
+        category_map=category_map,
+        component_map=component_map,
+    )
+
+
 def _load_fault_relationship_maps(documents: list[dict]) -> tuple[dict[str, dict], dict[str, dict], dict[str, dict], dict[str, dict]]:
     vehicle_ids = {document.get("vehicle_id") for document in documents if document.get("vehicle_id")}
     category_ids = {document.get("category_id") for document in documents if document.get("category_id")}
@@ -525,49 +563,64 @@ def _load_fault_relationship_maps(documents: list[dict]) -> tuple[dict[str, dict
             if document.get(field):
                 user_ids.add(document.get(field))
 
-    vehicle_map = {}
-    user_map = {}
-    category_map = {}
-    component_map = {}
+    collections = {
+        "vehicles": vehicles_collection(),
+        "users": users_collection(),
+        "categories": fault_categories_collection(),
+        "components": fault_components_collection(),
+    }
+    ids_by_name = {
+        "vehicles": vehicle_ids,
+        "users": user_ids,
+        "categories": category_ids,
+        "components": component_ids,
+    }
 
-    if vehicle_ids:
-        started_at = perf_counter()
-        vehicle_map = {str(item["_id"]): item for item in vehicles_collection().find({"_id": {"$in": list(vehicle_ids)}})}
-        log_db_duration("faults.load_vehicles", started_at)
-    if user_ids:
-        started_at = perf_counter()
-        user_map = {str(item["_id"]): item for item in users_collection().find({"_id": {"$in": list(user_ids)}})}
-        log_db_duration("faults.load_users", started_at)
-    if category_ids:
-        started_at = perf_counter()
-        category_map = {
+    def load_map(name: str):
+        ids = ids_by_name[name]
+        if not ids:
+            return {}
+        return {
             str(item["_id"]): item
-            for item in fault_categories_collection().find({"_id": {"$in": list(category_ids)}})
+            for item in collections[name].find({"_id": {"$in": list(ids)}})
         }
-        log_db_duration("faults.load_categories", started_at)
-    if component_ids:
-        started_at = perf_counter()
-        component_map = {
-            str(item["_id"]): item
-            for item in fault_components_collection().find({"_id": {"$in": list(component_ids)}})
-        }
-        log_db_duration("faults.load_components", started_at)
 
-    return vehicle_map, user_map, category_map, component_map
+    started_at = perf_counter()
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="fault-enrichment") as executor:
+        futures = {name: executor.submit(load_map, name) for name in collections}
+        maps = {name: future.result() for name, future in futures.items()}
+    log_db_duration("faults.load_relationships_parallel", started_at)
+
+    return maps["vehicles"], maps["users"], maps["categories"], maps["components"]
 
 
 def _sort_fault_documents(documents: list[dict]) -> list[dict]:
+    def timestamp(value):
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return value.timestamp()
+        if isinstance(value, str):
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed.timestamp()
+            except ValueError:
+                return 0
+        return 0
+
     def sort_key(document: dict):
         severity_rank = FAULT_SEVERITY_ORDER.get(document.get("severity"), 99)
         status_rank = 0 if document.get("status") in {"reported", "under_review"} else 1
-        reported_at = document.get("reported_at") or document.get("created_at") or datetime.min.replace(tzinfo=timezone.utc)
-        return (status_rank, severity_rank, -reported_at.timestamp())
+        reported_at = document.get("reported_at") or document.get("created_at")
+        return (status_rank, severity_rank, -timestamp(reported_at))
 
     return sorted(documents, key=sort_key)
 
 
-def _set_vehicle_to_maintenance_if_critical(fault_document: dict):
-    if fault_document.get("severity") != "critical":
+def _set_vehicle_to_maintenance_if_unsafe(fault_document: dict):
+    if fault_document.get("severity") != "critical" and not fault_document.get("vehicle_unsafe"):
         return
 
     vehicles_collection().update_one(
@@ -575,20 +628,53 @@ def _set_vehicle_to_maintenance_if_critical(fault_document: dict):
         {
             "$set": {
                 "status": "maintenance",
+                "availability_reason": "fault",
                 "updated_at": now_utc(),
             }
         },
     )
 
 
+def _restore_vehicle_if_fault_block_cleared(fault_document: dict):
+    """Restore availability only when this fault was the remaining blocker."""
+    vehicle_id = fault_document.get("vehicle_id")
+    if not vehicle_id:
+        return
+    if faults_collection().find_one({
+        "vehicle_id": vehicle_id,
+        "_id": {"$ne": fault_document.get("_id")},
+        "status": {"$nin": ["rejected", "resolved", "cancelled", "duplicate"]},
+        "$or": [{"severity": "critical"}, {"vehicle_unsafe": True}],
+    }, {"_id": 1}):
+        return
+    if maintenance_jobs_collection().find_one(
+        {"vehicle_id": vehicle_id, "status": {"$nin": ["completed", "cancelled", "rejected"]}},
+        {"_id": 1},
+    ):
+        return
+    vehicles_collection().update_one(
+        {"_id": vehicle_id, "availability_reason": "fault"},
+        {"$set": {"status": "available", "updated_at": now_utc()}, "$unset": {"availability_reason": ""}},
+    )
+
+
 def list_faults(current_user_id: str, current_role: str) -> list[dict]:
+    current_role = (current_role or "").strip().lower()
     query = {}
     if current_role == "driver":
-        query["driver_id"] = _to_object_id(current_user_id, "current_user_id")
+        driver_object_id = _to_object_id(current_user_id, "current_user_id")
+        scopes = [{"driver_id": driver_object_id}]
+        active_assignment = get_active_assignment_for_driver(current_user_id)
+        if active_assignment and active_assignment.get("vehicle_id"):
+            scopes.append({"vehicle_id": _to_object_id(active_assignment.get("vehicle_id"), "vehicle_id")})
+        query["$or"] = scopes
 
     query_started_at = perf_counter()
     documents = list(
-        faults_collection().find(query, FAULT_LIST_PROJECTION).sort([("reported_at", DESCENDING), ("created_at", DESCENDING)])
+        faults_collection()
+        .find(query, FAULT_LIST_PROJECTION)
+        .sort([("reported_at", DESCENDING), ("created_at", DESCENDING)])
+        .limit(250)
     )
     log_db_duration("faults.list.query", query_started_at)
     vehicle_map, user_map, category_map, component_map = _load_fault_relationship_maps(documents)
@@ -605,6 +691,7 @@ def list_faults(current_user_id: str, current_role: str) -> list[dict]:
 
 
 def list_fault_approvals(current_role: str) -> list[dict]:
+    current_role = (current_role or "").strip().lower()
     if current_role not in {"owner", "admin"}:
         raise ApiError("You do not have permission to view the fault approval queue.", status_code=403)
 
@@ -613,6 +700,7 @@ def list_fault_approvals(current_role: str) -> list[dict]:
         faults_collection()
         .find({"status": {"$in": list(FAULT_APPROVAL_QUEUE_STATUSES)}}, FAULT_LIST_PROJECTION)
         .sort([("reported_at", DESCENDING), ("created_at", DESCENDING)])
+        .limit(250)
     )
     log_db_duration("faults.approvals.query", request_started_at)
     sorted_documents = _sort_fault_documents(documents)
@@ -645,42 +733,36 @@ def list_fault_approvals(current_role: str) -> list[dict]:
 
 
 def list_critical_faults(current_role: str) -> list[dict]:
+    current_role = (current_role or "").strip().lower()
     if current_role not in {"owner", "admin"}:
         raise ApiError("You do not have permission to view critical faults.", status_code=403)
 
     request_started_at = perf_counter()
-    result: list[dict] = []
-    try:
-        query_started_at = perf_counter()
-        documents = list(
-            faults_collection()
-            .find({"severity": "critical", "status": {"$ne": "resolved"}}, FAULT_LIST_PROJECTION)
-            .sort([("reported_at", DESCENDING), ("created_at", DESCENDING)])
-            .limit(50)
+    query_started_at = perf_counter()
+    documents = list(
+        faults_collection()
+        .find({"severity": "critical", "status": {"$ne": "resolved"}}, FAULT_LIST_PROJECTION)
+        .sort([("reported_at", DESCENDING), ("created_at", DESCENDING)])
+        .limit(50)
+    )
+    log_db_duration("faults.critical.query", query_started_at)
+    sorted_documents = _sort_fault_documents(documents)
+    vehicle_map, user_map, category_map, component_map = _load_fault_relationship_maps(sorted_documents)
+    result = [
+        _enrich_fault(
+            document,
+            vehicle_map=vehicle_map,
+            user_map=user_map,
+            category_map=category_map,
+            component_map=component_map,
         )
-        log_db_duration("faults.critical.query", query_started_at)
-        sorted_documents = _sort_fault_documents(documents)
-        vehicle_map, user_map, category_map, component_map = _load_fault_relationship_maps(sorted_documents)
-        result = [
-            _enrich_fault(
-                document,
-                vehicle_map=vehicle_map,
-                user_map=user_map,
-                category_map=category_map,
-                component_map=component_map,
-            )
-            for document in sorted_documents
-        ]
-        current_app.logger.info(
-            "[Flux Section] section=critical_faults endpoint=/api/faults/critical duration_ms=%.2f success=true records_count=%s",
-            (perf_counter() - request_started_at) * 1000,
-            len(result),
-        )
-    except Exception:
-        current_app.logger.exception(
-            "[Flux Section] section=critical_faults endpoint=/api/faults/critical success=false"
-        )
-        result = []
+        for document in sorted_documents
+    ]
+    current_app.logger.info(
+        "[Flux Section] section=critical_faults endpoint=/api/faults/critical duration_ms=%.2f success=true records_count=%s",
+        (perf_counter() - request_started_at) * 1000,
+        len(result),
+    )
     total_duration_ms = (perf_counter() - request_started_at) * 1000
     if total_duration_ms > 2000:
         current_app.logger.warning(
@@ -692,13 +774,15 @@ def list_critical_faults(current_role: str) -> list[dict]:
 
 
 def get_fault_by_id(fault_id: str, current_user_id: str, current_role: str) -> dict:
+    current_role = (current_role or "").strip().lower()
     document = _get_fault_document(fault_id)
     if current_role == "driver" and str(document.get("driver_id")) != current_user_id:
         raise ApiError("You do not have permission to view this fault.", status_code=403)
-    return _enrich_fault(document)
+    return _enrich_single_fault(document)
 
 
 def create_fault(payload: dict, current_user_id: str, current_role: str) -> dict:
+    current_role = (current_role or "").strip().lower()
     if current_role not in {"driver", "admin", "owner"}:
         raise ApiError("You do not have permission to create fault reports.", status_code=403)
 
@@ -729,6 +813,12 @@ def create_fault(payload: dict, current_user_id: str, current_role: str) -> dict
         _get_vehicle_document(vehicle_object_id)
 
     photos = _validate_photos(payload.get("photos"))
+    submission_key = (payload.get("submission_key") or "").strip() or None
+    if submission_key and len(submission_key) > 100:
+        raise ApiError("submission_key must be 100 characters or fewer.", status_code=400)
+    vehicle_unsafe = payload.get("vehicle_unsafe", False)
+    if not isinstance(vehicle_unsafe, bool):
+        raise ApiError("vehicle_unsafe must be true or false.", status_code=400)
     timestamp = now_utc()
     document = {
         "vehicle_id": vehicle_object_id,
@@ -738,6 +828,8 @@ def create_fault(payload: dict, current_user_id: str, current_role: str) -> dict
         "severity": severity,
         "description": description,
         "photos": photos,
+        "vehicle_unsafe": vehicle_unsafe,
+        "submission_key": submission_key,
         "status": "reported",
         "admin_notes": (payload.get("admin_notes") or "").strip() or None,
         "owner_notes": (payload.get("owner_notes") or "").strip() or None,
@@ -763,10 +855,39 @@ def create_fault(payload: dict, current_user_id: str, current_role: str) -> dict
         "created_at": timestamp,
         "updated_at": timestamp,
     }
-    result = faults_collection().insert_one(document)
+    try:
+        result = faults_collection().insert_one(document)
+    except DuplicateKeyError:
+        existing = faults_collection().find_one({"submission_key": submission_key}) if submission_key else None
+        if existing:
+            return _enrich_single_fault(existing)
+        raise
     document["_id"] = result.inserted_id
+    _set_vehicle_to_maintenance_if_unsafe(document)
 
-    vehicle_registration = _get_vehicle_document(vehicle_object_id).get("registration_number") or "vehicle"
+    vehicle_document = _get_vehicle_document(vehicle_object_id)
+    vehicle_registration = vehicle_document.get("registration_number") or "vehicle"
+
+    create_notification(
+        recipient_user_id=driver_object_id,
+        title="Fault Report Submitted",
+        message=f"Your fault report for vehicle {vehicle_registration} was submitted for review.",
+        category="maintenance",
+        priority="medium",
+        reference_type="fault",
+        reference_id=document["_id"],
+    )
+    permanent_driver_id = vehicle_document.get("assigned_driver_id")
+    if permanent_driver_id and permanent_driver_id != driver_object_id:
+        create_notification(
+            recipient_user_id=permanent_driver_id,
+            title="Fault Reported For Your Vehicle",
+            message=f"A temporary custodian reported a fault for vehicle {vehicle_registration}.",
+            category="maintenance",
+            priority="high" if severity in {"high", "critical"} or vehicle_unsafe else "medium",
+            reference_type="fault",
+            reference_id=document["_id"],
+        )
 
     if current_role == "driver":
         notify_roles(
@@ -777,6 +898,9 @@ def create_fault(payload: dict, current_user_id: str, current_role: str) -> dict
             priority="high" if severity in {"high", "critical"} else "medium",
             reference_type="fault",
             reference_id=document["_id"],
+            action_type="review_fault",
+            action_url="fault-approvals",
+            action_label="Review fault",
         )
 
     if severity == "critical":
@@ -788,12 +912,16 @@ def create_fault(payload: dict, current_user_id: str, current_role: str) -> dict
             priority="critical",
             reference_type="fault",
             reference_id=document["_id"],
+            action_type="review_fault",
+            action_url="fault-approvals",
+            action_label="Review critical fault",
         )
 
-    return _enrich_fault(document)
+    return _enrich_single_fault(document)
 
 
 def update_fault(fault_id: str, payload: dict, current_user_id: str, current_role: str) -> dict:
+    current_role = (current_role or "").strip().lower()
     document = _get_fault_document(fault_id)
     update_fields = {}
 
@@ -822,6 +950,10 @@ def update_fault(fault_id: str, payload: dict, current_user_id: str, current_rol
             update_fields["description"] = description
         if "photos" in payload:
             update_fields["photos"] = _validate_photos(payload.get("photos"))
+        if "vehicle_unsafe" in payload:
+            if not isinstance(payload.get("vehicle_unsafe"), bool):
+                raise ApiError("vehicle_unsafe must be true or false.", status_code=400)
+            update_fields["vehicle_unsafe"] = payload.get("vehicle_unsafe")
     else:
         if "admin_notes" in payload:
             update_fields["admin_notes"] = (payload.get("admin_notes") or "").strip() or None
@@ -838,11 +970,43 @@ def update_fault(fault_id: str, payload: dict, current_user_id: str, current_rol
     if not update_fields:
         raise ApiError("No valid fault fields provided for update.", status_code=400)
 
+    timestamp = now_utc()
+    is_driver_clarification = (
+        current_role == "driver"
+        and document.get("status") == "under_review"
+        and bool(document.get("request_info_note"))
+    )
+    if is_driver_clarification:
+        update_fields["status"] = "reported"
+        update_fields["clarification_responded_at"] = timestamp
     update_fields["updated_by"] = _to_object_id(current_user_id, "updated_by")
-    update_fields["updated_at"] = now_utc()
+    update_fields["updated_at"] = timestamp
     faults_collection().update_one({"_id": document["_id"]}, {"$set": update_fields})
     document.update(update_fields)
-    return _enrich_fault(document)
+    if update_fields.get("status") == "resolved":
+        _restore_vehicle_if_fault_block_cleared(document)
+    if current_role == "driver":
+        _set_vehicle_to_maintenance_if_unsafe(document)
+    if is_driver_clarification:
+        resolve_action_notifications(
+            "fault",
+            document["_id"],
+            action_type="provide_fault_info",
+            completed_by=current_user_id,
+        )
+        notify_roles(
+            ["admin", "owner"],
+            title="Fault Information Updated",
+            message="A driver supplied additional information for a fault awaiting review.",
+            category="maintenance",
+            priority="high" if document.get("severity") in {"high", "critical"} else "medium",
+            reference_type="fault",
+            reference_id=document["_id"],
+            action_type="review_fault",
+            action_url="fault-approvals",
+            action_label="Review updated fault",
+        )
+    return _enrich_single_fault(document)
 
 
 def approve_fault(fault_id: str, current_user_id: str, notes: str | None = None) -> dict:
@@ -871,8 +1035,31 @@ def approve_fault(fault_id: str, current_user_id: str, notes: str | None = None)
     }
     faults_collection().update_one({"_id": document["_id"]}, {"$set": update_fields})
     document.update(update_fields)
-    _set_vehicle_to_maintenance_if_critical(document)
-    return _enrich_fault(document)
+    _set_vehicle_to_maintenance_if_unsafe(document)
+    resolve_action_notifications("fault", document["_id"], action_type="review_fault", completed_by=current_user_id)
+    create_notification(
+        recipient_user_id=document.get("driver_id"),
+        title="Fault Report Approved",
+        message="Your vehicle fault report was approved and is ready for maintenance action.",
+        category="maintenance",
+        priority="medium",
+        reference_type="fault",
+        reference_id=document["_id"],
+    )
+    if document.get("severity") in {"high", "critical"} or document.get("vehicle_unsafe"):
+        notify_roles(
+            ["admin", "owner"],
+            title="Fault Requires Maintenance Linkage",
+            message="An approved high-risk fault is ready to be converted to a maintenance job.",
+            category="maintenance",
+            priority="critical" if document.get("severity") == "critical" else "high",
+            reference_type="fault",
+            reference_id=document["_id"],
+            action_type="link_fault_maintenance",
+            action_url="fault-approvals",
+            action_label="Create maintenance job",
+        )
+    return _enrich_single_fault(document)
 
 
 def reject_fault(fault_id: str, current_user_id: str, notes: str | None) -> dict:
@@ -903,7 +1090,18 @@ def reject_fault(fault_id: str, current_user_id: str, notes: str | None) -> dict
     }
     faults_collection().update_one({"_id": document["_id"]}, {"$set": update_fields})
     document.update(update_fields)
-    return _enrich_fault(document)
+    _restore_vehicle_if_fault_block_cleared(document)
+    resolve_action_notifications("fault", document["_id"], action_type="review_fault", resolution="cancelled", completed_by=current_user_id)
+    create_notification(
+        recipient_user_id=document.get("driver_id"),
+        title="Fault Report Rejected",
+        message="Your vehicle fault report was rejected. Review the fault history for the administrator's note.",
+        category="maintenance",
+        priority="medium",
+        reference_type="fault",
+        reference_id=document["_id"],
+    )
+    return _enrich_single_fault(document)
 
 
 def request_fault_info(fault_id: str, current_user_id: str, notes: str | None) -> dict:
@@ -934,7 +1132,25 @@ def request_fault_info(fault_id: str, current_user_id: str, notes: str | None) -
     }
     faults_collection().update_one({"_id": document["_id"]}, {"$set": update_fields})
     document.update(update_fields)
-    return _enrich_fault(document)
+    resolve_action_notifications(
+        "fault",
+        document["_id"],
+        action_type="review_fault",
+        completed_by=current_user_id,
+    )
+    create_notification(
+        recipient_user_id=document.get("driver_id"),
+        title="More Fault Information Required",
+        message=note,
+        category="maintenance",
+        priority="high",
+        reference_type="fault",
+        reference_id=document["_id"],
+        action_type="provide_fault_info",
+        action_url="fault-history",
+        action_label="Update fault report",
+    )
+    return _enrich_single_fault(document)
 
 
 def convert_fault_to_maintenance(fault_id: str, current_user_id: str) -> dict:
@@ -964,7 +1180,21 @@ def convert_fault_to_maintenance(fault_id: str, current_user_id: str) -> dict:
         "created_at": timestamp,
         "updated_at": timestamp,
     }
-    result = maintenance_jobs_collection().insert_one(maintenance_job)
+    try:
+        result = maintenance_jobs_collection().insert_one(maintenance_job)
+    except DuplicateKeyError:
+        # A concurrent admin may have converted this fault. Return the existing
+        # linked job as a conflict-safe success path instead of leaking a 500.
+        existing_job = maintenance_jobs_collection().find_one({"fault_id": document["_id"]})
+        if existing_job:
+            resolve_action_notifications(
+                "fault",
+                document["_id"],
+                action_type="link_fault_maintenance",
+                completed_by=current_user_id,
+            )
+            return serialize_maintenance_job(existing_job)
+        raise ApiError("This fault is already linked to a maintenance job.", status_code=409)
 
     update_fields = {
         "status": "converted_to_maintenance",
@@ -975,7 +1205,13 @@ def convert_fault_to_maintenance(fault_id: str, current_user_id: str) -> dict:
     }
     faults_collection().update_one({"_id": document["_id"]}, {"$set": update_fields})
     document.update(update_fields)
-    return _enrich_fault(document)
+    resolve_action_notifications(
+        "fault",
+        document["_id"],
+        action_type="link_fault_maintenance",
+        completed_by=current_user_id,
+    )
+    return _enrich_single_fault(document)
 
 
 def list_fault_options(current_role: str) -> dict:

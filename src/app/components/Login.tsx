@@ -22,8 +22,8 @@ interface LoginResponse {
 export default function Login({ onLogin }: LoginProps) {
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(false);
-  const [emailOrPhone, setEmailOrPhone] = useState('owner@fluxfleet.com');
-  const [password, setPassword] = useState('Owner@12345');
+  const [emailOrPhone, setEmailOrPhone] = useState('');
+  const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [loginError, setLoginError] = useState('');
 
@@ -100,7 +100,7 @@ export default function Login({ onLogin }: LoginProps) {
                   value={emailOrPhone}
                   onChange={(e) => setEmailOrPhone(e.target.value)}
                   className="block w-full pl-10 pr-3 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#2563EB] focus:border-transparent transition-all bg-white"
-                  placeholder="owner@fluxfleet.com or +1234567890"
+                  placeholder="Enter your email or phone number"
                   required
                 />
               </div>

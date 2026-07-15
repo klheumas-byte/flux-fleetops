@@ -11,6 +11,11 @@ from .company_funds import company_funds_bp
 from .customers import customers_bp
 from .dashboard import dashboard_bp
 from .deposits import deposits_bp
+from .dispatch import dispatch_bp
+from .dispatch_financials import dispatch_financials_bp
+from .dispatch_opportunities import dispatch_opportunities_bp
+from .dispatch_planner import dispatch_planner_bp
+from .dispatch_requests import dispatch_requests_bp
 from .driver_portal import driver_portal_bp
 from .drivers import drivers_bp
 from .expenses import expenses_bp
@@ -28,10 +33,13 @@ from .rides import rides_bp
 from .system_settings import system_settings_bp
 from .users import users_bp
 from .vehicles import vehicles_bp
+from .vehicle_movements import vehicle_movements_bp
 from .wallets import wallets_bp
 
 
 def register_blueprints(app: Flask) -> None:
+    if app.extensions.get("flux_blueprints_registered"):
+        return
     app.register_blueprint(analytics_bp, url_prefix="/api/analytics")
     app.register_blueprint(admins_bp, url_prefix="/api/admins")
     app.register_blueprint(assignments_bp, url_prefix="/api/assignments")
@@ -44,6 +52,11 @@ def register_blueprints(app: Flask) -> None:
     app.register_blueprint(customers_bp, url_prefix="/customers", name="customers_legacy")
     app.register_blueprint(dashboard_bp, url_prefix="/api/dashboard")
     app.register_blueprint(deposits_bp, url_prefix="/api/deposits")
+    app.register_blueprint(dispatch_bp, url_prefix="/api/dispatch")
+    app.register_blueprint(dispatch_financials_bp, url_prefix="/api/dispatch-financials")
+    app.register_blueprint(dispatch_opportunities_bp, url_prefix="/api/dispatch-opportunities")
+    app.register_blueprint(dispatch_planner_bp, url_prefix="/api/dispatch-planner")
+    app.register_blueprint(dispatch_requests_bp, url_prefix="/api/dispatch-requests")
     app.register_blueprint(driver_portal_bp, url_prefix="/api/driver")
     app.register_blueprint(drivers_bp, url_prefix="/api/drivers")
     app.register_blueprint(expenses_bp, url_prefix="/api/expenses")
@@ -61,4 +74,6 @@ def register_blueprints(app: Flask) -> None:
     app.register_blueprint(system_settings_bp, url_prefix="/api/system-settings")
     app.register_blueprint(users_bp, url_prefix="/api/users")
     app.register_blueprint(vehicles_bp, url_prefix="/api/vehicles")
+    app.register_blueprint(vehicle_movements_bp, url_prefix="/api/vehicle-movements")
     app.register_blueprint(wallets_bp, url_prefix="/api/wallets")
+    app.extensions["flux_blueprints_registered"] = True

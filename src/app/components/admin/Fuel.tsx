@@ -52,8 +52,8 @@ interface FuelLog {
   litres: number;
   amount: number;
   price_per_litre: number;
-  odometer_reading: number;
-  receipt_image: string | null;
+  odometer_reading: number | null;
+  receipt_image: string | { provider?: string; thumbnail_url?: string; public_url?: string } | null;
   notes: string | null;
   status: FuelLogStatus;
   rejection_reason: string | null;
@@ -534,7 +534,7 @@ export default function FuelManagement() {
                         </div>
                       </td>
                       <td className="px-6 py-4 text-sm text-gray-700">
-                        <div>{log.odometer_reading.toLocaleString()} km</div>
+                        <div>{log.odometer_reading != null ? `${log.odometer_reading.toLocaleString()} km` : 'Odometer unavailable'}</div>
                         <div className="text-xs text-gray-500">
                           {log.cost_per_km != null ? `${log.cost_per_km.toFixed(2)} / km` : 'No previous odometer'}
                         </div>

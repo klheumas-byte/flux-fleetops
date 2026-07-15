@@ -15,10 +15,11 @@ from models.user import serialize_user
 from models.vehicle import serialize_vehicle
 from services.assignment_service import get_active_assignment_for_driver
 from services.maintenance_service import create_maintenance_job
-from services.notification_service import create_notification, notify_roles
+from services.notification_service import create_notification, notify_roles, resolve_action_notifications
 from utils.api_error import ApiError
 from utils.file_validation import validate_document_upload
 from utils.mongo_indexes import ensure_indexes_for_collection
+from utils.performance import build_cache_key, get_ttl_cached, set_ttl_cached
 
 
 ALLOWED_PREVENTIVE_TYPES = {
@@ -45,13 +46,18 @@ ALLOWED_RECURRENCE_TYPES = {
     "every_2_months",
     "quarterly",
     "custom_days",
+    "custom_months",
+    "yearly",
     "mileage_based",
     "both_time_and_mileage",
 }
 ALLOWED_SCHEDULE_TYPES = {"date_based", "mileage_based", "both"}
+ALLOWED_ODOMETER_SOURCES = {"manual", "tracker", "gps_trip", "map_estimate", "estimated", "unavailable"}
 ALLOWED_SCHEDULE_STATUSES = {"active", "due_soon", "due", "overdue", "completed", "paused"}
 ALLOWED_COMPLIANCE_STATUSES = {"active", "due_soon", "expired", "renewed", "inactive"}
 ALLOWED_COMPLIANCE_RENEWAL_FREQUENCIES = {"yearly", "every_6_months", "quarterly", "monthly", "custom"}
+_ODOMETER_UNSET = object()
+_CACHED_ODOMETER_NONE = object()
 
 DEFAULT_PREVENTIVE_TEMPLATES = [
     {
@@ -215,6 +221,27 @@ def compliance_records_collection():
     return get_collection("vehicle_compliance_records")
 
 
+def _serialize_vehicle_summary(vehicle_document: dict | None):
+    if not vehicle_document:
+        return None
+    return {
+        "id": str(vehicle_document.get("_id")),
+        "registration_number": vehicle_document.get("registration_number"),
+        "make": vehicle_document.get("make"),
+        "model": vehicle_document.get("model"),
+    }
+
+
+def _serialize_user_summary(user_document: dict | None):
+    if not user_document:
+        return None
+    return {
+        "id": str(user_document.get("_id")),
+        "full_name": user_document.get("full_name"),
+        "role": str(user_document.get("role") or "").strip().lower() or None,
+    }
+
+
 def ensure_preventive_maintenance_indexes():
     ensure_indexes_for_collection(
         preventive_maintenance_collection(),
@@ -231,6 +258,7 @@ def ensure_preventive_maintenance_indexes():
             {"keys": [("updated_at", DESCENDING)]},
             {"keys": [("vehicle_id", ASCENDING), ("created_at", DESCENDING)]},
             {"keys": [("status", ASCENDING), ("created_at", DESCENDING)]},
+            {"keys": [("status", ASCENDING), ("next_due_date", ASCENDING)]},
             {"keys": [("vehicle_id", ASCENDING), ("status", ASCENDING)]},
             {"keys": [("vehicle_id", ASCENDING), ("next_due_date", ASCENDING)]},
             {"keys": [("vehicle_id", ASCENDING), ("due_date", ASCENDING)], "options": {"sparse": True}},
@@ -335,7 +363,7 @@ def _validate_recurrence_type(value: str | None):
     recurrence_type = (value or "").strip().lower()
     if recurrence_type not in ALLOWED_RECURRENCE_TYPES:
         raise ApiError(
-            "recurrence_type must be one of: weekly, every_2_weeks, monthly, every_2_months, quarterly, custom_days, mileage_based, both_time_and_mileage.",
+            "recurrence_type must be one of: weekly, every_2_weeks, monthly, every_2_months, quarterly, yearly, custom_days, custom_months, mileage_based, both_time_and_mileage.",
             status_code=400,
         )
     return recurrence_type
@@ -430,6 +458,53 @@ def _get_user_document(user_id: str | ObjectId, field_name: str = "user_id"):
     return document
 
 
+def _get_authenticated_actor_document(current_user_id: str, current_role: str | None) -> dict:
+    if not ObjectId.is_valid(str(current_user_id)):
+        raise ApiError(
+            "Your login session no longer matches an active user. Please sign in again.",
+            status_code=401,
+        )
+    document = users_collection().find_one({"_id": ObjectId(str(current_user_id))})
+    normalized_role = str(current_role or "").strip().lower() or None
+    if not document or document.get("status") != "active":
+        raise ApiError(
+            "Your login session no longer matches an active user. Please sign in again.",
+            status_code=401,
+        )
+    if normalized_role and str(document.get("role") or "").strip().lower() != normalized_role:
+        raise ApiError(
+            "Your login session no longer matches an active user. Please sign in again.",
+            status_code=401,
+        )
+    return document
+
+
+def _get_valid_assigned_admin_document(assigned_admin_id: ObjectId | str | None) -> dict | None:
+    if not isinstance(assigned_admin_id, ObjectId):
+        return None
+    document = users_collection().find_one({"_id": assigned_admin_id})
+    if not document:
+        return None
+    if document.get("role") not in {"owner", "admin"}:
+        return None
+    if document.get("status") != "active":
+        return None
+    return document
+
+
+def _apply_assigned_admin_state(schedule: dict, document: dict, assigned_admin_document: dict | None):
+    schedule["assigned_admin"] = serialize_user(assigned_admin_document) if assigned_admin_document else None
+    assigned_admin_id = document.get("assigned_admin_id")
+    assigned_admin_unavailable = bool(assigned_admin_id and assigned_admin_document is None)
+    schedule["assigned_admin_unavailable"] = assigned_admin_unavailable
+    schedule["assigned_admin_notice"] = (
+        "The schedule can be edited, but its previous assignee is unavailable."
+        if assigned_admin_unavailable
+        else None
+    )
+    return schedule
+
+
 def _get_schedule_document(schedule_id: str | ObjectId):
     schedule_object_id = _to_object_id(schedule_id, "preventive_maintenance_id")
     document = preventive_maintenance_collection().find_one({"_id": schedule_object_id})
@@ -513,11 +588,16 @@ def _resolve_recurrence_defaults(recurrence_type: str, interval_days, interval_m
     elif recurrence_type == "quarterly":
         resolved_months = 3
         resolved_days = None
+    elif recurrence_type == "yearly":
+        resolved_months = 12
+        resolved_days = None
     elif recurrence_type == "mileage_based":
         resolved_days = None
         resolved_months = None
     elif recurrence_type == "custom_days" and resolved_days is None:
         raise ApiError("interval_days is required for custom_days recurrence.", status_code=400)
+    elif recurrence_type == "custom_months" and resolved_months is None:
+        raise ApiError("interval_months is required for custom_months recurrence.", status_code=400)
     elif recurrence_type == "both_time_and_mileage":
         if resolved_months is None and resolved_days is None:
             raise ApiError(
@@ -547,7 +627,7 @@ def _calculate_next_due_values(base_date, base_odometer, recurrence_type, interv
 
     if recurrence_type in {"weekly", "every_2_weeks", "custom_days"} and interval_days:
         next_due_date = base_date + timedelta(days=int(interval_days))
-    elif recurrence_type in {"monthly", "every_2_months", "quarterly"} and interval_months:
+    elif recurrence_type in {"monthly", "every_2_months", "quarterly", "yearly", "custom_months"} and interval_months:
         next_due_date = _add_months(base_date, int(interval_months))
     elif recurrence_type == "both_time_and_mileage":
         if interval_months:
@@ -562,31 +642,78 @@ def _calculate_next_due_values(base_date, base_odometer, recurrence_type, interv
 
 
 def _extract_vehicle_current_odometer(vehicle_id: ObjectId | str, fallback_odometer=None):
+    started_at = perf_counter()
+    cache_key = build_cache_key("preventive_odometer", vehicle_id=str(vehicle_id))
+    cached = get_ttl_cached(cache_key)
+    if cached is _CACHED_ODOMETER_NONE:
+        current_app.logger.info(
+            "[Flux Preventive Maintenance] odometer vehicle_id=%s cache_hit=none duration_ms=%.2f",
+            vehicle_id,
+            (perf_counter() - started_at) * 1000,
+        )
+        return None
+    if cached is not None:
+        current_app.logger.info(
+            "[Flux Preventive Maintenance] odometer vehicle_id=%s cache_hit=value duration_ms=%.2f",
+            vehicle_id,
+            (perf_counter() - started_at) * 1000,
+        )
+        return cached
+
     candidates = []
     if isinstance(fallback_odometer, (int, float)):
         candidates.append(float(fallback_odometer))
 
     vehicle_query_candidates = _vehicle_id_query_candidates(str(vehicle_id))
     if not vehicle_query_candidates:
+        current_app.logger.info(
+            "[Flux Preventive Maintenance] odometer vehicle_id=%s candidates=0 duration_ms=%.2f",
+            vehicle_id,
+            (perf_counter() - started_at) * 1000,
+        )
         return max(candidates) if candidates else None
 
-    latest_fuel = fuel_logs_collection().find(
+    latest_fuel = fuel_logs_collection().find_one(
         {"vehicle_id": {"$in": vehicle_query_candidates}, "odometer_reading": {"$ne": None}},
         {"odometer_reading": 1},
-    ).sort([("fuel_date", DESCENDING), ("created_at", DESCENDING)]).limit(10)
-    for item in latest_fuel:
-        if isinstance(item.get("odometer_reading"), (int, float)):
-            candidates.append(float(item["odometer_reading"]))
+        sort=[("fuel_date", DESCENDING), ("created_at", DESCENDING)],
+    )
+    if latest_fuel and isinstance(latest_fuel.get("odometer_reading"), (int, float)):
+        resolved = float(latest_fuel["odometer_reading"])
+        set_ttl_cached(cache_key, resolved, ttl_seconds=60)
+        current_app.logger.info(
+            "[Flux Preventive Maintenance] odometer vehicle_id=%s source=fuel duration_ms=%.2f",
+            vehicle_id,
+            (perf_counter() - started_at) * 1000,
+        )
+        return resolved
 
-    latest_jobs = maintenance_jobs_collection().find(
+    if candidates:
+        resolved = max(candidates)
+        set_ttl_cached(cache_key, resolved, ttl_seconds=60)
+        current_app.logger.info(
+            "[Flux Preventive Maintenance] odometer vehicle_id=%s source=fallback duration_ms=%.2f",
+            vehicle_id,
+            (perf_counter() - started_at) * 1000,
+        )
+        return resolved
+
+    latest_jobs = maintenance_jobs_collection().find_one(
         {"vehicle_id": {"$in": vehicle_query_candidates}, "odometer_reading": {"$ne": None}},
         {"odometer_reading": 1},
-    ).sort([("updated_at", DESCENDING), ("created_at", DESCENDING)]).limit(10)
-    for item in latest_jobs:
-        if isinstance(item.get("odometer_reading"), (int, float)):
-            candidates.append(float(item["odometer_reading"]))
+        sort=[("updated_at", DESCENDING), ("created_at", DESCENDING)],
+    )
+    if latest_jobs and isinstance(latest_jobs.get("odometer_reading"), (int, float)):
+        resolved = float(latest_jobs["odometer_reading"])
+        set_ttl_cached(cache_key, resolved, ttl_seconds=60)
+        current_app.logger.info(
+            "[Flux Preventive Maintenance] odometer vehicle_id=%s source=maintenance duration_ms=%.2f",
+            vehicle_id,
+            (perf_counter() - started_at) * 1000,
+        )
+        return resolved
 
-    latest_rides = rides_collection().find(
+    latest_ride = rides_collection().find_one(
         {
             "vehicle_id": {"$in": vehicle_query_candidates},
             "$or": [
@@ -595,16 +722,25 @@ def _extract_vehicle_current_odometer(vehicle_id: ObjectId | str, fallback_odome
             ],
         },
         {"odometer_start": 1, "odometer_end": 1},
-    ).sort([("trip_date", DESCENDING), ("created_at", DESCENDING)]).limit(20)
-    for item in latest_rides:
+        sort=[("trip_date", DESCENDING), ("created_at", DESCENDING)],
+    )
+    if latest_ride:
         for field_name in ("odometer_end", "odometer_start"):
-            if isinstance(item.get(field_name), (int, float)):
-                candidates.append(float(item[field_name]))
+            if isinstance(latest_ride.get(field_name), (int, float)):
+                candidates.append(float(latest_ride[field_name]))
 
-    return max(candidates) if candidates else None
+    resolved = max(candidates) if candidates else None
+    set_ttl_cached(cache_key, _CACHED_ODOMETER_NONE if resolved is None else resolved, ttl_seconds=60)
+    current_app.logger.info(
+        "[Flux Preventive Maintenance] odometer vehicle_id=%s source=ride_or_none duration_ms=%.2f resolved=%s",
+        vehicle_id,
+        (perf_counter() - started_at) * 1000,
+        resolved,
+    )
+    return resolved
 
 
-def _determine_status(document: dict):
+def _determine_status(document: dict, *, current_odometer: float | None | object = _ODOMETER_UNSET):
     if document.get("status") == "paused":
         return "paused"
 
@@ -623,10 +759,11 @@ def _determine_status(document: dict):
         elif next_due_date <= today + timedelta(days=int(warning_days_before)):
             due_soon_by_date = True
 
-    current_odometer = _extract_vehicle_current_odometer(
-        document.get("vehicle_id"),
-        fallback_odometer=document.get("last_done_odometer"),
-    )
+    if current_odometer is _ODOMETER_UNSET:
+        current_odometer = _extract_vehicle_current_odometer(
+            document.get("vehicle_id"),
+            fallback_odometer=document.get("last_done_odometer"),
+        )
     next_due_odometer = document.get("next_due_odometer")
     warning_km_before = float(document.get("warning_km_before") or 0)
     overdue_by_km = False
@@ -695,6 +832,9 @@ def _notify_schedule_status(document: dict):
         priority=priority,
         reference_type="preventive_maintenance",
         reference_id=document["_id"],
+        action_type="generate_maintenance_job" if status in {"due", "overdue"} else None,
+        action_url="preventive-maintenance" if status in {"due", "overdue"} else None,
+        action_label="Generate maintenance job" if status in {"due", "overdue"} else None,
     )
 
     preventive_maintenance_collection().update_one(
@@ -708,20 +848,22 @@ def _notify_schedule_status(document: dict):
 def _enrich_schedule(document: dict):
     schedule = serialize_preventive_schedule(document)
     vehicle_document = vehicles_collection().find_one({"_id": document.get("vehicle_id")})
-    assigned_admin_document = users_collection().find_one({"_id": document.get("assigned_admin_id")}) if document.get("assigned_admin_id") else None
+    assigned_admin_document = _get_valid_assigned_admin_document(document.get("assigned_admin_id"))
     schedule["vehicle"] = serialize_vehicle(vehicle_document) if vehicle_document else None
-    schedule["assigned_admin"] = serialize_user(assigned_admin_document) if assigned_admin_document else None
+    _apply_assigned_admin_state(schedule, document, assigned_admin_document)
     schedule["current_odometer"] = _extract_vehicle_current_odometer(document.get("vehicle_id"), document.get("last_done_odometer"))
     return schedule
 
 
-def _enrich_schedules_for_vehicle_endpoint(documents: list[dict]):
+def _build_schedule_context(documents: list[dict]):
+    started_at = perf_counter()
     if not documents:
-        return []
+        return {}, {}, {}
 
     unique_vehicle_ids: list[ObjectId] = []
     seen_vehicle_ids: set[str] = set()
     admin_ids: set[ObjectId] = set()
+    fallback_odometer_by_vehicle: dict[str, float | None] = {}
 
     for document in documents:
         vehicle_id = document.get("vehicle_id")
@@ -730,6 +872,11 @@ def _enrich_schedules_for_vehicle_endpoint(documents: list[dict]):
             if vehicle_key not in seen_vehicle_ids:
                 seen_vehicle_ids.add(vehicle_key)
                 unique_vehicle_ids.append(vehicle_id)
+            if vehicle_key not in fallback_odometer_by_vehicle:
+                fallback_value = document.get("last_done_odometer")
+                fallback_odometer_by_vehicle[vehicle_key] = (
+                    float(fallback_value) if isinstance(fallback_value, (int, float)) else None
+                )
         assigned_admin_id = document.get("assigned_admin_id")
         if isinstance(assigned_admin_id, ObjectId):
             admin_ids.add(assigned_admin_id)
@@ -737,7 +884,10 @@ def _enrich_schedules_for_vehicle_endpoint(documents: list[dict]):
     vehicle_map = (
         {
             str(vehicle["_id"]): vehicle
-            for vehicle in vehicles_collection().find({"_id": {"$in": unique_vehicle_ids}})
+            for vehicle in vehicles_collection().find(
+                {"_id": {"$in": unique_vehicle_ids}},
+                {"registration_number": 1, "make": 1, "model": 1, "current_odometer": 1},
+            )
         }
         if unique_vehicle_ids
         else {}
@@ -745,26 +895,92 @@ def _enrich_schedules_for_vehicle_endpoint(documents: list[dict]):
     admin_map = (
         {
             str(user["_id"]): user
-            for user in users_collection().find({"_id": {"$in": list(admin_ids)}})
+            for user in users_collection().find({"_id": {"$in": list(admin_ids)}}, {"full_name": 1, "role": 1})
         }
         if admin_ids
         else {}
     )
-    odometer_by_vehicle = {
-        str(vehicle_id): _extract_vehicle_current_odometer(vehicle_id)
-        for vehicle_id in unique_vehicle_ids
-    }
+    odometer_by_vehicle = {}
+    for vehicle_id in unique_vehicle_ids:
+        vehicle_key = str(vehicle_id)
+        vehicle_document = vehicle_map.get(vehicle_key)
+        vehicle_current_odometer = vehicle_document.get("current_odometer") if vehicle_document else None
+        fallback_odometer = vehicle_current_odometer
+        if not isinstance(fallback_odometer, (int, float)):
+            fallback_odometer = fallback_odometer_by_vehicle.get(vehicle_key)
+        odometer_by_vehicle[vehicle_key] = _extract_vehicle_current_odometer(
+            vehicle_id,
+            fallback_odometer=fallback_odometer,
+        )
+    current_app.logger.info(
+        "[Flux Preventive Maintenance] schedule_context documents=%s vehicles=%s admins=%s duration_ms=%.2f",
+        len(documents),
+        len(unique_vehicle_ids),
+        len(admin_ids),
+        (perf_counter() - started_at) * 1000,
+    )
+    return vehicle_map, admin_map, odometer_by_vehicle
 
+
+def _serialize_schedule_with_context(
+    document: dict,
+    *,
+    vehicle_document: dict | None,
+    assigned_admin_document: dict | None,
+    current_odometer: float | None,
+    status_override: str | None = None,
+):
+    schedule = serialize_preventive_schedule(document)
+    schedule["vehicle"] = _serialize_vehicle_summary(vehicle_document)
+    _apply_assigned_admin_state(schedule, document, assigned_admin_document)
+    schedule["current_odometer"] = current_odometer
+    if status_override is not None:
+        schedule["status"] = status_override
+    return schedule
+
+
+def _serialize_schedule_list_documents(documents: list[dict]):
+    vehicle_map, admin_map, odometer_by_vehicle = _build_schedule_context(documents)
+    linked_job_ids = {
+        document.get("generated_maintenance_job_id") or document.get("active_job_id")
+        for document in documents
+        if isinstance(document.get("generated_maintenance_job_id") or document.get("active_job_id"), ObjectId)
+    }
+    linked_job_map = {
+        job["_id"]: job
+        for job in maintenance_jobs_collection().find(
+            {"_id": {"$in": list(linked_job_ids)}},
+            {"status": 1, "title": 1, "created_at": 1, "preventive_schedule_id": 1},
+        )
+    } if linked_job_ids else {}
     schedules = []
     for document in documents:
-        schedule = serialize_preventive_schedule(document)
-        vehicle_document = vehicle_map.get(str(document.get("vehicle_id")))
-        assigned_admin_document = admin_map.get(str(document.get("assigned_admin_id")))
-        schedule["vehicle"] = serialize_vehicle(vehicle_document) if vehicle_document else None
-        schedule["assigned_admin"] = serialize_user(assigned_admin_document) if assigned_admin_document else None
-        schedule["current_odometer"] = odometer_by_vehicle.get(str(document.get("vehicle_id")))
+        vehicle_id = document.get("vehicle_id")
+        vehicle_key = str(vehicle_id) if isinstance(vehicle_id, ObjectId) else str(vehicle_id or "")
+        current_odometer = odometer_by_vehicle.get(vehicle_key)
+        schedule = _serialize_schedule_with_context(
+                document,
+                vehicle_document=vehicle_map.get(vehicle_key),
+                assigned_admin_document=admin_map.get(str(document.get("assigned_admin_id"))),
+                current_odometer=current_odometer,
+                status_override=_determine_status(document, current_odometer=current_odometer),
+            )
+        linked_job_id = document.get("generated_maintenance_job_id") or document.get("active_job_id")
+        linked_job = linked_job_map.get(linked_job_id)
+        schedule["active_job"] = {
+            "id": str(linked_job["_id"]),
+            "status": linked_job.get("status"),
+            "title": linked_job.get("title"),
+            "created_at": linked_job.get("created_at").isoformat() if linked_job.get("created_at") else None,
+        } if linked_job and linked_job.get("status") not in {"completed", "cancelled"} else None
         schedules.append(schedule)
     return schedules
+
+
+def _enrich_schedules_for_vehicle_endpoint(documents: list[dict]):
+    if not documents:
+        return []
+    return _serialize_schedule_list_documents(documents)
 
 
 def _build_default_schedule_document(template: dict, vehicle_document: dict, created_by: ObjectId, assigned_admin_id: ObjectId | None):
@@ -800,6 +1016,7 @@ def _build_default_schedule_document(template: dict, vehicle_document: dict, cre
         "last_done_odometer": None,
         "next_due_date": next_due_date,
         "next_due_odometer": next_due_odometer,
+        "odometer_source": "unavailable",
         "warning_days_before": template.get("warning_days_before", 0),
         "warning_km_before": template.get("warning_km_before", 0),
         "status": "active",
@@ -879,6 +1096,7 @@ def _vehicle_id_query_candidates(vehicle_id: str | None):
 
 
 def _query_preventive_schedule_documents(*, current_user_id: str, current_role: str, vehicle_id: str | None = None):
+    started_at = perf_counter()
     query = {}
     if current_role == "driver":
         assigned_vehicle_id = _resolve_driver_vehicle_for_driver(current_user_id)
@@ -891,25 +1109,37 @@ def _query_preventive_schedule_documents(*, current_user_id: str, current_role: 
             return []
         query["vehicle_id"] = {"$in": vehicle_candidates}
 
-    return list(
+    documents = list(
         preventive_maintenance_collection()
         .find(query)
         .sort([("status", ASCENDING), ("next_due_date", ASCENDING), ("created_at", DESCENDING)])
     )
+    current_app.logger.info(
+        "[Flux Preventive Maintenance] schedule_query role=%s vehicle_id=%s count=%s duration_ms=%.2f",
+        current_role,
+        vehicle_id,
+        len(documents),
+        (perf_counter() - started_at) * 1000,
+    )
+    return documents
 
 
 def list_preventive_maintenance(current_user_id: str, current_role: str, vehicle_id: str | None = None):
+    started_at = perf_counter()
     _ensure_default_schedules(current_user_id, current_role, vehicle_id=vehicle_id)
     documents = _query_preventive_schedule_documents(
         current_user_id=current_user_id,
         current_role=current_role,
         vehicle_id=vehicle_id,
     )
-    schedules = []
-    for document in documents:
-        document = _sync_status(document)
-        _notify_schedule_status(document)
-        schedules.append(_enrich_schedule(document))
+    schedules = _serialize_schedule_list_documents(documents)
+    current_app.logger.info(
+        "[Flux Preventive Maintenance] list_preventive_maintenance role=%s vehicle_id=%s count=%s duration_ms=%.2f",
+        current_role,
+        vehicle_id,
+        len(schedules),
+        (perf_counter() - started_at) * 1000,
+    )
     return schedules
 
 
@@ -995,9 +1225,8 @@ def get_preventive_schedule_by_id(schedule_id: str, current_user_id: str, curren
         assigned_vehicle_id = _resolve_driver_vehicle_for_driver(current_user_id)
         if assigned_vehicle_id is None or document.get("vehicle_id") != assigned_vehicle_id:
             raise ApiError("You do not have permission to view this schedule.", status_code=403)
-    document = _sync_status(document)
-    _notify_schedule_status(document)
-    return _enrich_schedule(document)
+    schedules = _serialize_schedule_list_documents([document])
+    return schedules[0] if schedules else {}
 
 
 def list_due_soon_schedules(current_user_id: str, current_role: str, vehicle_id: str | None = None):
@@ -1076,6 +1305,11 @@ def _validate_schedule_payload(payload: dict, partial: bool = False, existing_do
         update_fields["next_due_date"] = _serialize_date(_parse_date(payload.get("next_due_date"), "next_due_date", required=False))
     if "next_due_odometer" in payload:
         update_fields["next_due_odometer"] = _validate_positive_number(payload.get("next_due_odometer"), "next_due_odometer")
+    if "odometer_source" in payload or not partial:
+        odometer_source = str(payload.get("odometer_source") or "unavailable").strip().lower()
+        if odometer_source not in ALLOWED_ODOMETER_SOURCES:
+            raise ApiError("odometer_source must be manual, tracker, gps_trip, map_estimate, estimated, or unavailable.", status_code=400)
+        update_fields["odometer_source"] = odometer_source
     if "warning_days_before" in payload or not partial:
         update_fields["warning_days_before"] = _validate_positive_int(payload.get("warning_days_before"), "warning_days_before") or 0
     if "warning_km_before" in payload or not partial:
@@ -1083,9 +1317,9 @@ def _validate_schedule_payload(payload: dict, partial: bool = False, existing_do
     if "assigned_admin_id" in payload or not partial:
         assigned_admin_id = _to_object_id(payload.get("assigned_admin_id"), "assigned_admin_id", required=False)
         if assigned_admin_id:
-            admin_document = _get_user_document(assigned_admin_id, "assigned_admin_id")
-            if admin_document.get("role") not in {"owner", "admin"}:
-                raise ApiError("assigned_admin_id must belong to an owner or admin.", status_code=400)
+            admin_document = _get_valid_assigned_admin_document(assigned_admin_id)
+            if not admin_document:
+                raise ApiError("Select a valid maintenance admin.", status_code=400)
         update_fields["assigned_admin_id"] = assigned_admin_id
     if "status" in payload:
         update_fields["status"] = _validate_status(payload.get("status"), required=True)
@@ -1097,6 +1331,7 @@ def create_preventive_schedule(payload: dict, current_user_id: str, current_role
     if current_role not in {"owner", "admin"}:
         raise ApiError("You do not have permission to create preventive maintenance schedules.", status_code=403)
 
+    _get_authenticated_actor_document(current_user_id, current_role)
     vehicle_document, update_fields = _validate_schedule_payload(payload, partial=False)
     existing = preventive_maintenance_collection().find_one(
         {
@@ -1138,6 +1373,7 @@ def update_preventive_schedule(schedule_id: str, payload: dict, current_user_id:
     if current_role not in {"owner", "admin"}:
         raise ApiError("You do not have permission to update preventive maintenance schedules.", status_code=403)
 
+    _get_authenticated_actor_document(current_user_id, current_role)
     document = _get_schedule_document(schedule_id)
     vehicle_document, update_fields = _validate_schedule_payload(payload, partial=True, existing_document=document)
     del vehicle_document
@@ -1168,7 +1404,20 @@ def complete_preventive_schedule(schedule_id: str, payload: dict, current_user_i
     if current_role not in {"owner", "admin"}:
         raise ApiError("You do not have permission to complete preventive maintenance schedules.", status_code=403)
 
+    _get_authenticated_actor_document(current_user_id, current_role)
     document = _get_schedule_document(schedule_id)
+    source_job_id = _to_object_id(payload.get("source_job_id"), "source_job_id", required=False)
+    linked_job_id = document.get("generated_maintenance_job_id") or document.get("active_job_id")
+    if source_job_id and linked_job_id not in {None, source_job_id}:
+        raise ApiError("This maintenance job is not the active job for the preventive schedule.", status_code=409)
+    # Completion can be retried after a transient response failure.  Do not
+    # append a second schedule/vehicle-history entry for the same source job.
+    if source_job_id and any(
+        str(entry.get("maintenance_job_id")) == str(source_job_id)
+        for entry in (document.get("completion_history") or [])
+        if isinstance(entry, dict) and entry.get("maintenance_job_id")
+    ):
+        return _enrich_schedule(document)
     vehicle_document = _get_vehicle_document(document.get("vehicle_id"))
     completion_date = _parse_date(payload.get("completed_date") or payload.get("last_done_date") or date.today().isoformat(), "completed_date", required=True)
     completion_odometer = _validate_positive_number(
@@ -1193,8 +1442,14 @@ def complete_preventive_schedule(schedule_id: str, payload: dict, current_user_i
         next_due_date = _serialize_date(override_next_due_date)
     if override_next_due_odometer is not None:
         next_due_odometer = override_next_due_odometer
+    elif recurrence_type in {"mileage_based", "both_time_and_mileage"} and next_due_odometer is None:
+        next_due_odometer = document.get("next_due_odometer")
 
     history_entry = {
+        # Keep the originating job link on vehicle history.  This is present
+        # for generated jobs and makes the history row safely traceable without
+        # requiring a second generic maintenance-history insert.
+        "maintenance_job_id": str(source_job_id) if source_job_id else None,
         "completed_date": completion_date.isoformat(),
         "completed_odometer": completion_odometer,
         "mechanic_name": _normalize_text(payload.get("mechanic_name")),
@@ -1203,6 +1458,7 @@ def complete_preventive_schedule(schedule_id: str, payload: dict, current_user_i
         "condition_notes": _normalize_text(payload.get("condition_notes")),
         "next_due_date": next_due_date,
         "next_due_odometer": next_due_odometer,
+        "odometer_source": "manual" if completion_odometer is not None else "unavailable",
         "completed_by": _to_object_id(current_user_id, "completed_by"),
         "completed_at": timestamp,
     }
@@ -1218,11 +1474,13 @@ def complete_preventive_schedule(schedule_id: str, payload: dict, current_user_i
         "condition_notes": history_entry["condition_notes"],
         "next_due_date": next_due_date,
         "next_due_odometer": next_due_odometer,
+        "odometer_source": "manual" if completion_odometer is not None else "unavailable",
         "completed_by": history_entry["completed_by"],
         "status": "active",
         "updated_at": timestamp,
         "last_notification_status": None,
         "generated_maintenance_job_id": None,
+        "active_job_id": None,
     }
     preventive_maintenance_collection().update_one(
         {"_id": document["_id"]},
@@ -1259,9 +1517,28 @@ def generate_maintenance_job_from_schedule(schedule_id: str, current_user_id: st
     if current_role not in {"owner", "admin"}:
         raise ApiError("You do not have permission to generate maintenance jobs from schedules.", status_code=403)
 
+    actor_document = _get_authenticated_actor_document(current_user_id, current_role)
     document = _get_schedule_document(schedule_id)
+    current_odometer = _extract_vehicle_current_odometer(document.get("vehicle_id"), document.get("last_done_odometer"))
+    current_status = _determine_status(document, current_odometer=current_odometer)
+    if current_status not in {"due", "overdue"}:
+        raise ApiError("A maintenance job can only be generated when this schedule is due or overdue.", status_code=409)
     vehicle_document = _get_vehicle_document(document.get("vehicle_id"))
+    existing_job = maintenance_jobs_collection().find_one(
+        {
+            "preventive_schedule_id": document["_id"],
+            "status": {"$nin": ["completed", "cancelled"]},
+        },
+        {"_id": 1},
+    )
+    if existing_job:
+        raise ApiError(
+            "An active maintenance job already exists for this preventive schedule.",
+            status_code=409,
+        )
+    assigned_admin_document = _get_valid_assigned_admin_document(document.get("assigned_admin_id"))
     payload = {
+        "preventive_schedule_id": str(document["_id"]),
         "vehicle_id": str(document.get("vehicle_id")),
         "maintenance_type": "servicing" if document.get("maintenance_type") != "other" else "other",
         "title": document.get("title"),
@@ -1270,10 +1547,11 @@ def generate_maintenance_job_from_schedule(schedule_id: str, current_user_id: st
         "vendor_name": None,
         "vendor_contact": None,
         "estimated_cost": None,
-        "odometer_reading": _extract_vehicle_current_odometer(document.get("vehicle_id"), document.get("last_done_odometer")),
+        "odometer_reading": current_odometer,
+        "due_odometer": document.get("next_due_odometer"),
         "start_date": date.today().isoformat(),
         "target_completion_date": document.get("next_due_date") or (date.today() + timedelta(days=7)).isoformat(),
-        "maintenance_coordinator_id": str(document.get("assigned_admin_id")) if document.get("assigned_admin_id") else None,
+        "maintenance_coordinator_id": str(assigned_admin_document["_id"]) if assigned_admin_document else str(actor_document["_id"]),
         "current_stage": "assigned_to_mechanic",
         "next_action": f"Carry out preventive maintenance: {document.get('title')}.",
         "next_follow_up_date": date.today().isoformat(),
@@ -1285,8 +1563,13 @@ def generate_maintenance_job_from_schedule(schedule_id: str, current_user_id: st
     job = create_maintenance_job(payload, current_user_id=current_user_id, current_role=current_role)
     preventive_maintenance_collection().update_one(
         {"_id": document["_id"]},
-        {"$set": {"generated_maintenance_job_id": ObjectId(job["id"]), "updated_at": now_utc()}},
+        {"$set": {
+            "generated_maintenance_job_id": ObjectId(job["id"]),
+            "active_job_id": ObjectId(job["id"]),
+            "updated_at": now_utc(),
+        }},
     )
+    resolve_action_notifications("preventive_maintenance", document["_id"], action_type="generate_maintenance_job", completed_by=current_user_id)
     return job
 
 
@@ -1427,6 +1710,46 @@ def _serialize_compliance_record_with_relations(document: dict):
     return record
 
 
+def _serialize_compliance_records_with_relations(documents: list[dict]):
+    if not documents:
+        return []
+    vehicle_ids = [document.get("vehicle_id") for document in documents if isinstance(document.get("vehicle_id"), ObjectId)]
+    compliance_type_ids = [
+        document.get("compliance_type_id")
+        for document in documents
+        if isinstance(document.get("compliance_type_id"), ObjectId)
+    ]
+    vehicle_map = (
+        {
+            vehicle["_id"]: vehicle
+            for vehicle in vehicles_collection().find(
+                {"_id": {"$in": vehicle_ids}},
+                {"registration_number": 1, "make": 1, "model": 1},
+            )
+        }
+        if vehicle_ids
+        else {}
+    )
+    compliance_type_map = (
+        {
+            compliance_type["_id"]: compliance_type
+            for compliance_type in compliance_item_types_collection().find({"_id": {"$in": compliance_type_ids}})
+        }
+        if compliance_type_ids
+        else {}
+    )
+    records = []
+    for document in documents:
+        record = serialize_compliance_record(document)
+        record["status"] = _calculate_compliance_status(document)
+        vehicle_document = vehicle_map.get(document.get("vehicle_id"))
+        compliance_type_document = compliance_type_map.get(document.get("compliance_type_id"))
+        record["vehicle"] = _serialize_vehicle_summary(vehicle_document)
+        record["compliance_type"] = serialize_compliance_type(compliance_type_document) if compliance_type_document else None
+        records.append(record)
+    return records
+
+
 def _serialize_driver_preventive_schedule(
     document: dict,
     *,
@@ -1441,11 +1764,12 @@ def _serialize_driver_preventive_schedule(
         "maintenance_item": schedule["maintenance_item"],
         "title": schedule["title"],
         "description": schedule["description"],
-        "status": _determine_status(document),
+        "status": _determine_status(document, current_odometer=current_odometer),
         "next_due_date": schedule["next_due_date"],
         "next_due_odometer": schedule["next_due_odometer"],
         "current_odometer": current_odometer,
         "completed_date": schedule["completed_date"],
+        "last_completed_service": (schedule.get("completion_history") or [None])[-1],
         "vehicle": {
             "id": str(vehicle_document.get("_id")),
             "registration_number": vehicle_document.get("registration_number"),
@@ -1480,7 +1804,6 @@ def _serialize_driver_compliance_record(
 
 
 def list_compliance_item_types(current_role: str, active_only: bool = False):
-    seed_default_compliance_item_types()
     query = {}
     if active_only or current_role == "driver":
         query["status"] = "active"
@@ -1619,7 +1942,6 @@ def create_compliance_record(payload: dict, current_user_id: str, current_role: 
 
 
 def list_compliance_records(current_user_id: str, current_role: str, vehicle_id: str | None = None):
-    seed_default_compliance_item_types()
     query = {}
     if current_role == "driver":
         assigned_vehicle_id = _resolve_driver_vehicle_for_driver(current_user_id)
@@ -1633,12 +1955,7 @@ def list_compliance_records(current_user_id: str, current_role: str, vehicle_id:
         .find(query)
         .sort([("status", ASCENDING), ("expiry_date", ASCENDING), ("created_at", DESCENDING)])
     )
-    records = []
-    for document in documents:
-        document = _sync_compliance_status(document)
-        _notify_compliance_status(document)
-        records.append(_serialize_compliance_record_with_relations(document))
-    return records
+    return _serialize_compliance_records_with_relations(documents)
 
 
 def get_driver_preventive_maintenance_snapshot(current_user_id: str) -> dict:
@@ -1652,20 +1969,50 @@ def get_driver_preventive_maintenance_snapshot(current_user_id: str) -> dict:
     # Driver portal reads stay side-effect-free so My Vehicle can render quickly.
     schedule_documents = list(
         preventive_maintenance_collection()
-        .find(vehicle_query)
+        .find(
+            vehicle_query,
+            {
+                # Driver views need schedule metadata only; never transfer
+                # legacy inline evidence fields on this hot path.
+                "data_url": 0,
+                "base64": 0,
+                "image_data": 0,
+                "binary": 0,
+            },
+        )
         .sort([("status", ASCENDING), ("next_due_date", ASCENDING), ("created_at", DESCENDING)])
     )
     compliance_documents = list(
         compliance_records_collection()
-        .find(vehicle_query)
+        .find(
+            vehicle_query,
+            {
+                # Preserve attachment metadata while excluding any legacy
+                # inline payloads from the driver response.
+                "document_upload.data_url": 0,
+                "document_upload.base64": 0,
+                "document_upload.content": 0,
+                "data_url": 0,
+                "base64": 0,
+                "binary": 0,
+            },
+        )
         .sort([("status", ASCENDING), ("expiry_date", ASCENDING), ("created_at", DESCENDING)])
     )
 
-    vehicle_document = vehicles_collection().find_one({"_id": assigned_vehicle_id})
-    current_odometer = _extract_vehicle_current_odometer(
-        assigned_vehicle_id,
-        fallback_odometer=vehicle_document.get("current_odometer") if vehicle_document else None,
+    vehicle_document = vehicles_collection().find_one(
+        {"_id": assigned_vehicle_id},
+        {"registration_number": 1, "make": 1, "model": 1, "current_odometer": 1},
     )
+    # Driver My Vehicle must not block on optional mileage history.  Use only
+    # an already materialized vehicle value or a warm cache; the full fuel/
+    # rides/maintenance fallback chain remains available to admin operations.
+    current_odometer = vehicle_document.get("current_odometer") if vehicle_document else None
+    if not isinstance(current_odometer, (int, float)):
+        cached_odometer = get_ttl_cached(
+            build_cache_key("preventive_odometer", vehicle_id=str(assigned_vehicle_id))
+        )
+        current_odometer = cached_odometer if isinstance(cached_odometer, (int, float)) else None
 
     compliance_type_ids = [
         document.get("compliance_type_id")
@@ -1779,8 +2126,8 @@ def renew_compliance_record(record_id: str, payload: dict, current_user_id: str,
     return _serialize_compliance_record_with_relations(document)
 
 
-def get_compliance_dashboard_summary(current_user_id: str, current_role: str):
-    records = list_compliance_records(current_user_id, current_role)
+def get_compliance_dashboard_summary(current_user_id: str, current_role: str, records: list[dict] | None = None):
+    records = records if records is not None else list_compliance_records(current_user_id, current_role)
     today = date.today()
     expiring_soon = [record for record in records if record.get("status") == "due_soon"]
     expired = [record for record in records if record.get("status") == "expired"]

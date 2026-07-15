@@ -1062,9 +1062,34 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
   const customerOptionsRequestRef = useRef<Promise<CustomerOptionsResponse> | null>(null);
   const customerOptionsWithDriversRequestRef = useRef<Promise<CustomerOptionsResponse> | null>(null);
   const bookingOptionsRequestRef = useRef<Promise<BookingOptionsResponse> | null>(null);
+  const customerProfileCacheRef = useRef<Record<string, CustomerRecord>>({});
+  const opportunitiesCacheRef = useRef<Record<string, CustomerOpportunityRecord[]>>({});
+  const contactsCacheRef = useRef<Record<string, CustomerContactRecord[]>>({});
+  const customerNotesCacheRef = useRef<Record<string, { notes: CustomerNoteRecord[]; timeline: CustomerTimelineEntry[] }>>({});
   usePageToastFeedback(pageError, pageNotice);
   const canEditProfileIntelligence = portal !== 'driver';
   const canAddCustomerNotes = true;
+
+  const syncRelationshipFormFromCustomer = (customer: CustomerRecord) => {
+    setRelationshipForm({
+      industry_id: customer.industry_id || '',
+      company_or_institution_name: customer.organization_name || customer.company_name || '',
+      branch_or_department: customer.branch_or_department || '',
+      position_or_role: customer.position_title || '',
+      relationship_role_id: customer.relationship_role_id || '',
+      relationship_category_id: customer.relationship_category_id || '',
+      lead_status_id: customer.lead_status_id || '',
+      customer_source_id: customer.customer_source_id || '',
+      source: customer.source || '',
+      influence_level_id: customer.influence_level_id || '',
+      government_sector_id: customer.government_sector_id || '',
+      organization_type_id: customer.organization_type_id || '',
+      network_value_id: customer.network_value_id || '',
+      opportunity_level_id: customer.opportunity_level_id || '',
+      potential_service_id: customer.potential_service_id || '',
+      relationship_notes: customer.relationship_notes || '',
+    });
+  };
 
   const clearCustomerFormErrors = () => {
     setCustomerFormError('');
@@ -1123,6 +1148,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
     try {
       const customerData = await fetchCustomers();
       setCustomers(customerData);
+      customerProfileCacheRef.current = Object.fromEntries(customerData.map((customer) => [customer.id, customer]));
       setSelectedCustomerId((current) => {
         if (current && customerData.some((customer) => customer.id === current)) {
           return current;
@@ -1174,17 +1200,27 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
     setShowContactForm(false);
     setContactForm(emptyContactForm);
     setNewNote('');
-    setOpportunities([]);
-    setContacts([]);
+    const cachedProfile = customerProfileCacheRef.current[selectedCustomerId];
+    const cachedOpportunities = opportunitiesCacheRef.current[selectedCustomerId];
+    const cachedContacts = contactsCacheRef.current[selectedCustomerId];
+    const cachedNotes = customerNotesCacheRef.current[selectedCustomerId];
+    setSelectedCustomerProfile(cachedProfile || null);
+    if (cachedProfile) {
+      syncRelationshipFormFromCustomer(cachedProfile);
+    }
+    setOpportunities(cachedOpportunities || []);
+    setContacts(cachedContacts || []);
     setLoadedOpportunitiesCustomerId(null);
     setLoadedContactsCustomerId(null);
     setOpportunitiesLoadError('');
     setContactsLoadError('');
-    setCustomerNotes([]);
-    setCustomerTimeline([]);
-    void loadCustomerProfile(selectedCustomerId).catch((error) => {
-      setPageError(getErrorMessage(error, 'Unable to load this customer profile right now.'));
-    });
+    setCustomerNotes(cachedNotes?.notes || []);
+    setCustomerTimeline(cachedNotes?.timeline || []);
+    if (!cachedProfile) {
+      void loadCustomerProfile(selectedCustomerId).catch((error) => {
+        setPageError(getErrorMessage(error, 'Unable to load this customer profile right now.'));
+      });
+    }
   }, [selectedCustomerId]);
 
   useEffect(() => {
@@ -1201,19 +1237,34 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
       });
     }
     if (activeProfileTab === 'opportunities' && loadedOpportunitiesCustomerId !== selectedCustomerId && !isLoadingOpportunities) {
+      if (opportunitiesCacheRef.current[selectedCustomerId]) {
+        setOpportunities(opportunitiesCacheRef.current[selectedCustomerId]);
+        setLoadedOpportunitiesCustomerId(selectedCustomerId);
+      } else {
       void loadCustomerOpportunities(selectedCustomerId).catch((error) => {
         setOpportunitiesLoadError(getErrorMessage(error, 'Unable to load customer opportunities right now.'));
       });
+      }
     }
     if (activeProfileTab === 'contacts' && loadedContactsCustomerId !== selectedCustomerId && !isLoadingContacts) {
+      if (contactsCacheRef.current[selectedCustomerId]) {
+        setContacts(contactsCacheRef.current[selectedCustomerId]);
+        setLoadedContactsCustomerId(selectedCustomerId);
+      } else {
       void loadCustomerContacts(selectedCustomerId).catch((error) => {
         setContactsLoadError(getErrorMessage(error, 'Unable to load customer contacts right now.'));
       });
+      }
     }
     if (activeProfileTab === 'notes' && !customerTimeline.length && !isLoadingNotes) {
-      void loadCustomerNotes(selectedCustomerId).catch((error) => {
-        setPageError(getErrorMessage(error, 'Unable to load customer notes right now.'));
-      });
+      if (customerNotesCacheRef.current[selectedCustomerId]) {
+        setCustomerNotes(customerNotesCacheRef.current[selectedCustomerId].notes);
+        setCustomerTimeline(customerNotesCacheRef.current[selectedCustomerId].timeline);
+      } else {
+        void loadCustomerNotes(selectedCustomerId).catch((error) => {
+          setPageError(getErrorMessage(error, 'Unable to load customer notes right now.'));
+        });
+      }
     }
   }, [activeProfileTab, selectedCustomerId, loadedOpportunitiesCustomerId, loadedContactsCustomerId, customerTimeline.length, isLoadingOpportunities, isLoadingContacts, isLoadingNotes, customerOptions, isLoadingCustomerOptions]);
 
@@ -1303,25 +1354,9 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
     setIsLoadingCustomerProfile(true);
     try {
       const customer = await fetchCustomerById(customerId);
+      customerProfileCacheRef.current[customerId] = customer;
       setSelectedCustomerProfile(customer);
-      setRelationshipForm({
-        industry_id: customer.industry_id || '',
-        company_or_institution_name: customer.organization_name || customer.company_name || '',
-        branch_or_department: customer.branch_or_department || '',
-        position_or_role: customer.position_title || '',
-        relationship_role_id: customer.relationship_role_id || '',
-        relationship_category_id: customer.relationship_category_id || '',
-        lead_status_id: customer.lead_status_id || '',
-        customer_source_id: customer.customer_source_id || '',
-        source: customer.source || '',
-        influence_level_id: customer.influence_level_id || '',
-        government_sector_id: customer.government_sector_id || '',
-        organization_type_id: customer.organization_type_id || '',
-        network_value_id: customer.network_value_id || '',
-        opportunity_level_id: customer.opportunity_level_id || '',
-        potential_service_id: customer.potential_service_id || '',
-        relationship_notes: customer.relationship_notes || '',
-      });
+      syncRelationshipFormFromCustomer(customer);
     } finally {
       setIsLoadingCustomerProfile(false);
     }
@@ -1331,7 +1366,9 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
     setIsLoadingOpportunities(true);
     setOpportunitiesLoadError('');
     try {
-      setOpportunities(await fetchCustomerOpportunities(customerId));
+      const nextOpportunities = await fetchCustomerOpportunities(customerId);
+      opportunitiesCacheRef.current[customerId] = nextOpportunities;
+      setOpportunities(nextOpportunities);
       setLoadedOpportunitiesCustomerId(customerId);
     } catch (error) {
       setOpportunities([]);
@@ -1346,7 +1383,9 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
     setIsLoadingContacts(true);
     setContactsLoadError('');
     try {
-      setContacts(await fetchCustomerContacts(customerId));
+      const nextContacts = await fetchCustomerContacts(customerId);
+      contactsCacheRef.current[customerId] = nextContacts;
+      setContacts(nextContacts);
       setLoadedContactsCustomerId(customerId);
     } catch (error) {
       setContacts([]);
@@ -1361,6 +1400,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
     setIsLoadingNotes(true);
     try {
       const data = await fetchCustomerNotes(customerId);
+      customerNotesCacheRef.current[customerId] = data;
       setCustomerNotes(data.notes);
       setCustomerTimeline(data.timeline);
     } finally {
@@ -1611,25 +1651,27 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
   const openCreateCustomer = async () => {
     clearCustomerFormErrors();
     setPageError('');
-    const options = await ensureCustomerOptionsLoaded(false).catch(() => null);
-    if (!options) {
-      return;
-    }
     setEditingCustomer(null);
     setCustomerForm({
       ...emptyCustomerForm,
-      source: firstOptionValue(buildStringValueOptions(options.source_options)),
-      customer_category_id: options.customer_category_items?.[0]?.id || '',
-      follow_up_priority: options.follow_up_priorities?.[1] || 'medium',
-      lead_status_id: options.lead_status_items?.[0]?.id || '',
+      source: firstOptionValue(buildStringValueOptions(customerOptions?.source_options)),
+      customer_category_id: customerOptions?.customer_category_items?.[0]?.id || '',
+      follow_up_priority: customerOptions?.follow_up_priorities?.[1] || 'medium',
+      lead_status_id: customerOptions?.lead_status_items?.[0]?.id || '',
     });
     setShowCustomerModal(true);
+    void ensureCustomerOptionsLoaded(false).catch(() => {
+      setPageNotice((current) =>
+        current
+          ? `${current} Customer setup options are still loading in the background.`
+          : 'Customer setup options are still loading in the background.',
+      );
+    });
   };
 
   const openEditCustomer = async (customer: CustomerRecord) => {
     clearCustomerFormErrors();
     setPageError('');
-    const options = await ensureCustomerOptionsLoaded(true).catch(() => null);
     setSelectedCustomerId(customer.id);
     setEditingCustomer(customer);
     setCustomerForm({
@@ -1647,7 +1689,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
       preferred_dropoff_location: customer.preferred_dropoff_location || '',
       residential_area: customer.residential_area || '',
       work_area: customer.work_area || '',
-      source: customer.source || firstOptionValue(buildStringValueOptions(options?.source_options, customer.customer_source || customer.source || undefined)),
+      source: customer.source || firstOptionValue(buildStringValueOptions(customerOptions?.source_options, customer.customer_source || customer.source || undefined)),
       customer_category_id: customer.customer_category_id || '',
       customer_source_id: customer.customer_source_id || '',
       organization_type_id: customer.organization_type_id || '',
@@ -1676,13 +1718,23 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
       status: customer.status || 'active',
     });
     setShowCustomerModal(true);
+    void ensureCustomerOptionsLoaded(false).catch(() => {
+      setPageNotice((current) =>
+        current
+          ? `${current} Customer profile options are still loading in the background.`
+          : 'Customer profile options are still loading in the background.',
+      );
+    });
+    void ensureCustomerOptionsLoaded(true).catch(() => {
+      setPageNotice((current) =>
+        current
+          ? `${current} Driver options are still loading in the background.`
+          : 'Driver options are still loading in the background.',
+      );
+    });
   };
 
   const openCreateBooking = async () => {
-    const options = await ensureBookingOptionsLoaded().catch(() => null);
-    if (!options) {
-      return;
-    }
     setBookingForm({
       ...emptyBookingForm,
       customer_id: selectedCustomer?.id || '',
@@ -1691,38 +1743,44 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
         selectedCustomer?.preferred_pickup_location || selectedCustomer?.pickup_location || '',
       destination:
         selectedCustomer?.preferred_dropoff_location || selectedCustomer?.destination_location || '',
-      booking_type: options.booking_types?.[0] || 'Customer Booking',
+      booking_type: bookingOptions?.booking_types?.[0] || 'Customer Booking',
       title: '',
       description: '',
-      priority: options.priorities?.[1] || 'Medium',
-      status: options.statuses?.[0] || 'Scheduled',
+      priority: bookingOptions?.priorities?.[1] || 'Medium',
+      status: bookingOptions?.statuses?.[0] || 'Scheduled',
     });
     setShowBookingModal(true);
+    void ensureBookingOptionsLoaded().catch(() => {
+      setPageNotice((current) =>
+        current
+          ? `${current} Booking setup options are still loading in the background.`
+          : 'Booking setup options are still loading in the background.',
+      );
+    });
   };
 
   const openCreateReminder = async () => {
-    const options = await ensureBookingOptionsLoaded().catch(() => null);
-    if (!options) {
-      return;
-    }
     setBookingForm({
       ...emptyBookingForm,
       customer_id: selectedCustomer?.id || '',
-      driver_id: portal === 'driver' ? options.drivers?.[0]?.id || '' : selectedCustomer?.preferred_driver_id || '',
+      driver_id: portal === 'driver' ? bookingOptions?.drivers?.[0]?.id || '' : selectedCustomer?.preferred_driver_id || '',
       booking_type: 'Personal Reminder',
       title: '',
       description: '',
-      priority: options.priorities?.[1] || 'Medium',
+      priority: bookingOptions?.priorities?.[1] || 'Medium',
       status: 'Scheduled',
     });
     setShowBookingModal(true);
+    void ensureBookingOptionsLoaded().catch(() => {
+      setPageNotice((current) =>
+        current
+          ? `${current} Booking setup options are still loading in the background.`
+          : 'Booking setup options are still loading in the background.',
+      );
+    });
   };
 
   const openCreateFollowUpBooking = async () => {
-    const options = await ensureBookingOptionsLoaded().catch(() => null);
-    if (!options) {
-      return;
-    }
     setBookingForm({
       ...emptyBookingForm,
       customer_id: selectedCustomer?.id || '',
@@ -1730,10 +1788,17 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
       booking_type: 'Follow-Up Reminder',
       title: selectedCustomer ? `Follow up with ${selectedCustomer.full_name}` : '',
       description: '',
-      priority: options.priorities?.[2] || 'High',
+      priority: bookingOptions?.priorities?.[2] || 'High',
       status: 'Scheduled',
     });
     setShowBookingModal(true);
+    void ensureBookingOptionsLoaded().catch(() => {
+      setPageNotice((current) =>
+        current
+          ? `${current} Booking setup options are still loading in the background.`
+          : 'Booking setup options are still loading in the background.',
+      );
+    });
   };
 
   const handleSaveCustomer = async () => {
@@ -1768,6 +1833,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
         return [savedCustomer, ...current];
       });
       setSelectedCustomerId(savedCustomer.id);
+      customerProfileCacheRef.current[savedCustomer.id] = savedCustomer;
       setSelectedCustomerProfile(savedCustomer);
       setActiveProfileTab('overview');
       setRecentlyCreatedCustomerId(editingCustomer ? null : savedCustomer.id);
@@ -1869,6 +1935,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
         follow_up_completion_note: `Completed from ${portal} portal`,
       });
       setCustomers((current) => current.map((customer) => (customer.id === updated.id ? updated : customer)));
+      customerProfileCacheRef.current[updated.id] = updated;
       setSelectedCustomerProfile(updated);
       setPageNotice('Follow-up marked as completed.');
     } catch (error) {
@@ -1888,6 +1955,7 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
     setPageError('');
     try {
       const updated = await updateCustomerRelationship(profileCustomer.id, relationshipForm);
+      customerProfileCacheRef.current[updated.id] = updated;
       setSelectedCustomerProfile(updated);
       setCustomers((current) => current.map((customer) => (customer.id === updated.id ? { ...customer, ...updated } : customer)));
       setPageNotice('Relationship details updated.');
@@ -1919,11 +1987,15 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
       const saved = opportunityForm.id
         ? await updateCustomerOpportunity(profileCustomer.id, opportunityForm.id, payload)
         : await createCustomerOpportunity(profileCustomer.id, payload);
-      setOpportunities((current) => {
+      const nextOpportunities = opportunityForm.id
+        ? opportunities.map((item) => (item.id === saved.id ? saved : item))
+        : [saved, ...opportunities];
+      opportunitiesCacheRef.current[profileCustomer.id] = nextOpportunities;
+      setOpportunities(() => {
         if (opportunityForm.id) {
-          return current.map((item) => (item.id === saved.id ? saved : item));
+          return nextOpportunities;
         }
-        return [saved, ...current];
+        return nextOpportunities;
       });
       setOpportunityForm(buildOpportunityFormDefaults());
       setShowOpportunityForm(false);
@@ -1953,11 +2025,15 @@ function CustomerWorkspaceContent({ portal }: CustomerWorkspaceProps) {
       const saved = contactForm.id
         ? await updateCustomerContact(profileCustomer.id, contactForm.id, payload)
         : await createCustomerContact(profileCustomer.id, payload);
-      setContacts((current) => {
+      const nextContacts = contactForm.id
+        ? contacts.map((item) => (item.id === saved.id ? saved : item))
+        : [saved, ...contacts];
+      contactsCacheRef.current[profileCustomer.id] = nextContacts;
+      setContacts(() => {
         if (contactForm.id) {
-          return current.map((item) => (item.id === saved.id ? saved : item));
+          return nextContacts;
         }
-        return [saved, ...current];
+        return nextContacts;
       });
       setContactForm(emptyContactForm);
       setShowContactForm(false);

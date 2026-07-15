@@ -15,6 +15,7 @@ from services.system_settings_service import (
     get_admin_role_permissions,
     should_include_fuel_in_profitability,
 )
+from services.vehicle_availability_service import resolve_many, resolve_vehicle_availability
 from utils.api_error import ApiError
 from utils.mongo_indexes import ensure_indexes_for_collection
 from utils.performance import build_cache_key, get_ttl_cached, set_ttl_cached
@@ -346,8 +347,9 @@ def _serialize_cost_item(document: dict) -> dict:
     }
 
 
-def _serialize_vehicle_list_item(vehicle_document: dict, assigned_driver_details: dict | None = None) -> dict:
+def _serialize_vehicle_list_item(vehicle_document: dict, assigned_driver_details: dict | None = None, availability: dict | None = None) -> dict:
     _apply_vehicle_ownership_defaults(vehicle_document)
+    availability = availability or resolve_vehicle_availability(vehicle_document["_id"])
     return {
         "id": str(vehicle_document.get("_id")),
         "registration_number": vehicle_document.get("registration_number"),
@@ -369,6 +371,11 @@ def _serialize_vehicle_list_item(vehicle_document: dict, assigned_driver_details
         "asset_owner_type": vehicle_document.get("asset_owner_type"),
         "asset_owner_name": vehicle_document.get("asset_owner_name"),
         "status": vehicle_document.get("status"),
+        "lifecycle_status": availability.get("lifecycle_status"),
+        "operational_state": availability.get("operational_state"),
+        "is_available": availability.get("is_available"),
+        "primary_availability_reason": availability.get("primary_reason"),
+        "blocking_reason_count": len(availability.get("blocking_reasons") or []),
         "assigned_driver_id": str(vehicle_document.get("assigned_driver_id")) if vehicle_document.get("assigned_driver_id") else None,
         "assigned_driver_details": assigned_driver_details,
         "created_by": str(vehicle_document.get("created_by")) if vehicle_document.get("created_by") else None,
@@ -649,7 +656,6 @@ def _ensure_vehicle_ownership_history(vehicle_document: dict, *, approved_by: Ob
 def list_vehicle_ownership_history(vehicle_id: str) -> list[dict]:
     vehicle = get_vehicle_document_by_id(vehicle_id)
     _apply_vehicle_ownership_defaults(vehicle)
-    _ensure_vehicle_ownership_history(vehicle)
     documents = list(
         ownership_history_collection()
         .find({"vehicle_id": vehicle["_id"]})
@@ -1183,6 +1189,12 @@ def _filter_vehicle_for_role(vehicle_document: dict, *, current_role: str) -> di
     include_sensitive = current_role == "owner"
     serialized = serialize_vehicle(vehicle_document, include_sensitive=include_sensitive)
     serialized["assigned_driver_details"] = vehicle_document.get("assigned_driver_details")
+    if vehicle_document.get("availability"):
+        serialized["availability"] = vehicle_document["availability"]
+        serialized["lifecycle_status"] = vehicle_document["lifecycle_status"]
+        serialized["operational_state"] = vehicle_document["operational_state"]
+        serialized["is_available"] = vehicle_document["is_available"]
+        serialized["primary_availability_reason"] = vehicle_document["primary_availability_reason"]
     if current_role == "owner":
         serialized["ownership_summary"] = _ownership_summary_from_vehicle(vehicle_document)
         return serialized
@@ -1464,6 +1476,7 @@ def list_vehicles(*, current_role: str) -> list[dict]:
         .sort("created_at", ASCENDING)
     )
     assigned_driver_map = _build_assigned_driver_map(vehicle_documents)
+    availability_map = resolve_many([item["_id"] for item in vehicle_documents])
     serialized = []
     for vehicle_document in vehicle_documents:
         _apply_vehicle_ownership_defaults(vehicle_document)
@@ -1472,6 +1485,7 @@ def list_vehicles(*, current_role: str) -> list[dict]:
             _serialize_vehicle_list_item(
                 vehicle_document,
                 assigned_driver_details=assigned_driver_map.get(str(assigned_driver_object_id)) if assigned_driver_object_id else None,
+                availability=availability_map.get(str(vehicle_document["_id"])),
             )
         )
     print(
@@ -1489,10 +1503,15 @@ def get_vehicle_by_id(vehicle_id: str, *, current_role: str, include_economics: 
     )
     vehicle = get_vehicle_document_by_id_with_projection(vehicle_id, _vehicle_detail_projection())
     _apply_vehicle_ownership_defaults(vehicle)
-    _ensure_vehicle_ownership_history(vehicle)
     if vehicle.get("current_odometer") is None:
         vehicle["current_odometer"] = _extract_vehicle_current_odometer(vehicle["_id"])
     assigned_driver_object_id = _driver_object_id_from_reference(vehicle.get("assigned_driver_id"))
+    availability = resolve_vehicle_availability(vehicle["_id"])
+    vehicle["availability"] = availability
+    vehicle["lifecycle_status"] = availability.get("lifecycle_status")
+    vehicle["operational_state"] = availability.get("operational_state")
+    vehicle["is_available"] = availability.get("is_available")
+    vehicle["primary_availability_reason"] = availability.get("primary_reason")
     vehicle["assigned_driver_details"] = (
         _serialize_assigned_driver_details(users_collection().find_one({"_id": assigned_driver_object_id}))
         if assigned_driver_object_id
@@ -1522,7 +1541,6 @@ def get_vehicle_economics_by_id(vehicle_id: str, *, current_role: str) -> dict:
     print(f"[Flux Performance] vehicle economics database query start vehicle_id={vehicle_id}")
     vehicle = get_vehicle_document_by_id_with_projection(vehicle_id, _vehicle_detail_projection())
     _apply_vehicle_ownership_defaults(vehicle)
-    _ensure_vehicle_ownership_history(vehicle)
     if vehicle.get("current_odometer") is None:
         vehicle["current_odometer"] = _extract_vehicle_current_odometer(vehicle["_id"])
     print(

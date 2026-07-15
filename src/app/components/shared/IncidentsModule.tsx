@@ -46,7 +46,23 @@ interface IncidentAttachment {
   file_name: string;
   file_kind: string;
   content_type?: string | null;
-  data_url: string;
+  data_url?: string | null;
+  provider?: string | null;
+  provider_asset_id?: string | null;
+  public_url?: string | null;
+  thumbnail_url?: string | null;
+  public_variant?: string | null;
+  thumbnail_variant?: string | null;
+  migration_status?: string | null;
+  availability?: string | null;
+  removed_at?: string | null;
+  provider?: string | null;
+  provider_asset_id?: string | null;
+  public_variant?: string | null;
+  thumbnail_variant?: string | null;
+  public_url?: string | null;
+  thumbnail_url?: string | null;
+  migration_status?: string | null;
   size_bytes?: number | null;
 }
 
@@ -178,6 +194,7 @@ interface IncidentsResponse {
       message: string;
       vehicle_registration_number?: string | null;
     }>;
+    section_errors?: Record<string, string>;
     status_options: string[];
   };
 }
@@ -319,6 +336,10 @@ function toAttachment(file: File, dataUrl: string): IncidentAttachment {
 }
 
 async function filesToAttachments(files: File[]): Promise<IncidentAttachment[]> {
+  const allowedTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
+  if (files.length > 10) throw new Error('You can upload up to 10 evidence files at a time.');
+  const invalid = files.find((file) => !allowedTypes.has(file.type) || file.size > 5 * 1024 * 1024);
+  if (invalid) throw new Error('Evidence must be a JPG, PNG, or WEBP image no larger than 5 MB.');
   return Promise.all(
     files.map(
       (file) =>
@@ -352,10 +373,13 @@ export default function IncidentsModule({
   const [reportForm, setReportForm] = useState<ReportIncidentFormState>(initialReportForm);
   const [updateForm, setUpdateForm] = useState<UpdateFormState>(initialUpdateForm);
   const [pageError, setPageError] = useState('');
+  const [supportingError, setSupportingError] = useState('');
+  const [sectionErrors, setSectionErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [evidenceBusyId, setEvidenceBusyId] = useState<string | null>(null);
   const [showChecklist, setShowChecklist] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const debouncedSearchQuery = useDebouncedValue(searchQuery, 250);
@@ -391,6 +415,7 @@ export default function IncidentsModule({
     const loadData = async () => {
       setIsLoading(true);
       setPageError('');
+      setSupportingError('');
       try {
         const incidentsRequest = apiRequest<IncidentsResponse>('/incidents', {
           cacheTtlMs: 10000,
@@ -420,12 +445,14 @@ export default function IncidentsModule({
         setInsuranceDirectory(incidentsResponse.data?.insurance_directory || []);
         setAlerts(incidentsResponse.data?.alerts || []);
         setStatusOptions(incidentsResponse.data?.status_options || []);
+        setSectionErrors(incidentsResponse.data?.section_errors || {});
         setSelectedIncidentId((current) => current || incidentsResponse.data?.incidents?.[0]?.id || null);
 
         if (vehiclesResult.status === 'fulfilled' && vehiclesResult.value?.data?.vehicles) {
           setVehicles(vehiclesResult.value.data.vehicles);
         } else if (vehiclesResult.status === 'rejected') {
           console.warn('[Flux Incidents] Vehicle directory failed to load.', vehiclesResult.reason);
+          setSupportingError(vehiclesResult.reason instanceof ApiRequestError ? vehiclesResult.reason.message : 'Vehicle options are temporarily unavailable.');
         }
       } catch (error) {
         if (!isRequestAborted(error)) {
@@ -462,6 +489,33 @@ export default function IncidentsModule({
     });
   }, [selectedIncident]);
 
+  useEffect(() => {
+    if (!selectedIncidentId) return;
+    let cancelled = false;
+    const loadIncidentDetail = async () => {
+      try {
+        const response = await apiRequest<{ success: boolean; data: { incident: IncidentRecord } }>(`/incidents/${selectedIncidentId}`, {
+          cacheTtlMs: 10000,
+          dedupeKey: `incident-detail-${selectedIncidentId}`,
+          componentName: 'IncidentsModule',
+          requestLabel: 'incident-detail',
+        });
+        if (!cancelled && response.data?.incident) {
+          setIncidents((current) => current.map((item) => item.id === response.data.incident.id ? response.data.incident : item));
+        }
+      } catch (error) {
+        if (!cancelled && !isRequestAborted(error)) {
+          setSectionErrors((current) => ({
+            ...current,
+            evidence: error instanceof ApiRequestError ? error.message : 'Incident evidence is temporarily unavailable.',
+          }));
+        }
+      }
+    };
+    void loadIncidentDetail();
+    return () => { cancelled = true; };
+  }, [selectedIncidentId]);
+
   const driverVehicleLabel = activeAssignment?.vehicle
     ? `${activeAssignment.vehicle.registration_number} ${activeAssignment.vehicle.make || ''} ${activeAssignment.vehicle.model || ''}`.trim()
     : 'No assigned vehicle';
@@ -487,6 +541,7 @@ export default function IncidentsModule({
       setInsuranceDirectory(response.data?.insurance_directory || []);
       setAlerts(response.data?.alerts || []);
       setStatusOptions(response.data?.status_options || []);
+      setSectionErrors(response.data?.section_errors || {});
     } catch (error) {
       if (!isRequestAborted(error)) {
         setPageError(error instanceof ApiRequestError ? error.message : 'Unable to refresh incidents right now.');
@@ -501,9 +556,13 @@ export default function IncidentsModule({
     if (!files.length) return;
     try {
       const attachments = await filesToAttachments(files);
-      setReportForm((current) => ({ ...current, attachments: [...current.attachments, ...attachments] }));
-    } catch {
-      setFormError('One or more files could not be read. Please try again.');
+      setReportForm((current) => {
+        const existing = new Set(current.attachments.map((item) => `${item.name}:${item.size_bytes || 0}`));
+        const unique = attachments.filter((item) => !existing.has(`${item.name}:${item.size_bytes || 0}`));
+        return { ...current, attachments: [...current.attachments, ...unique] };
+      });
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : 'One or more files could not be read. Please try again.');
     }
   };
 
@@ -512,9 +571,42 @@ export default function IncidentsModule({
     if (!files.length) return;
     try {
       const attachments = await filesToAttachments(files);
-      setUpdateForm((current) => ({ ...current, attachments: [...current.attachments, ...attachments] }));
-    } catch {
-      setFormError('One or more files could not be read. Please try again.');
+      setUpdateForm((current) => {
+        const existing = new Set(current.attachments.map((item) => `${item.name}:${item.size_bytes || 0}`));
+        const unique = attachments.filter((item) => !existing.has(`${item.name}:${item.size_bytes || 0}`));
+        return { ...current, attachments: [...current.attachments, ...unique] };
+      });
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : 'One or more files could not be read. Please try again.');
+    }
+  };
+
+  const handleOpenEvidence = async (attachment: IncidentAttachment) => {
+    if (!selectedIncident || evidenceBusyId) return;
+    if (attachment.provider === 'legacy_removed' || attachment.availability === 'removed') {
+      setSectionErrors((current) => ({ ...current, evidence: 'Legacy evidence removed. No image is available.' }));
+      return;
+    }
+    setEvidenceBusyId(attachment.id);
+    setSectionErrors((current) => { const next = { ...current }; delete next.evidence; return next; });
+    try {
+      // Cloudflare-backed evidence already carries an authorization-scoped delivery URL.
+      // Legacy base64 evidence continues through the permission-checked backend endpoint.
+      let resolvedAttachment = attachment;
+      if (!resolvedAttachment.public_url && !resolvedAttachment.data_url) {
+        const response = await apiRequest<{ data: { attachment: IncidentAttachment } }>(`/incidents/${selectedIncident.id}/attachments/${encodeURIComponent(attachment.id)}`, {
+          componentName: 'IncidentsModule', requestLabel: 'incident-evidence',
+        });
+        resolvedAttachment = response.data?.attachment || attachment;
+      }
+      const reference = resolvedAttachment?.public_url || resolvedAttachment?.data_url;
+      if (!reference) throw new Error('Evidence file unavailable.');
+      const opened = window.open(reference, '_blank', 'noopener,noreferrer');
+      if (!opened) throw new Error('Your browser blocked the evidence window. Allow pop-ups and try again.');
+    } catch (error) {
+      setSectionErrors((current) => ({ ...current, evidence: error instanceof Error ? error.message : 'Evidence file unavailable.' }));
+    } finally {
+      setEvidenceBusyId(null);
     }
   };
 
@@ -587,7 +679,9 @@ export default function IncidentsModule({
           insurance_notified: updateForm.insurance_notified,
           claim_eligibility_override: updateForm.claim_eligibility_override || undefined,
           claim_eligibility_override_reason: updateForm.claim_eligibility_override_reason || undefined,
-          attachments: updateForm.attachments.length ? updateForm.attachments : undefined,
+          attachments: updateForm.attachments.some((attachment) => Boolean(attachment.data_url))
+            ? updateForm.attachments.filter((attachment) => Boolean(attachment.data_url))
+            : undefined,
         }),
       });
       setIncidents((current) =>
@@ -650,7 +744,8 @@ export default function IncidentsModule({
         </div>
       </div>
 
-      {pageError && <InlineMessage tone="error" message={pageError} />}
+      {pageError && <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"><span>{pageError}</span><button onClick={() => void handleRefresh()} className="rounded-lg border border-red-300 bg-white px-3 py-1.5 font-medium">Retry</button></div>}
+      {supportingError && <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800"><span>{supportingError}</span><button onClick={() => void handleRefresh()} className="rounded-lg border border-amber-300 bg-white px-3 py-1.5 font-medium">Retry</button></div>}
       {successMessage && <InlineMessage tone="success" message={successMessage} />}
       {formError && <InlineMessage tone="error" message={formError} />}
 
@@ -783,7 +878,9 @@ export default function IncidentsModule({
             <>
               <DashboardCards dashboard={dashboard} />
               <Panel title="High-Risk Driver Summary" subtitle="Drivers with repeated exposure, open incidents, or downtime impact.">
-                {highRiskDrivers.length ? (
+                {sectionErrors.dashboard ? (
+                  <div className="flex items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800"><span>{sectionErrors.dashboard}</span><button onClick={() => void handleRefresh()} className="rounded-lg border border-amber-300 bg-white px-3 py-1.5 font-medium">Retry</button></div>
+                ) : highRiskDrivers.length ? (
                   <div className="space-y-3">
                     {highRiskDrivers.map((item) => (
                       <div key={item.driver_id} className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-3">
@@ -805,7 +902,9 @@ export default function IncidentsModule({
                 )}
               </Panel>
               <Panel title="Insurance Partner Directory" subtitle="Vehicle-linked policy contacts available for fast claim follow-up.">
-                {insuranceDirectory.length ? (
+                {sectionErrors.dashboard || sectionErrors.relationships ? (
+                  <div className="flex items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800"><span>{sectionErrors.dashboard || sectionErrors.relationships}</span><button onClick={() => void handleRefresh()} className="rounded-lg border border-amber-300 bg-white px-3 py-1.5 font-medium">Retry</button></div>
+                ) : insuranceDirectory.length ? (
                   <div className="space-y-3">
                     {insuranceDirectory.slice(0, 8).map((entry) => (
                       <div key={`${entry.vehicle_id}-${entry.policy_number || 'policy'}`} className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-3">
@@ -954,15 +1053,40 @@ export default function IncidentsModule({
 
                 <div className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-4">
                   <div className="text-sm font-semibold text-[#0F172A]">Evidence</div>
+                  {sectionErrors.evidence ? <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">{sectionErrors.evidence}</div> : null}
                   {selectedIncident.attachments.length ? (
                     <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
                       {selectedIncident.attachments.map((attachment) => (
                         <div key={attachment.id} className="rounded-xl border border-gray-200 bg-white p-3">
+                          {attachment.thumbnail_url && attachment.file_kind === 'photo' ? (
+                            <button
+                              type="button"
+                              className="mb-3 block w-full overflow-hidden rounded-lg bg-slate-100"
+                              onClick={() => void handleOpenEvidence(attachment)}
+                              aria-label={`Open ${attachment.name}`}
+                            >
+                              <img
+                                src={attachment.thumbnail_url}
+                                alt={attachment.name}
+                                loading="lazy"
+                                className="h-32 w-full object-cover transition hover:opacity-90"
+                                onError={() => setSectionErrors((current) => ({ ...current, evidence: 'Evidence thumbnail unavailable.' }))}
+                              />
+                            </button>
+                          ) : null}
                           <div className="flex items-center gap-2 text-sm font-medium text-[#0F172A]">
                             {attachment.file_kind === 'photo' ? <Camera className="h-4 w-4" /> : <FilePlus2 className="h-4 w-4" />}
                             {attachment.name}
                           </div>
                           <div className="mt-1 text-xs text-gray-500">{attachment.content_type || formatLabel(attachment.file_kind)}</div>
+                          {attachment.provider === 'legacy_removed' || attachment.availability === 'removed' ? (
+                            <div className="mt-3 text-xs font-medium text-amber-700">Legacy evidence removed — no image available.</div>
+                          ) : (
+                            <button type="button" disabled={Boolean(evidenceBusyId)} onClick={() => void handleOpenEvidence(attachment)} className="mt-3 inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 disabled:opacity-50">
+                              {evidenceBusyId === attachment.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                              View evidence
+                            </button>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -1224,8 +1348,8 @@ function AttachmentPicker({
       <label className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed border-gray-300 bg-gray-50 px-4 py-6 text-center transition-colors hover:border-[#2563EB] hover:bg-blue-50/40">
         <FilePlus2 className="mb-2 h-5 w-5 text-gray-500" />
         <span className="text-sm font-medium text-gray-700">Upload files</span>
-        <span className="mt-1 text-xs text-gray-500">Photos, videos, PDFs, and other documents are supported.</span>
-        <input type="file" accept="image/*,video/*,.pdf,.doc,.docx,.xls,.xlsx" multiple className="hidden" onChange={onChange} />
+        <span className="mt-1 text-xs text-gray-500">JPG, PNG, or WEBP; up to 5 MB each.</span>
+        <input type="file" accept="image/jpeg,image/png,image/webp" multiple className="hidden" onChange={onChange} />
       </label>
       {attachments.length > 0 && (
         <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">

@@ -13,6 +13,7 @@ import {
   Wrench,
 } from 'lucide-react';
 import { apiRequest, apiRequestSafe, ApiRequestError, isRequestAborted } from '../../lib/api';
+import { FuelGaugeSelector } from '../shared/FuelGaugeSelector';
 import { usePageToastFeedback } from '../../lib/use-page-toast-feedback';
 
 type DetailTab =
@@ -40,6 +41,8 @@ interface Vehicle {
   color: string | null;
   transmission: string;
   fuel_type: string;
+  tank_capacity_litres?: number | null;
+  current_fuel_level?: number | null;
   chassis_number: string | null;
   engine_number: string | null;
   insurance_expiry: string | null;
@@ -993,6 +996,18 @@ export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: V
               <DetailRow label="Color" value={vehicle.color} />
               <DetailRow label="Transmission" value={formatLabel(vehicle.transmission)} />
               <DetailRow label="Fuel Type" value={formatLabel(vehicle.fuel_type)} />
+              {vehicle.current_fuel_level != null ? (
+                <div className="sm:col-span-2">
+                  <FuelGaugeSelector
+                    label="Current Fuel Level"
+                    value={vehicle.current_fuel_level}
+                    readOnly
+                    compact
+                    showEstimatedLitres
+                    tankCapacityLitres={vehicle.tank_capacity_litres}
+                  />
+                </div>
+              ) : null}
               <DetailRow label="Chassis Number" value={vehicle.chassis_number} />
               <DetailRow label="Engine Number" value={vehicle.engine_number} />
               <DetailRow label="Assigned Driver" value={assignedDriverSummary.headline} />

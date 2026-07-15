@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
+import re
 
 from bson import ObjectId
+from flask import current_app
 from pymongo import ASCENDING, DESCENDING
 
 from extensions import get_collection
@@ -9,15 +11,18 @@ from models.fuel import serialize_fuel_log, serialize_fuel_station
 from models.user import serialize_user
 from models.vehicle import serialize_vehicle
 from services.assignment_service import get_active_assignment_for_driver
-from services.notification_service import create_notification, notify_roles
+from services.notification_service import create_notification, notify_roles, resolve_action_notifications
 from utils.api_error import ApiError
 from utils.file_validation import validate_file_reference
 from utils.mongo_indexes import ensure_indexes_for_collection
+from utils.fuel_levels import normalize_fuel_level_eighths
+from services.cloudflare_images_service import upload_image
 
 
 ALLOWED_FUEL_STATION_STATUS = {"active", "inactive"}
 ALLOWED_FUEL_LOG_STATUS = {"submitted", "approved", "rejected"}
 ALLOWED_FUEL_TYPES = {"petrol", "diesel", "hybrid", "electric"}
+ALLOWED_ODOMETER_SOURCES = {"manual", "tracker", "gps_trip", "map_estimate", "estimated", "unavailable"}
 
 DEFAULT_FUEL_STATIONS = [
     {"station_name": "Shell", "brand_name": "Shell"},
@@ -148,7 +153,9 @@ def _validate_fuel_type(value: str | None):
     return fuel_type
 
 
-def _validate_positive_number(value, field_name: str):
+def _validate_positive_number(value, field_name: str, *, required: bool = True):
+    if value in (None, "") and not required:
+        return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ApiError(f"{field_name} must be numeric.", status_code=400)
     if value <= 0:
@@ -258,6 +265,8 @@ def _calculate_log_metrics(vehicle_id: ObjectId, fuel_date: str, odometer_readin
     previous_odometer = previous_log.get("odometer_reading") if previous_log else None
     distance_since_last_fill = None
     cost_per_km = None
+    if odometer_reading is None:
+        return previous_odometer, distance_since_last_fill, cost_per_km
     if previous_odometer is not None:
         distance_since_last_fill = round(odometer_reading - previous_odometer, 2)
         if distance_since_last_fill > 0:
@@ -309,6 +318,31 @@ def _calculate_abnormal_spending(vehicle_id: ObjectId, station_id: ObjectId, pri
     return False
 
 
+def _normalize_receipt(value):
+    reference = validate_file_reference(value, field_name="receipt_image", file_name="fuel-receipt.png")
+    if not reference or not current_app.config.get("CLOUDFLARE_IMAGES_ENABLED"):
+        return reference
+    if not reference.startswith("data:image/"):
+        # PDFs/documents remain on the existing document-reference path.
+        return reference
+    mime_match = re.match(r"^data:(image/[^;]+);", reference, re.IGNORECASE)
+    mime_type = mime_match.group(1).lower() if mime_match else None
+    extension = "jpg" if mime_type == "image/jpeg" else (mime_type.rsplit("/", 1)[-1] if mime_type else "png")
+    uploaded = upload_image(
+        reference,
+        filename=f"fuel-receipt.{extension}",
+        mime_type=mime_type,
+    )
+    return {
+        "provider": "cloudflare_images",
+        "provider_asset_id": uploaded["provider_asset_id"],
+        "filename": f"fuel-receipt.{extension}",
+        "mime_type": mime_type,
+        "public_url": uploaded["public_url"],
+        "thumbnail_url": uploaded["thumbnail_url"],
+    }
+
+
 def _enrich_fuel_station(document: dict):
     return serialize_fuel_station(document)
 
@@ -328,6 +362,29 @@ def _enrich_fuel_log(document: dict):
     serialized["fuel_station"] = serialize_fuel_station(station) if station else None
     serialized["assignment"] = serialize_assignment(assignment) if assignment else None
     return serialized
+
+
+def _enrich_fuel_logs(documents: list[dict]):
+    """Enrich a list with batched reference lookups instead of N+1 queries."""
+    if not documents:
+        return []
+    vehicle_ids = {item.get("vehicle_id") for item in documents if isinstance(item.get("vehicle_id"), ObjectId)}
+    driver_ids = {item.get("driver_id") for item in documents if isinstance(item.get("driver_id"), ObjectId)}
+    station_ids = {item.get("fuel_station_id") for item in documents if isinstance(item.get("fuel_station_id"), ObjectId)}
+    assignment_ids = {item.get("assignment_id") for item in documents if isinstance(item.get("assignment_id"), ObjectId)}
+    vehicles = {item["_id"]: item for item in vehicles_collection().find({"_id": {"$in": list(vehicle_ids)}}, {"registration_number": 1, "make": 1, "model": 1})} if vehicle_ids else {}
+    drivers = {item["_id"]: item for item in users_collection().find({"_id": {"$in": list(driver_ids)}}, {"full_name": 1, "role": 1})} if driver_ids else {}
+    stations = {item["_id"]: item for item in fuel_stations_collection().find({"_id": {"$in": list(station_ids)}})} if station_ids else {}
+    assignments = {item["_id"]: item for item in assignments_collection().find({"_id": {"$in": list(assignment_ids)}})} if assignment_ids else {}
+    enriched = []
+    for document in documents:
+        serialized = serialize_fuel_log(document)
+        serialized["vehicle"] = serialize_vehicle(vehicles[document["vehicle_id"]]) if document.get("vehicle_id") in vehicles else None
+        serialized["driver"] = serialize_user(drivers[document["driver_id"]]) if document.get("driver_id") in drivers else None
+        serialized["fuel_station"] = serialize_fuel_station(stations[document["fuel_station_id"]]) if document.get("fuel_station_id") in stations else None
+        serialized["assignment"] = serialize_assignment(assignments[document["assignment_id"]]) if document.get("assignment_id") in assignments else None
+        enriched.append(serialized)
+    return enriched
 
 
 def list_fuel_stations(current_role: str):
@@ -439,7 +496,15 @@ def _build_fuel_log_payload(payload: dict, current_user_id: str, current_role: s
     fuel_type = _validate_fuel_type(payload.get("fuel_type") or vehicle.get("fuel_type"))
     litres = _validate_positive_number(payload.get("litres"), "litres")
     amount = _validate_positive_number(payload.get("amount"), "amount")
-    odometer_reading = _validate_positive_number(payload.get("odometer_reading"), "odometer_reading")
+    odometer_reading = _validate_positive_number(
+        payload.get("odometer_reading"), "odometer_reading", required=False
+    )
+    odometer_source = str(
+        payload.get("odometer_source")
+        or ("manual" if odometer_reading is not None else "unavailable")
+    ).strip().lower()
+    if odometer_source not in ALLOWED_ODOMETER_SOURCES:
+        raise ApiError("odometer_source is invalid.", status_code=400)
     fuel_date = _normalize_date(payload.get("fuel_date"), "fuel_date")
     price_per_litre = round(amount / litres, 4)
     previous_odometer, distance_since_last_fill, cost_per_km = _calculate_log_metrics(
@@ -468,11 +533,9 @@ def _build_fuel_log_payload(payload: dict, current_user_id: str, current_role: s
         "amount": amount,
         "price_per_litre": price_per_litre,
         "odometer_reading": odometer_reading,
-        "receipt_image": validate_file_reference(
-            payload.get("receipt_image"),
-            field_name="receipt_image",
-            file_name="fuel-receipt",
-        ),
+        "odometer_source": odometer_source,
+        "fuel_level": normalize_fuel_level_eighths(payload.get("fuel_level"))[0],
+        "receipt_image": _normalize_receipt(payload.get("receipt_image")),
         "notes": (payload.get("notes") or "").strip() or None,
         "status": "submitted",
         "submitted_by": _to_object_id(current_user_id, "current_user_id"),
@@ -506,6 +569,9 @@ def create_fuel_log(payload: dict, current_user_id: str, current_role: str):
         priority="high" if document.get("abnormal_spending") else "medium",
         reference_type="fuel_log",
         reference_id=document["_id"],
+        action_type="review_fuel_log",
+        action_url="fuel",
+        action_label="Review fuel log",
     )
     return _enrich_fuel_log(document)
 
@@ -529,14 +595,22 @@ def _build_fuel_log_analytics(documents: list[dict]):
     driver_totals = {}
     abnormal_logs = []
 
+    reference_documents = approved_logs
+    vehicle_ids = {item.get("vehicle_id") for item in reference_documents if isinstance(item.get("vehicle_id"), ObjectId)}
+    driver_ids = {item.get("driver_id") for item in reference_documents if isinstance(item.get("driver_id"), ObjectId)}
+    station_ids = {item.get("fuel_station_id") for item in reference_documents if isinstance(item.get("fuel_station_id"), ObjectId)}
+    vehicle_map = {item["_id"]: item for item in vehicles_collection().find({"_id": {"$in": list(vehicle_ids)}}, {"registration_number": 1})} if vehicle_ids else {}
+    driver_map = {item["_id"]: item for item in users_collection().find({"_id": {"$in": list(driver_ids)}}, {"full_name": 1})} if driver_ids else {}
+    station_map = {item["_id"]: item for item in fuel_stations_collection().find({"_id": {"$in": list(station_ids)}}, {"station_name": 1})} if station_ids else {}
+
     for log in documents:
         if log.get("abnormal_spending"):
-            abnormal_logs.append(_enrich_fuel_log(log))
+            abnormal_logs.append(log)
         if log.get("status") != "approved":
             continue
-        station = fuel_stations_collection().find_one({"_id": log.get("fuel_station_id")})
-        vehicle = vehicles_collection().find_one({"_id": log.get("vehicle_id")})
-        driver = users_collection().find_one({"_id": log.get("driver_id")}) if log.get("driver_id") else None
+        station = station_map.get(log.get("fuel_station_id"))
+        vehicle = vehicle_map.get(log.get("vehicle_id"))
+        driver = driver_map.get(log.get("driver_id")) if log.get("driver_id") else None
 
         station_label = station.get("station_name") if station else "Unknown Station"
         vehicle_label = vehicle.get("registration_number") if vehicle else "Unknown Vehicle"
@@ -562,7 +636,7 @@ def _build_fuel_log_analytics(documents: list[dict]):
             {"driver_name": key, "total_amount": value}
             for key, value in sorted(driver_totals.items(), key=lambda item: item[1], reverse=True)
         ],
-        "abnormal_fuel_spending": abnormal_logs,
+        "abnormal_fuel_spending": _enrich_fuel_logs(abnormal_logs),
     }
 
 
@@ -579,7 +653,7 @@ def list_fuel_logs(current_user_id: str, current_role: str):
         document for document in documents if _can_view_fuel_log(document, current_user_id, current_role)
     ]
     return {
-        "logs": [_enrich_fuel_log(document) for document in visible_documents],
+        "logs": _enrich_fuel_logs(visible_documents),
         "analytics": _build_fuel_log_analytics(visible_documents),
     }
 
@@ -609,6 +683,7 @@ def approve_fuel_log(log_id: str, current_user_id: str, current_role: str):
     }
     fuel_logs_collection().update_one({"_id": document["_id"]}, {"$set": update_fields})
     document.update(update_fields)
+    resolve_action_notifications("fuel_log", document["_id"], action_type="review_fuel_log", completed_by=current_user_id)
 
     vehicles_collection().update_one(
         {"_id": document["vehicle_id"]},
@@ -666,6 +741,7 @@ def reject_fuel_log(log_id: str, rejection_reason: str, current_user_id: str, cu
     }
     fuel_logs_collection().update_one({"_id": document["_id"]}, {"$set": update_fields})
     document.update(update_fields)
+    resolve_action_notifications("fuel_log", document["_id"], action_type="review_fuel_log", resolution="cancelled", completed_by=current_user_id)
 
     submitted_by = document.get("submitted_by")
     if submitted_by:

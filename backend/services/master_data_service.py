@@ -269,6 +269,66 @@ MASTER_DATA_DEFAULTS: dict[str, list[str]] = {
         "Credit",
         "Other",
     ],
+    "dispatch_request_types": [
+        "Delivery",
+        "Pickup",
+        "Relocation",
+        "Bulk Delivery",
+        "Special Request",
+        "Other",
+    ],
+    "dispatch_pickup_locations": [
+        "Main Yard",
+        "Head Office",
+        "Airport Cargo Wing",
+        "Warehouse A",
+        "Warehouse B",
+        "Branch Office",
+        "Other",
+    ],
+    "dispatch_vehicle_types": [
+        "Saloon",
+        "SUV",
+        "Pickup",
+        "Van",
+        "Truck",
+        "Motorcycle",
+        "Other",
+    ],
+    "dispatch_load_types": [
+        "Goods",
+        "Parcel",
+        "Documents",
+        "Food",
+        "Equipment",
+        "Bulk",
+        "Mixed",
+        "Other",
+    ],
+    "dispatch_load_weight_categories": [
+        "Light",
+        "Medium",
+        "Heavy",
+        "Extra Heavy",
+    ],
+    "dispatch_load_size_categories": [
+        "Small",
+        "Medium",
+        "Large",
+        "Oversized",
+    ],
+    "dispatch_urgencies": [
+        "Normal",
+        "Urgent",
+        "Critical",
+        "Scheduled",
+    ],
+    "dispatch_payment_statuses": [
+        "Unpaid",
+        "Pending",
+        "Part Paid",
+        "Paid",
+    ],
 }
 
 MASTER_DATA_TYPES = set(MASTER_DATA_DEFAULTS.keys())
@@ -391,6 +451,21 @@ def safe_seed_master_data():
     retries = max(1, int(current_app.config.get("MASTER_DATA_SEED_RETRIES", 3)))
     retry_delay = float(current_app.config.get("MASTER_DATA_SEED_RETRY_DELAY_SECONDS", 1.5))
 
+    try:
+        if not _master_data_defaults_missing():
+            current_app.logger.info("[Flux Startup] Master data defaults already present; seed skipped.")
+            return
+    except (
+        AutoReconnect,
+        ServerSelectionTimeoutError,
+        ConnectionFailure,
+        OperationFailure,
+    ) as error:
+        current_app.logger.warning(
+            "[Flux Startup] Master data pre-check could not confirm defaults due to MongoDB connectivity noise: %s",
+            error,
+        )
+
     for attempt in range(1, retries + 1):
         try:
             seed_default_master_data()
@@ -406,8 +481,8 @@ def safe_seed_master_data():
             ConnectionFailure,
             OperationFailure,
         ) as error:
-            current_app.logger.exception(
-                "[Flux Startup] Master data seed attempt %s/%s failed due to MongoDB connectivity issue: %s",
+            current_app.logger.warning(
+                "[Flux Startup] Master data seed attempt %s/%s hit a MongoDB connectivity issue: %s",
                 attempt,
                 retries,
                 error,

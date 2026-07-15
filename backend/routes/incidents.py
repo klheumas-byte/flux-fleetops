@@ -5,6 +5,8 @@ from services.incident_service import (
     create_incident,
     create_maintenance_job_from_incident,
     get_incident_by_id,
+    get_incident_attachment,
+    delete_incident_attachment,
     list_incidents,
     update_incident,
 )
@@ -50,6 +52,30 @@ def get_incident_route(incident_id: str):
         current_role=get_jwt().get("role"),
     )
     return success_response(data={"incident": incident})
+
+
+@incidents_bp.get("/<incident_id>/attachments/<attachment_id>")
+@role_required("owner", "admin", "driver")
+def get_incident_attachment_route(incident_id: str, attachment_id: str):
+    attachment = get_incident_attachment(
+        incident_id,
+        attachment_id,
+        current_user_id=get_jwt_identity(),
+        current_role=get_jwt().get("role"),
+    )
+    return success_response(data={"attachment": attachment})
+
+
+@incidents_bp.delete("/<incident_id>/attachments/<attachment_id>")
+@role_required("owner", "admin")
+def delete_incident_attachment_route(incident_id: str, attachment_id: str):
+    result = delete_incident_attachment(
+        incident_id,
+        attachment_id,
+        current_user_id=get_jwt_identity(),
+        current_role=get_jwt().get("role"),
+    )
+    return success_response(data=result, message="Evidence removed successfully.")
 
 
 @incidents_bp.patch("/<incident_id>")

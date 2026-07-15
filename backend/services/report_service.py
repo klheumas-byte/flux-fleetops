@@ -1226,8 +1226,12 @@ def get_finance_reports(
     creator_role: str | None = None,
     customer_category_id: str | None = None,
     source: str | None = None,
+    page: int = 1,
+    page_size: int = 25,
 ) -> dict:
     request_started_at = perf_counter()
+    normalized_page = max(int(page or 1), 1)
+    normalized_page_size = min(max(int(page_size or 25), 1), 100)
     filters = _normalize_filters(
         date_from=date_from,
         date_to=date_to,
@@ -1543,6 +1547,37 @@ def get_finance_reports(
     for payload in task_results.values():
         reports.update(payload)
 
+    def paginate_section(section: dict) -> dict:
+        records = section.get("records")
+        if not isinstance(records, list):
+            return section
+        total = int((section.get("validation") or {}).get("total_records") or len(records))
+        start = (normalized_page - 1) * normalized_page_size
+        section["records"] = records[start : start + normalized_page_size]
+        section["pagination"] = {
+            "page": normalized_page,
+            "page_size": normalized_page_size,
+            "total": total,
+            "total_pages": max(1, (total + normalized_page_size - 1) // normalized_page_size),
+        }
+        return section
+
+    for report_name, section in list(reports.items()):
+        if isinstance(section, dict):
+            reports[report_name] = paginate_section(section)
+    vehicle_economics = reports.get("vehicle_economics")
+    if isinstance(vehicle_economics, dict) and isinstance(vehicle_economics.get("vehicles"), list):
+        vehicles = vehicle_economics["vehicles"]
+        total = int((vehicle_economics.get("validation") or {}).get("total_records") or len(vehicles))
+        start = (normalized_page - 1) * normalized_page_size
+        vehicle_economics["vehicles"] = vehicles[start : start + normalized_page_size]
+        vehicle_economics["pagination"] = {
+            "page": normalized_page,
+            "page_size": normalized_page_size,
+            "total": total,
+            "total_pages": max(1, (total + normalized_page_size - 1) // normalized_page_size),
+        }
+
     result = {
         "generated_by": serialize_user(current_user) if current_user else None,
         "generated_at": now_utc().isoformat(),
@@ -1564,6 +1599,7 @@ def get_finance_reports(
             "sources": filter_options["sources"],
         },
         "reports": reports,
+        "pagination": {"page": normalized_page, "page_size": normalized_page_size},
     }
     _log_finance_report_duration(
         started_at=request_started_at,

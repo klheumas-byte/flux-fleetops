@@ -43,6 +43,7 @@ interface ValidationSummary {
 interface ReportSection<T = Record<string, unknown>> {
   records: T[];
   validation: ValidationSummary;
+  pagination?: { page: number; page_size: number; total: number; total_pages: number };
   [key: string]: unknown;
 }
 
@@ -273,6 +274,8 @@ export default function Reports() {
   const [selectedCreatorRole, setSelectedCreatorRole] = useState('');
   const [selectedCustomerCategoryId, setSelectedCustomerCategoryId] = useState('');
   const [selectedSource, setSelectedSource] = useState('');
+  const [reportPage, setReportPage] = useState(1);
+  const reportPageSize = 25;
   const [reportData, setReportData] = useState<ReportsResponse['data'] | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [pageError, setPageError] = useState('');
@@ -304,6 +307,8 @@ export default function Reports() {
       if (selectedCreatorRole) params.set('creator_role', selectedCreatorRole);
       if (selectedCustomerCategoryId) params.set('customer_category_id', selectedCustomerCategoryId);
       if (selectedSource) params.set('source', selectedSource);
+      params.set('page', String(reportPage));
+      params.set('page_size', String(reportPageSize));
 
       try {
         const response = await apiRequest<ReportsResponse>(`/reports/finance?${params.toString()}`, {
@@ -327,7 +332,11 @@ export default function Reports() {
     };
 
     void loadReportData();
-  }, [activeCategory, currentRole, dateRange, selectedDriverId, selectedVehicleId, selectedBranch, selectedAssetOwnerName, selectedCreatorRole, selectedCustomerCategoryId, selectedSource, refreshKey]);
+  }, [activeCategory, currentRole, dateRange, selectedDriverId, selectedVehicleId, selectedBranch, selectedAssetOwnerName, selectedCreatorRole, selectedCustomerCategoryId, selectedSource, refreshKey, reportPage]);
+
+  useEffect(() => {
+    setReportPage(1);
+  }, [activeCategory, dateRange, selectedDriverId, selectedVehicleId, selectedBranch, selectedAssetOwnerName, selectedCreatorRole, selectedCustomerCategoryId, selectedSource]);
 
   const reports = useMemo(() => {
     const source = reportData?.reports;
@@ -917,7 +926,7 @@ export default function Reports() {
             </div>
           )}
 
-          {reportData && activeCategory === 'customers' && (
+      {reportData && activeCategory === 'customers' && (
             <div className="space-y-6">
               <SectionHeader title="Customer Report" validation={reports.customers.validation} />
               <ReportTable
@@ -940,6 +949,41 @@ export default function Reports() {
           )}
         </>
       )}
+      {reportData && (
+        <ReportPagination
+          page={reportPage}
+          totalPages={Math.max(
+            1,
+            ...[
+              reports.collections,
+              reports.deposits,
+              reports.expenses,
+              reports.driver_performance,
+              reports.vehicle_performance,
+              reports.fuel,
+              reports.maintenance,
+              reports.faults,
+              reports.customers,
+              reports.bookings,
+              reports.trip_logs,
+            ].map((section) => section.pagination?.total_pages || 1),
+          )}
+          onPageChange={setReportPage}
+        />
+      )}
+    </div>
+  );
+}
+
+function ReportPagination({ page, totalPages, onPageChange }: { page: number; totalPages: number; onPageChange: (page: number) => void }) {
+  if (totalPages <= 1) return null;
+  return (
+    <div className="mt-6 flex items-center justify-between rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-600">
+      <span>Page {page} of {totalPages}</span>
+      <div className="flex gap-2">
+        <button type="button" disabled={page <= 1} onClick={() => onPageChange(page - 1)} className="rounded-lg border border-gray-200 px-3 py-2 disabled:opacity-50">Previous</button>
+        <button type="button" disabled={page >= totalPages} onClick={() => onPageChange(page + 1)} className="rounded-lg border border-gray-200 px-3 py-2 disabled:opacity-50">Next</button>
+      </div>
     </div>
   );
 }

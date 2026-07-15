@@ -23,7 +23,9 @@ type RecurrenceType =
   | 'monthly'
   | 'every_2_months'
   | 'quarterly'
+  | 'yearly'
   | 'custom_days'
+  | 'custom_months'
   | 'mileage_based'
   | 'both_time_and_mileage';
 type ScheduleStatus = 'active' | 'due_soon' | 'due' | 'overdue' | 'completed' | 'paused';
@@ -49,6 +51,7 @@ interface UserSummary {
   id: string;
   full_name: string;
   role: 'owner' | 'admin' | 'driver';
+  status?: string | null;
 }
 
 interface VehicleSummary {
@@ -85,6 +88,14 @@ interface PreventiveSchedule {
   parts_changed?: string[] | null;
   vehicle?: VehicleSummary | null;
   assigned_admin?: UserSummary | null;
+  assigned_admin_unavailable?: boolean;
+  assigned_admin_notice?: string | null;
+  active_job?: {
+    id: string;
+    status: string;
+    title?: string | null;
+    created_at?: string | null;
+  } | null;
 }
 
 interface ComplianceType {
@@ -164,6 +175,7 @@ interface ComplianceTypesResponse {
 
 interface ScheduleMutationResponse {
   success: boolean;
+  data?: { schedule?: PreventiveSchedule; job?: { id: string; status?: string; title?: string; created_at?: string } };
 }
 
 interface ComplianceMutationResponse {
@@ -310,11 +322,26 @@ function statusClassName(status: string) {
   }
 }
 
-export default function PreventiveMaintenance() {
+function getGenerateJobAvailability(schedule: PreventiveSchedule, isRequesting: boolean) {
+  const activeJobId = schedule.active_job?.id || (schedule.active_job === undefined ? schedule.generated_maintenance_job_id : null);
+  if (isRequesting) return { disabled: true, reason: 'Generating maintenance job…' };
+  if (activeJobId) return { disabled: true, reason: 'An active maintenance job already exists.' };
+  if (!schedule.vehicle_id) return { disabled: true, reason: 'Select a valid vehicle before generating a job.' };
+  if (!schedule.title?.trim()) return { disabled: true, reason: 'Set a maintenance title before generating a job.' };
+  if (!schedule.next_due_date && schedule.next_due_odometer == null) return { disabled: true, reason: 'Set a valid next due date or odometer before generating a job.' };
+  if (schedule.status === 'due_soon') {
+    return { disabled: true, reason: schedule.next_due_date
+      ? `This maintenance is due soon. Job generation becomes available on ${formatDate(schedule.next_due_date)}.`
+      : 'This maintenance is due soon. Job generation becomes available when its mileage threshold is reached.' };
+  }
+  if (schedule.status === 'paused') return { disabled: true, reason: 'This schedule is paused.' };
+  if (!['due', 'overdue'].includes(schedule.status)) return { disabled: true, reason: 'This schedule is not yet due.' };
+  return { disabled: false, reason: '' };
+}
+
+export default function PreventiveMaintenance({ onNavigate }: { onNavigate?: (section: string) => void }) {
   const [activeTab, setActiveTab] = useState<TabKey>('mechanical');
   const [schedules, setSchedules] = useState<PreventiveSchedule[]>([]);
-  const [dueSoon, setDueSoon] = useState<PreventiveSchedule[]>([]);
-  const [overdue, setOverdue] = useState<PreventiveSchedule[]>([]);
   const [complianceRecords, setComplianceRecords] = useState<ComplianceRecord[]>([]);
   const [complianceTypes, setComplianceTypes] = useState<ComplianceType[]>([]);
   const [vehicles, setVehicles] = useState<VehicleSummary[]>([]);
@@ -329,8 +356,13 @@ export default function PreventiveMaintenance() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [pageError, setPageError] = useState('');
+  const [mechanicalError, setMechanicalError] = useState('');
+  const [complianceError, setComplianceError] = useState('');
   const [formError, setFormError] = useState('');
+  const [assignedAdminWarning, setAssignedAdminWarning] = useState('');
   const [actionError, setActionError] = useState('');
+  const [activeActionScheduleId, setActiveActionScheduleId] = useState<string | null>(null);
+  const [scheduleActionFeedback, setScheduleActionFeedback] = useState<Record<string, { tone: 'success' | 'error'; message: string }>>({});
   const [showMechanicalModal, setShowMechanicalModal] = useState(false);
   const [showComplianceModal, setShowComplianceModal] = useState(false);
   const [showTypeModal, setShowTypeModal] = useState(false);
@@ -357,19 +389,11 @@ export default function PreventiveMaintenance() {
   const loadData = async () => {
     setIsLoading(true);
     setPageError('');
+    setMechanicalError('');
+    setComplianceError('');
     try {
-      const [
-        schedulesResult,
-        dueSoonResult,
-        overdueResult,
-        vehiclesResult,
-        adminsResult,
-        complianceResult,
-        typesResult,
-      ] = await Promise.allSettled([
+      const [schedulesResult, vehiclesResult, adminsResult, complianceResult, typesResult] = await Promise.allSettled([
         apiRequest<ScheduleListResponse>('/preventive-maintenance', { cacheTtlMs: 10000, timeoutMs: 15000 }),
-        apiRequest<ScheduleListResponse>('/preventive-maintenance/due-soon', { cacheTtlMs: 10000, timeoutMs: 15000 }),
-        apiRequest<ScheduleListResponse>('/preventive-maintenance/overdue', { cacheTtlMs: 10000, timeoutMs: 15000 }),
         apiRequest<VehiclesResponse>('/vehicles', { cacheTtlMs: 10000, timeoutMs: 15000 }),
         apiRequest<AccountabilityResponse>('/admins/accountability', { cacheTtlMs: 10000, timeoutMs: 15000 }),
         apiRequest<ComplianceRecordsResponse>('/preventive-maintenance/compliance/records', { cacheTtlMs: 10000, timeoutMs: 15000 }),
@@ -377,23 +401,23 @@ export default function PreventiveMaintenance() {
       ]);
 
       const schedulesResponse = getSettledData(schedulesResult);
-      const dueSoonResponse = getSettledData(dueSoonResult);
-      const overdueResponse = getSettledData(overdueResult);
       const vehiclesResponse = getSettledData(vehiclesResult);
       const adminsResponse = getSettledData(adminsResult);
       const complianceResponse = getSettledData(complianceResult);
       const typesResponse = getSettledData(typesResult);
 
-      const nextAdmins = (adminsResponse?.data?.admins || []).map((entry) => entry.admin).filter(Boolean);
+      const nextAdmins = (adminsResponse?.data?.admins || [])
+        .map((entry) => entry.admin)
+        .filter((admin): admin is UserSummary => Boolean(admin) && ['owner', 'admin'].includes(admin.role) && (admin.status ?? 'active') === 'active');
       const nextVehicles = Array.isArray(vehiclesResponse?.data?.vehicles) ? vehiclesResponse.data.vehicles : [];
       const nextTypes = Array.isArray(typesResponse?.data?.types) ? typesResponse.data.types : [];
+      const nextSchedules = Array.isArray(schedulesResponse?.data?.schedules) ? schedulesResponse.data.schedules : [];
+      const nextComplianceRecords = Array.isArray(complianceResponse?.data?.records) ? complianceResponse.data.records : [];
 
-      setSchedules(Array.isArray(schedulesResponse?.data?.schedules) ? schedulesResponse.data.schedules : []);
-      setDueSoon(Array.isArray(dueSoonResponse?.data?.schedules) ? dueSoonResponse.data.schedules : []);
-      setOverdue(Array.isArray(overdueResponse?.data?.schedules) ? overdueResponse.data.schedules : []);
+      setSchedules(nextSchedules);
       setVehicles(nextVehicles);
       setAdmins(nextAdmins);
-      setComplianceRecords(Array.isArray(complianceResponse?.data?.records) ? complianceResponse.data.records : []);
+      setComplianceRecords(nextComplianceRecords);
       setComplianceSummary(complianceResponse?.data?.summary || {
         expiring_soon: 0,
         expired: 0,
@@ -413,9 +437,26 @@ export default function PreventiveMaintenance() {
         compliance_type_id: current.compliance_type_id || nextTypes.find((item) => item.status === 'active')?.id || '',
       }));
 
-      const primaryError = getSettledError(schedulesResult) || getSettledError(complianceResult);
-      if (primaryError) {
-        setPageError(primaryError);
+      const nextMechanicalError = getSettledError(schedulesResult);
+      const nextComplianceError = getSettledError(complianceResult);
+      const supportingErrors = [
+        ['vehicles', getSettledError(vehiclesResult)],
+        ['admins', getSettledError(adminsResult)],
+        ['compliance types', getSettledError(typesResult)],
+      ].filter((entry): entry is [string, string] => Boolean(entry[1]));
+
+      if (nextMechanicalError) {
+        setMechanicalError(nextMechanicalError);
+      }
+      if (nextComplianceError) {
+        setComplianceError(nextComplianceError);
+      }
+      if (supportingErrors.length > 0) {
+        setPageError(
+          `Some supporting data could not be loaded: ${supportingErrors
+            .map(([label, message]) => `${label} (${message})`)
+            .join(', ')}.`,
+        );
       }
     } catch (error) {
       setPageError(error instanceof ApiRequestError ? error.message : 'Unable to load preventive maintenance data right now.');
@@ -431,16 +472,20 @@ export default function PreventiveMaintenance() {
   const mechanicalStats = useMemo(
     () => ({
       total: schedules.length,
-      dueSoon: dueSoon.length,
-      overdue: overdue.length,
+      dueSoon: schedules.filter((schedule) => schedule.status === 'due_soon').length,
+      overdue: schedules.filter((schedule) => schedule.status === 'overdue').length,
       activeVehicles: new Set(schedules.map((schedule) => schedule.vehicle_id)).size,
     }),
-    [dueSoon.length, overdue.length, schedules],
+    [schedules],
   );
+
+  const dueSoonSchedules = useMemo(() => schedules.filter((schedule) => schedule.status === 'due_soon'), [schedules]);
+  const overdueSchedules = useMemo(() => schedules.filter((schedule) => schedule.status === 'overdue'), [schedules]);
 
   const openMechanicalEdit = (schedule: PreventiveSchedule | null) => {
     setEditingSchedule(schedule);
     setFormError('');
+    setAssignedAdminWarning(schedule?.assigned_admin_unavailable ? schedule.assigned_admin_notice || 'Previously assigned user unavailable' : '');
     setScheduleForm(
       schedule
         ? {
@@ -458,14 +503,14 @@ export default function PreventiveMaintenance() {
             next_due_odometer: schedule.next_due_odometer != null ? String(schedule.next_due_odometer) : '',
             warning_days_before: schedule.warning_days_before != null ? String(schedule.warning_days_before) : '7',
             warning_km_before: schedule.warning_km_before != null ? String(schedule.warning_km_before) : '500',
-            assigned_admin_id: schedule.assigned_admin_id || '',
+            assigned_admin_id: schedule.assigned_admin_unavailable ? '' : schedule.assigned_admin_id || '',
             status: schedule.status,
             notes: schedule.notes || '',
           }
         : {
             ...initialScheduleForm,
             vehicle_id: vehicles[0]?.id || '',
-            assigned_admin_id: admins[0]?.id || '',
+            assigned_admin_id: nextAdminOptions[0]?.id || '',
           },
     );
     setShowMechanicalModal(true);
@@ -475,7 +520,13 @@ export default function PreventiveMaintenance() {
     setShowMechanicalModal(false);
     setEditingSchedule(null);
     setFormError('');
+    setAssignedAdminWarning('');
   };
+
+  const nextAdminOptions = useMemo(
+    () => admins.filter((admin) => ['owner', 'admin'].includes(admin.role) && (admin.status ?? 'active') === 'active'),
+    [admins],
+  );
 
   const handleMechanicalSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -520,7 +571,7 @@ export default function PreventiveMaintenance() {
     setIsSubmitting(true);
     setActionError('');
     try {
-      await apiRequest<ScheduleMutationResponse>(`/preventive-maintenance/${completingSchedule.id}/complete`, {
+      const response = await apiRequest<ScheduleMutationResponse>(`/preventive-maintenance/${completingSchedule.id}/complete`, {
         method: 'PATCH',
         body: JSON.stringify({
           completed_date: completionForm.completed_date,
@@ -533,8 +584,11 @@ export default function PreventiveMaintenance() {
           next_due_odometer: completionForm.next_due_odometer ? Number(completionForm.next_due_odometer) : null,
         }),
       });
+      if (response.data?.schedule) {
+        setSchedules((current) => current.map((schedule) => schedule.id === completingSchedule.id ? response.data!.schedule! : schedule));
+      }
+      setScheduleActionFeedback((current) => ({ ...current, [completingSchedule.id]: { tone: 'success', message: 'Maintenance completion saved and next service recalculated.' } }));
       setCompletingSchedule(null);
-      await loadData();
     } catch (error) {
       setActionError(error instanceof ApiRequestError ? error.message : 'Unable to complete that maintenance item right now.');
     } finally {
@@ -543,15 +597,33 @@ export default function PreventiveMaintenance() {
   };
 
   const handleGenerateJob = async (scheduleId: string) => {
+    if (activeActionScheduleId === scheduleId) return;
+    setActiveActionScheduleId(scheduleId);
     setIsSubmitting(true);
     setActionError('');
+    setScheduleActionFeedback((current) => ({ ...current, [scheduleId]: { tone: 'success', message: '' } }));
     try {
-      await apiRequest<ScheduleMutationResponse>(`/preventive-maintenance/${scheduleId}/generate-maintenance-job`, { method: 'POST' });
-      await loadData();
+      const response = await apiRequest<ScheduleMutationResponse>(`/preventive-maintenance/${scheduleId}/generate-maintenance-job`, { method: 'POST' });
+      setSchedules((current) => current.map((schedule) => schedule.id === scheduleId
+        ? {
+            ...schedule,
+            generated_maintenance_job_id: response.data?.job?.id || schedule.generated_maintenance_job_id,
+            active_job: response.data?.job?.id ? {
+              id: response.data.job.id,
+              status: response.data.job.status || 'pending',
+              title: response.data.job.title,
+              created_at: response.data.job.created_at,
+            } : schedule.active_job,
+          }
+        : schedule));
+      setScheduleActionFeedback((current) => ({ ...current, [scheduleId]: { tone: 'success', message: 'Maintenance job generated.' } }));
     } catch (error) {
-      setActionError(error instanceof ApiRequestError ? error.message : 'Unable to generate a maintenance job right now.');
+      const message = error instanceof ApiRequestError ? error.message : 'Unable to generate a maintenance job right now.';
+      setActionError(message);
+      setScheduleActionFeedback((current) => ({ ...current, [scheduleId]: { tone: 'error', message } }));
     } finally {
       setIsSubmitting(false);
+      setActiveActionScheduleId(null);
     }
   };
 
@@ -731,6 +803,7 @@ export default function PreventiveMaintenance() {
 
       {activeTab === 'mechanical' ? (
         <>
+          {mechanicalError && <Banner tone="error">{mechanicalError}</Banner>}
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <SummaryCard label="Total Schedules" value={mechanicalStats.total} icon={CalendarClock} tone="blue" />
             <SummaryCard label="Due Soon" value={mechanicalStats.dueSoon} icon={Clock3} tone="amber" />
@@ -739,12 +812,12 @@ export default function PreventiveMaintenance() {
           </div>
 
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-            <SchedulePanel title="Due Soon" subtitle="Mechanical checks approaching warning threshold." schedules={dueSoon} />
-            <SchedulePanel title="Overdue" subtitle="Mechanical items already past date or mileage thresholds." schedules={overdue} />
+            <SchedulePanel title="Due Soon" subtitle="Mechanical checks approaching warning threshold." schedules={dueSoonSchedules} />
+            <SchedulePanel title="Overdue" subtitle="Mechanical items already past date or mileage thresholds." schedules={overdueSchedules} />
           </div>
 
           <Panel title="Mechanical Maintenance" subtitle="Recurring servicing, inspections, and usage-based upkeep per vehicle.">
-            {isLoading ? (
+            {isLoading && schedules.length === 0 ? (
               <LoadingState label="Loading mechanical schedules..." />
             ) : schedules.length === 0 ? (
               <EmptyState label="No mechanical maintenance schedules recorded yet." />
@@ -761,7 +834,10 @@ export default function PreventiveMaintenance() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-200 bg-white">
-                    {schedules.map((schedule) => (
+                    {schedules.map((schedule) => {
+                      const generation = getGenerateJobAvailability(schedule, activeActionScheduleId === schedule.id);
+                      const activeJobId = schedule.active_job?.id || (schedule.active_job === undefined ? schedule.generated_maintenance_job_id : null);
+                      return (
                       <tr key={schedule.id} className={schedule.status === 'overdue' ? 'bg-red-50/50' : schedule.status === 'due_soon' ? 'bg-amber-50/40' : 'hover:bg-gray-50'}>
                         <td className="px-4 py-4 text-sm text-[#0F172A]">
                           <div className="font-medium">{schedule.vehicle?.registration_number || 'Vehicle'}</div>
@@ -811,15 +887,32 @@ export default function PreventiveMaintenance() {
                             </button>
                             <button
                               onClick={() => void handleGenerateJob(schedule.id)}
-                              disabled={isSubmitting}
+                              disabled={generation.disabled}
                               className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-70"
                             >
-                              Generate Job
+                              {activeActionScheduleId === schedule.id ? <Loader2 className="mr-1 inline h-3.5 w-3.5 animate-spin" /> : null}
+                              {activeJobId ? 'Job Active' : 'Generate Job'}
                             </button>
+                            {activeJobId ? (
+                              <button type="button" onClick={() => onNavigate?.('maintenance')} className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50">
+                                Open Existing Job
+                              </button>
+                            ) : null}
+                            {generation.reason ? (
+                              <div className="basis-full text-xs text-gray-600">
+                                {generation.reason}
+                                {activeJobId ? ` Job ${activeJobId}${schedule.active_job?.status ? ` · ${formatLabel(schedule.active_job.status)}` : ''}.` : ''}
+                              </div>
+                            ) : null}
+                            {scheduleActionFeedback[schedule.id]?.message ? (
+                              <div className={`basis-full text-xs ${scheduleActionFeedback[schedule.id].tone === 'error' ? 'text-red-600' : 'text-emerald-600'}`}>
+                                {scheduleActionFeedback[schedule.id].message}
+                              </div>
+                            ) : null}
                           </div>
                         </td>
                       </tr>
-                    ))}
+                    );})}
                   </tbody>
                 </table>
               </div>
@@ -828,6 +921,7 @@ export default function PreventiveMaintenance() {
         </>
       ) : (
         <>
+          {complianceError && <Banner tone="error">{complianceError}</Banner>}
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <SummaryCard label="Expiring Soon" value={complianceSummary.expiring_soon} icon={Clock3} tone="amber" />
             <SummaryCard label="Expired" value={complianceSummary.expired} icon={ShieldAlert} tone="rose" />
@@ -878,7 +972,7 @@ export default function PreventiveMaintenance() {
           </div>
 
           <Panel title="Compliance & Renewals" subtitle="Track insurance, roadworthy, permits, kits, and other expiry-based legal requirements.">
-            {isLoading ? (
+            {isLoading && complianceRecords.length === 0 ? (
               <LoadingState label="Loading compliance records..." />
             ) : complianceRecords.length === 0 ? (
               <EmptyState label="No compliance records recorded yet." />
@@ -954,9 +1048,10 @@ export default function PreventiveMaintenance() {
 
       {showMechanicalModal && (
         <ModalShell title={editingSchedule ? 'Edit Mechanical Schedule' : 'Add Mechanical Schedule'} onClose={closeMechanicalModal}>
-          <form onSubmit={handleMechanicalSubmit} className="flex h-full flex-col">
-            <div className="flex-1 space-y-5 overflow-y-auto px-5 py-5">
+          <form onSubmit={handleMechanicalSubmit} className="flex min-h-0 flex-1 flex-col">
+            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain px-5 py-5">
               {formError && <Banner tone="error">{formError}</Banner>}
+              {assignedAdminWarning && <Banner tone="warning">{assignedAdminWarning}</Banner>}
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
                 <SelectField label="Vehicle" value={scheduleForm.vehicle_id} onChange={(value) => setScheduleForm((current) => ({ ...current, vehicle_id: value }))}>
                   <option value="">Choose vehicle...</option>
@@ -975,7 +1070,7 @@ export default function PreventiveMaintenance() {
                 </SelectField>
                 <InputField label="Title" value={scheduleForm.title} onChange={(value) => setScheduleForm((current) => ({ ...current, title: value }))} />
                 <SelectField label="Trigger Type" value={scheduleForm.recurrence_type} onChange={(value) => setScheduleForm((current) => ({ ...current, recurrence_type: value as RecurrenceType }))}>
-                  {['weekly', 'every_2_weeks', 'monthly', 'every_2_months', 'quarterly', 'custom_days', 'mileage_based', 'both_time_and_mileage'].map((type) => (
+                  {['weekly', 'every_2_weeks', 'monthly', 'every_2_months', 'quarterly', 'yearly', 'custom_days', 'custom_months', 'mileage_based', 'both_time_and_mileage'].map((type) => (
                     <option key={type} value={type}>
                       {formatLabel(type)}
                     </option>
@@ -991,8 +1086,8 @@ export default function PreventiveMaintenance() {
                 <InputField label="Warning Days Before" type="number" value={scheduleForm.warning_days_before} onChange={(value) => setScheduleForm((current) => ({ ...current, warning_days_before: value }))} />
                 <InputField label="Warning KM Before" type="number" value={scheduleForm.warning_km_before} onChange={(value) => setScheduleForm((current) => ({ ...current, warning_km_before: value }))} />
                 <SelectField label="Assigned Admin" value={scheduleForm.assigned_admin_id} onChange={(value) => setScheduleForm((current) => ({ ...current, assigned_admin_id: value }))}>
-                  <option value="">Choose admin...</option>
-                  {admins.map((admin) => (
+                  <option value="">No assigned admin</option>
+                  {nextAdminOptions.map((admin) => (
                     <option key={admin.id} value={admin.id}>
                       {admin.full_name}
                     </option>
@@ -1016,7 +1111,9 @@ export default function PreventiveMaintenance() {
 
       {completingSchedule && (
         <ModalShell title="Mark Mechanical Maintenance Completed" subtitle={completingSchedule.title} onClose={() => setCompletingSchedule(null)} maxWidth="max-w-2xl">
-          <form onSubmit={handleCompleteSchedule} className="space-y-5 px-5 py-5">
+          <form onSubmit={handleCompleteSchedule} className="flex min-h-0 flex-1 flex-col">
+            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain px-5 py-5">
+            {actionError && <Banner tone="error">{actionError}</Banner>}
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <InputField label="Completed Date" type="date" value={completionForm.completed_date} onChange={(value) => setCompletionForm((current) => ({ ...current, completed_date: value }))} />
               <InputField label="Completed Odometer" type="number" value={completionForm.completed_odometer} onChange={(value) => setCompletionForm((current) => ({ ...current, completed_odometer: value }))} />
@@ -1027,6 +1124,7 @@ export default function PreventiveMaintenance() {
             <TextAreaField label="Work Done" value={completionForm.work_done} onChange={(value) => setCompletionForm((current) => ({ ...current, work_done: value }))} />
             <TextAreaField label="Parts Changed" value={completionForm.parts_changed} onChange={(value) => setCompletionForm((current) => ({ ...current, parts_changed: value }))} />
             <TextAreaField label="Condition Notes" value={completionForm.condition_notes} onChange={(value) => setCompletionForm((current) => ({ ...current, condition_notes: value }))} />
+            </div>
             <ModalFooter onCancel={() => setCompletingSchedule(null)} submitLabel={isSubmitting ? 'Saving...' : 'Mark Completed'} isSubmitting={isSubmitting} />
           </form>
         </ModalShell>
@@ -1034,8 +1132,8 @@ export default function PreventiveMaintenance() {
 
       {showComplianceModal && (
         <ModalShell title={renewingCompliance ? 'Renew Compliance Record' : editingCompliance ? 'Edit Compliance Record' : 'Add Compliance Record'} onClose={closeComplianceModal}>
-          <form onSubmit={handleComplianceSubmit} className="flex h-full flex-col">
-            <div className="flex-1 space-y-5 overflow-y-auto px-5 py-5">
+          <form onSubmit={handleComplianceSubmit} className="flex min-h-0 flex-1 flex-col">
+            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain px-5 py-5">
               {formError && <Banner tone="error">{formError}</Banner>}
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
                 <SelectField label="Vehicle" value={complianceForm.vehicle_id} onChange={(value) => setComplianceForm((current) => ({ ...current, vehicle_id: value }))}>
@@ -1095,7 +1193,8 @@ export default function PreventiveMaintenance() {
 
       {showTypeModal && (
         <ModalShell title={editingType ? 'Edit Compliance Type' : 'Add Compliance Type'} onClose={() => setShowTypeModal(false)} maxWidth="max-w-xl">
-          <form onSubmit={handleTypeSubmit} className="space-y-5 px-5 py-5">
+          <form onSubmit={handleTypeSubmit} className="flex min-h-0 flex-1 flex-col">
+            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain px-5 py-5">
             {formError && <Banner tone="error">{formError}</Banner>}
             <InputField label="Item Name" value={typeForm.item_name} onChange={(value) => setTypeForm((current) => ({ ...current, item_name: value }))} />
             <SelectField label="Category" value={typeForm.category} onChange={(value) => setTypeForm((current) => ({ ...current, category: value }))}>
@@ -1112,6 +1211,7 @@ export default function PreventiveMaintenance() {
                 </option>
               ))}
             </SelectField>
+            </div>
             <ModalFooter onCancel={() => setShowTypeModal(false)} submitLabel={isSubmitting ? 'Saving...' : editingType ? 'Save Changes' : 'Create Type'} isSubmitting={isSubmitting} />
           </form>
         </ModalShell>
@@ -1119,7 +1219,8 @@ export default function PreventiveMaintenance() {
 
       {viewingHistory && (
         <ModalShell title="Compliance History" subtitle={viewingHistory.compliance_item_name} onClose={() => setViewingHistory(null)} maxWidth="max-w-2xl">
-          <div className="space-y-4 px-5 py-5">
+          <div className="flex min-h-0 flex-1 flex-col">
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain px-5 py-5">
             {viewingHistory.history.length === 0 ? (
               <EmptyState label="No renewal history recorded yet." />
             ) : (
@@ -1135,7 +1236,8 @@ export default function PreventiveMaintenance() {
                 </div>
               ))
             )}
-            <div className="sticky bottom-0 flex justify-end border-t border-gray-200 bg-white pt-4">
+            </div>
+            <div className="shrink-0 flex justify-end border-t border-gray-200 bg-white px-5 py-4">
               <button onClick={() => setViewingHistory(null)} className="rounded-lg border border-gray-300 px-4 py-2.5 font-medium text-gray-700 hover:bg-gray-50">
                 Close
               </button>
@@ -1233,19 +1335,32 @@ function ModalShell({
   children: ReactNode;
   maxWidth?: string;
 }) {
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [onClose]);
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-3 py-4 sm:px-4 sm:py-6">
-      <div className={`flex max-h-[90vh] w-[95%] ${maxWidth} flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-2xl`}>
-        <div className="flex items-start justify-between border-b border-gray-200 px-5 py-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-black/50 p-2 sm:p-4" role="presentation">
+      <div role="dialog" aria-modal="true" aria-labelledby="preventive-modal-title" className={`flex max-h-[90dvh] min-h-0 w-full ${maxWidth} flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-2xl`}>
+        <div className="shrink-0 flex items-start justify-between border-b border-gray-200 px-5 py-4">
           <div>
-            <h2 className="text-xl font-semibold text-[#0F172A]">{title}</h2>
+            <h2 id="preventive-modal-title" className="text-xl font-semibold text-[#0F172A]">{title}</h2>
             {subtitle && <p className="mt-1 text-sm text-gray-500">{subtitle}</p>}
           </div>
-          <button onClick={onClose} className="rounded-lg p-2 transition-all hover:bg-gray-100">
+          <button type="button" onClick={onClose} aria-label="Close modal" className="rounded-lg p-2 transition-all hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-[#2563EB]">
             <XCircle className="h-5 w-5 text-gray-500" />
           </button>
         </div>
-        {children}
+        <div className="flex min-h-0 flex-1 flex-col">{children}</div>
       </div>
     </div>
   );
@@ -1282,7 +1397,7 @@ function TextAreaField({ label, value, onChange }: { label: string; value: strin
 
 function ModalFooter({ onCancel, submitLabel, isSubmitting }: { onCancel: () => void; submitLabel: string; isSubmitting: boolean }) {
   return (
-    <div className="sticky bottom-0 flex flex-col gap-3 border-t border-gray-200 bg-white px-5 py-4 sm:flex-row sm:justify-end">
+    <div className="shrink-0 flex flex-col gap-3 border-t border-gray-200 bg-white px-5 py-4 sm:flex-row sm:justify-end">
       <button type="button" onClick={onCancel} className="w-full rounded-lg border border-gray-300 px-4 py-2.5 font-medium text-gray-700 transition-all hover:bg-gray-50 sm:w-auto">
         Cancel
       </button>

@@ -1,7 +1,7 @@
 import { apiRequest } from './api';
 import type { DriverActiveAssignment } from './driver-api';
 
-export type SessionUserRole = 'owner' | 'admin' | 'driver';
+export type SessionUserRole = 'owner' | 'admin' | 'driver' | 'dispatcher' | 'customer_service';
 export type SessionAccountStatus = 'active' | 'inactive' | 'suspended';
 
 export interface SessionDriverProfile {
@@ -21,7 +21,13 @@ export interface SessionUser {
 
 function normalizeSessionUserRole(role: string | null | undefined): SessionUserRole | null {
   const normalized = String(role || '').trim().toLowerCase();
-  if (normalized === 'admin' || normalized === 'driver' || normalized === 'owner') {
+  if (
+    normalized === 'admin' ||
+    normalized === 'driver' ||
+    normalized === 'owner' ||
+    normalized === 'dispatcher' ||
+    normalized === 'customer_service'
+  ) {
     return normalized;
   }
   return null;

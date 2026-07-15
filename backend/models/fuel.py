@@ -1,4 +1,5 @@
 from bson import ObjectId
+from utils.fuel_levels import build_fuel_level_details
 
 
 def _serialize_reference_id(value):
@@ -39,6 +40,9 @@ def serialize_fuel_log(log_document: dict) -> dict:
         "amount": log_document.get("amount"),
         "price_per_litre": log_document.get("price_per_litre"),
         "odometer_reading": log_document.get("odometer_reading"),
+        "odometer_source": log_document.get("odometer_source") or "unavailable",
+        "fuel_level": log_document.get("fuel_level"),
+        "fuel_level_details": build_fuel_level_details(log_document.get("fuel_level")),
         "receipt_image": log_document.get("receipt_image"),
         "notes": log_document.get("notes"),
         "status": log_document.get("status"),

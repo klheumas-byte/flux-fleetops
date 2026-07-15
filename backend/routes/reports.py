@@ -29,6 +29,8 @@ def get_finance_report():
                 creator_role=request.args.get("creator_role"),
                 customer_category_id=request.args.get("customer_category_id"),
                 source=request.args.get("source"),
+                page=request.args.get("page", default=1, type=int),
+                page_size=request.args.get("page_size", default=25, type=int),
             )
         )
     except ApiError:

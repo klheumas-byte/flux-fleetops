@@ -1,3 +1,4 @@
+import os
 from threading import Thread
 from time import perf_counter
 from datetime import datetime, timezone
@@ -9,11 +10,16 @@ from extensions import get_database_connection_status, get_mongo_client, init_ex
 from routes import register_blueprints
 from services.assignment_service import ensure_assignment_indexes
 from services.booking_service import ensure_booking_indexes
-from services.auth_service import ensure_demo_users, ensure_indexes
+from services.auth_service import ensure_indexes
 from services.collection_service import ensure_collection_indexes
 from services.customer_service import ensure_customer_indexes
 from services.dashboard_service import ensure_dashboard_indexes
 from services.deposit_service import ensure_deposit_indexes
+from services.dispatch_request_service import ensure_dispatch_request_indexes
+from services.dispatch_financial_service import ensure_dispatch_financial_indexes
+from services.dispatch_opportunity_service import ensure_dispatch_opportunity_indexes
+from services.dispatch_return_service import ensure_dispatch_return_indexes
+from services.dispatch_planner_service import ensure_dispatch_planner_indexes
 from services.expense_service import ensure_expense_indexes
 from services.fault_service import ensure_fault_indexes, seed_default_fault_catalog
 from services.finance_account_service import ensure_finance_account_indexes
@@ -21,12 +27,17 @@ from services.fuel_service import ensure_fuel_indexes, seed_default_fuel_station
 from services.incident_service import ensure_incident_indexes
 from services.maintenance_service import ensure_maintenance_indexes
 from services.master_data_service import ensure_master_data_indexes
-from services.notification_service import ensure_notification_indexes
-from services.preventive_maintenance_service import ensure_preventive_maintenance_indexes, seed_preventive_schedules_for_existing_vehicles
+from services.notification_service import ensure_notification_indexes, reconcile_legacy_actionable_notifications
+from services.preventive_maintenance_service import (
+    ensure_preventive_maintenance_indexes,
+    seed_default_compliance_item_types,
+    seed_preventive_schedules_for_existing_vehicles,
+)
 from services.report_service import ensure_report_indexes
 from services.ride_service import ensure_ride_indexes
 from services.system_settings_service import ensure_system_settings_indexes
 from services.vehicle_service import ensure_vehicle_indexes
+from services.vehicle_movement_service import ensure_vehicle_movement_indexes
 from services.wallet_service import ensure_wallet_indexes
 from utils.errors import register_error_handlers
 from utils.logging_setup import configure_backend_logging
@@ -39,6 +50,7 @@ def create_app(config_name: str | None = None) -> Flask:
     configure_backend_logging(app)
 
     init_extensions(app)
+    app.extensions.setdefault("flux_startup_maintenance_started", False)
     route_registration_started_at = perf_counter()
     register_blueprints(app)
     app.logger.info(
@@ -69,6 +81,11 @@ def create_app(config_name: str | None = None) -> Flask:
                 ensure_customer_indexes()
                 ensure_dashboard_indexes()
                 ensure_deposit_indexes()
+                ensure_dispatch_request_indexes()
+                ensure_dispatch_financial_indexes()
+                ensure_dispatch_opportunity_indexes()
+                ensure_dispatch_return_indexes()
+                ensure_dispatch_planner_indexes()
                 ensure_expense_indexes()
                 ensure_fault_indexes()
                 ensure_finance_account_indexes()
@@ -82,6 +99,7 @@ def create_app(config_name: str | None = None) -> Flask:
                 ensure_ride_indexes()
                 ensure_system_settings_indexes()
                 ensure_vehicle_indexes()
+                ensure_vehicle_movement_indexes()
                 ensure_wallet_indexes()
                 app.logger.info(
                     "[Flux Startup] Index checks completed in %.2fms",
@@ -90,13 +108,17 @@ def create_app(config_name: str | None = None) -> Flask:
             except Exception:
                 app.logger.exception("[Flux Startup] Index checks failed.")
 
+            try:
+                reconcile_legacy_actionable_notifications()
+            except Exception:
+                app.logger.exception("[Flux Startup] Legacy notification reconciliation failed.")
+
             seed_started_at = perf_counter()
             try:
                 seed_default_fault_catalog()
                 seed_default_fuel_stations()
+                seed_default_compliance_item_types()
                 seed_preventive_schedules_for_existing_vehicles()
-                if app.config["SEED_DEMO_ON_STARTUP"]:
-                    ensure_demo_users()
                 app.logger.info(
                     "[Flux Startup] Seed checks completed in %.2fms",
                     (perf_counter() - seed_started_at) * 1000,
@@ -104,10 +126,16 @@ def create_app(config_name: str | None = None) -> Flask:
             except Exception:
                 app.logger.exception("[Flux Startup] Seed checks failed.")
 
-    Thread(target=run_startup_maintenance, daemon=True).start()
+    if not app.config.get("RUN_STARTUP_MAINTENANCE", True):
+        app.logger.info("[Flux Startup] Startup maintenance skipped by configuration.")
+    elif not app.extensions["flux_startup_maintenance_started"]:
+        app.extensions["flux_startup_maintenance_started"] = True
+        Thread(target=run_startup_maintenance, daemon=True).start()
     app.logger.info(
-        "[Flux Startup] App factory completed in %.2fms (background maintenance started)",
+        "[Flux Startup] App factory completed in %.2fms pid=%s reloader_child=%s",
         (perf_counter() - startup_started_at) * 1000,
+        os.getpid(),
+        str(os.getenv("WERKZEUG_RUN_MAIN", "")).lower() == "true",
     )
 
     def _health_payload():
@@ -189,19 +217,30 @@ def create_app(config_name: str | None = None) -> Flask:
 
     return app
 
-
 def register_cli_commands(app: Flask) -> None:
-    @app.cli.command("seed-demo")
-    def seed_demo_command():
-        ensure_demo_users()
-        print("Demo owner, admin, and driver users are ready.")
+    @app.cli.command("maintenance-reminder-sweep")
+    def maintenance_reminder_sweep_command():
+        """Run one bounded preventive/maintenance reminder reconciliation."""
+        from services.maintenance_reminder_service import run_maintenance_reminder_sweep
+
+        if not app.config.get("MAINTENANCE_REMINDER_SWEEP_ENABLED", True):
+            print("Maintenance reminder sweep is disabled.")
+            return
+        summary = run_maintenance_reminder_sweep(
+            batch_size=app.config.get("MAINTENANCE_REMINDER_SWEEP_BATCH_SIZE", 50)
+        )
+        print(summary)
 
 
 flask_app = create_app()
 
 
 if __name__ == "__main__":
+    host = os.getenv("FLUX_HOST", "127.0.0.1")
+    port = int(os.getenv("PORT", os.getenv("FLUX_PORT", "5001")))
     flask_app.run(
+        host=host,
+        port=port,
         debug=flask_app.config["DEBUG"],
         use_reloader=flask_app.config["DEBUG"],
     )

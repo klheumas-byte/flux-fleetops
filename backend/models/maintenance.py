@@ -7,9 +7,17 @@ def _serialize_reference_id(value):
     return value
 
 
+def _serialize_datetime(value):
+    """Serialize BSON datetimes while tolerating legacy ISO/string values."""
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else value
+
+
 def serialize_maintenance_job(maintenance_document: dict) -> dict:
     return {
         "id": str(maintenance_document.get("_id")),
+        "preventive_schedule_id": _serialize_reference_id(maintenance_document.get("preventive_schedule_id")),
         "vehicle_id": _serialize_reference_id(maintenance_document.get("vehicle_id")),
         "driver_id": _serialize_reference_id(maintenance_document.get("driver_id")),
         "fault_report_id": _serialize_reference_id(maintenance_document.get("fault_report_id")),
@@ -23,35 +31,34 @@ def serialize_maintenance_job(maintenance_document: dict) -> dict:
         "actual_cost": maintenance_document.get("actual_cost"),
         "expense_id": _serialize_reference_id(maintenance_document.get("expense_id")),
         "odometer_reading": maintenance_document.get("odometer_reading"),
+        "due_odometer": maintenance_document.get("due_odometer"),
+        "generated_by": _serialize_reference_id(maintenance_document.get("generated_by")),
+        "generated_at": _serialize_datetime(maintenance_document.get("generated_at")),
         "start_date": maintenance_document.get("start_date"),
         "target_completion_date": maintenance_document.get("target_completion_date"),
         "completion_date": maintenance_document.get("completion_date"),
+        "completed_at": _serialize_datetime(maintenance_document.get("completed_at")),
+        "completion_odometer": maintenance_document.get("completion_odometer"),
+        "work_performed": maintenance_document.get("work_performed"),
+        "parts_changed": maintenance_document.get("parts_changed"),
         "status": maintenance_document.get("status"),
         "notes": maintenance_document.get("notes"),
         "maintenance_coordinator_id": _serialize_reference_id(
             maintenance_document.get("maintenance_coordinator_id")
         ),
         "assigned_admin_name": maintenance_document.get("assigned_admin_name"),
-        "assigned_at": maintenance_document.get("assigned_at").isoformat()
-        if maintenance_document.get("assigned_at")
-        else None,
+        "assigned_at": _serialize_datetime(maintenance_document.get("assigned_at")),
         "current_stage": maintenance_document.get("current_stage"),
         "next_action": maintenance_document.get("next_action"),
         "next_follow_up_date": maintenance_document.get("next_follow_up_date"),
         "follow_up_overdue": bool(maintenance_document.get("follow_up_overdue")),
         "is_overdue": bool(maintenance_document.get("is_overdue")),
-        "last_progress_updated_at": maintenance_document.get("last_progress_updated_at").isoformat()
-        if maintenance_document.get("last_progress_updated_at")
-        else None,
+        "last_progress_updated_at": _serialize_datetime(maintenance_document.get("last_progress_updated_at")),
         "created_by": _serialize_reference_id(maintenance_document.get("created_by")),
         "approved_by": _serialize_reference_id(maintenance_document.get("approved_by")),
         "completed_by": _serialize_reference_id(maintenance_document.get("completed_by")),
-        "created_at": maintenance_document.get("created_at").isoformat()
-        if maintenance_document.get("created_at")
-        else None,
-        "updated_at": maintenance_document.get("updated_at").isoformat()
-        if maintenance_document.get("updated_at")
-        else None,
+        "created_at": _serialize_datetime(maintenance_document.get("created_at")),
+        "updated_at": _serialize_datetime(maintenance_document.get("updated_at")),
     }
 
 
@@ -65,7 +72,5 @@ def serialize_maintenance_progress_log(progress_document: dict) -> dict:
         "next_action": progress_document.get("next_action"),
         "next_follow_up_date": progress_document.get("next_follow_up_date"),
         "updated_by": _serialize_reference_id(progress_document.get("updated_by")),
-        "updated_at": progress_document.get("updated_at").isoformat()
-        if progress_document.get("updated_at")
-        else None,
+        "updated_at": _serialize_datetime(progress_document.get("updated_at")),
     }

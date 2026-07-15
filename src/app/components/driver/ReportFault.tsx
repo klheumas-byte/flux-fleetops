@@ -1,14 +1,16 @@
-import { ChangeEvent, useEffect, useMemo, useState } from 'react';
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle,
   Loader2,
+  RefreshCw,
   Upload,
   XCircle,
 } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
 import type { SessionUser } from '../../lib/auth-session';
 import type { DriverActiveAssignment } from '../../lib/driver-api';
+import { fetchVehicleMovements, type VehicleMovementRecord } from '../../lib/vehicle-movement-api';
 
 type FaultSeverity = 'low' | 'medium' | 'high' | 'critical';
 
@@ -55,6 +57,7 @@ interface FaultFormState {
   severity: FaultSeverity;
   description: string;
   photos: string[];
+  vehicle_unsafe: boolean;
 }
 
 const initialFormState: FaultFormState = {
@@ -63,6 +66,7 @@ const initialFormState: FaultFormState = {
   severity: 'medium',
   description: '',
   photos: [],
+  vehicle_unsafe: false,
 };
 
 function formatDateTime(value: Date) {
@@ -186,10 +190,20 @@ export default function ReportFault({ currentUser, activeAssignment }: ReportFau
   const [successMessage, setSuccessMessage] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const submitInFlight = useRef(false);
+  const submissionKey = useRef(crypto.randomUUID());
+  const [movementVehicles, setMovementVehicles] = useState<NonNullable<VehicleMovementRecord['vehicle']>[]>([]);
+  const [selectedVehicleId, setSelectedVehicleId] = useState(activeAssignment?.vehicle_id || '');
 
-  const assignedVehicleLabel = activeAssignment?.vehicle
-    ? `${activeAssignment.vehicle.registration_number} ${activeAssignment.vehicle.make || ''} ${activeAssignment.vehicle.model || ''}`.trim()
-    : 'No assigned vehicle';
+  const permittedVehicles = useMemo(() => {
+    if (activeAssignment?.vehicle) return [activeAssignment.vehicle];
+    return movementVehicles;
+  }, [activeAssignment, movementVehicles]);
+  const selectedVehicle = permittedVehicles.find((vehicle) => vehicle.id === selectedVehicleId) || permittedVehicles[0] || null;
+
+  const assignedVehicleLabel = selectedVehicle
+    ? `${selectedVehicle.registration_number} ${selectedVehicle.make || ''} ${selectedVehicle.model || ''}`.trim()
+    : 'No permitted vehicle';
 
   const availableComponents = useMemo(
     () => components.filter((component) => component.category_id === formState.category_id),
@@ -198,8 +212,7 @@ export default function ReportFault({ currentUser, activeAssignment }: ReportFau
 
   const selectedCategory = categories.find((category) => category.id === formState.category_id) || null;
 
-  useEffect(() => {
-    const loadOptions = async () => {
+  const loadOptions = async () => {
       setIsLoading(true);
       setPageError('');
       try {
@@ -223,8 +236,40 @@ export default function ReportFault({ currentUser, activeAssignment }: ReportFau
       }
     };
 
+  useEffect(() => {
     void loadOptions();
   }, []);
+
+  useEffect(() => {
+    if (activeAssignment?.vehicle_id) {
+      setSelectedVehicleId(activeAssignment.vehicle_id);
+      return;
+    }
+    if (!currentUser?.id) return;
+    let cancelled = false;
+    const loadMovementVehicles = async () => {
+      try {
+        const response = await fetchVehicleMovements({ page_size: 100 });
+        const openStatuses = new Set(['approved', 'checked_out', 'in_progress']);
+        const vehiclesById = new Map<string, NonNullable<VehicleMovementRecord['vehicle']>>();
+        response.movements.forEach((movement) => {
+          const isCustodian = movement.movement_custodian_id === currentUser.id || movement.driver_id === currentUser.id;
+          if (isCustodian && openStatuses.has(movement.status) && movement.vehicle) {
+            vehiclesById.set(movement.vehicle.id, movement.vehicle);
+          }
+        });
+        if (!cancelled) {
+          const vehicles = Array.from(vehiclesById.values());
+          setMovementVehicles(vehicles);
+          setSelectedVehicleId((current) => current || vehicles[0]?.id || '');
+        }
+      } catch (error) {
+        if (!cancelled) setPageError(error instanceof ApiRequestError ? error.message : 'Unable to load movement-linked vehicles.');
+      }
+    };
+    void loadMovementVehicles();
+    return () => { cancelled = true; };
+  }, [activeAssignment?.vehicle_id, currentUser?.id]);
 
   useEffect(() => {
     if (!formState.category_id) {
@@ -252,9 +297,26 @@ export default function ReportFault({ currentUser, activeAssignment }: ReportFau
 
   const handlePhotoUpload = (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files || []);
+    event.target.value = '';
     if (!files.length) {
       return;
     }
+    if (formState.photos.length + files.length > 8) {
+      setFormError('You can attach up to 8 images per fault report.');
+      return;
+    }
+    const allowedTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
+    const invalidType = files.find((file) => !allowedTypes.has(file.type));
+    if (invalidType) {
+      setFormError('Photos must be JPG, PNG, or WEBP images.');
+      return;
+    }
+    const oversized = files.find((file) => file.size > 5 * 1024 * 1024);
+    if (oversized) {
+      setFormError('Each photo must be 5 MB or smaller.');
+      return;
+    }
+    setFormError('');
 
     Promise.all(
       files.map(
@@ -290,11 +352,14 @@ export default function ReportFault({ currentUser, activeAssignment }: ReportFau
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!activeAssignment?.vehicle_id) {
-      setFormError('You need an active assigned vehicle before reporting a fault.');
+    if (submitInFlight.current) return;
+    const vehicleId = selectedVehicleId || selectedVehicle?.id;
+    if (!vehicleId) {
+      setFormError('You need an assigned or active movement-linked vehicle before reporting a fault.');
       return;
     }
 
+    submitInFlight.current = true;
     setIsSubmitting(true);
     setFormError('');
     setSuccessMessage('');
@@ -303,16 +368,19 @@ export default function ReportFault({ currentUser, activeAssignment }: ReportFau
       await apiRequest<FaultMutationResponse>('/faults', {
         method: 'POST',
         body: JSON.stringify({
-          vehicle_id: activeAssignment.vehicle_id,
+          vehicle_id: vehicleId,
           driver_id: currentUser?.id,
           category_id: formState.category_id,
           component_id: formState.component_id,
           severity: formState.severity,
           description: formState.description,
           photos: formState.photos,
+          vehicle_unsafe: formState.vehicle_unsafe,
+          submission_key: submissionKey.current,
         }),
       });
       setSuccessMessage('Fault report submitted successfully.');
+      submissionKey.current = crypto.randomUUID();
       setPreviewUrls([]);
       setFormState({
         ...initialFormState,
@@ -327,14 +395,15 @@ export default function ReportFault({ currentUser, activeAssignment }: ReportFau
       }
     } finally {
       setIsSubmitting(false);
+      submitInFlight.current = false;
     }
   };
 
-  if (!activeAssignment) {
+  if (!isLoading && permittedVehicles.length === 0) {
     return (
       <div className="p-6">
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-          You need an active vehicle assignment before you can report a fault.
+          You need an active vehicle assignment or an approved/in-progress movement as custodian before you can report a fault.
         </div>
       </div>
     );
@@ -354,7 +423,7 @@ export default function ReportFault({ currentUser, activeAssignment }: ReportFau
             </p>
           </div>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 lg:min-w-[420px]">
-            <HeaderStat label="Vehicle" value={activeAssignment.vehicle?.registration_number || 'Assigned'} />
+            <HeaderStat label="Vehicle" value={selectedVehicle?.registration_number || 'Permitted'} />
             <HeaderStat label="Driver" value={currentUser?.full_name || 'Driver'} />
             <HeaderStat label="Reported" value={new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} />
           </div>
@@ -363,7 +432,12 @@ export default function ReportFault({ currentUser, activeAssignment }: ReportFau
 
       {pageError && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-          {pageError}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span>{pageError}</span>
+            <button type="button" onClick={() => void loadOptions()} className="inline-flex items-center gap-2 rounded-md border border-red-300 bg-white px-3 py-1.5 font-medium hover:bg-red-100">
+              <RefreshCw className="h-4 w-4" /> Retry
+            </button>
+          </div>
         </div>
       )}
 
@@ -408,6 +482,21 @@ export default function ReportFault({ currentUser, activeAssignment }: ReportFau
                 <div className="mt-1 text-sm font-medium text-[#0F172A]">{formatDateTime(new Date())}</div>
               </div>
             </div>
+
+            {permittedVehicles.length > 1 && (
+              <div>
+                <label className="mb-2 block text-sm font-medium text-gray-700">Vehicle</label>
+                <select
+                  value={selectedVehicleId}
+                  onChange={(event) => setSelectedVehicleId(event.target.value)}
+                  className="w-full rounded-lg border border-gray-300 px-4 py-2.5 focus:border-transparent focus:ring-2 focus:ring-[#2563EB]"
+                >
+                  {permittedVehicles.map((vehicle) => (
+                    <option key={vehicle.id} value={vehicle.id}>{vehicle.registration_number} {[vehicle.make, vehicle.model].filter(Boolean).join(' ')}</option>
+                  ))}
+                </select>
+              </div>
+            )}
 
             <div>
               <label className="mb-3 block text-sm font-medium text-gray-700">Category</label>
@@ -531,13 +620,26 @@ export default function ReportFault({ currentUser, activeAssignment }: ReportFau
               />
             </div>
 
+            <label className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
+              <input
+                type="checkbox"
+                checked={formState.vehicle_unsafe}
+                onChange={(event) => setFormState((current) => ({ ...current, vehicle_unsafe: event.target.checked }))}
+                className="mt-0.5 h-4 w-4 rounded border-red-300 text-red-600 focus:ring-red-500"
+              />
+              <span>
+                <span className="block font-semibold">Vehicle is unsafe to operate</span>
+                <span className="mt-1 block text-red-700">Selecting this immediately places the vehicle in maintenance status for safety review.</span>
+              </span>
+            </label>
+
             <div>
               <label className="mb-2 block text-sm font-medium text-gray-700">Photos</label>
               <label className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed border-gray-300 bg-slate-50 px-4 py-8 text-center transition-all hover:border-[#2563EB] hover:bg-blue-50/30">
                 <Upload className="mb-3 h-5 w-5 text-gray-500" />
                 <span className="text-sm font-medium text-gray-700">Upload one or more images</span>
-                <span className="mt-1 text-xs text-gray-500">Multiple photos supported</span>
-                <input type="file" accept="image/*" multiple className="hidden" onChange={handlePhotoUpload} />
+                <span className="mt-1 text-xs text-gray-500">Up to 8 JPG, PNG, or WEBP images; 5 MB each</span>
+                <input type="file" accept="image/jpeg,image/png,image/webp" multiple className="hidden" onChange={handlePhotoUpload} />
               </label>
 
               {previewUrls.length > 0 && (

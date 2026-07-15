@@ -1,8 +1,12 @@
 from datetime import date, datetime, timezone
+from time import perf_counter
 from uuid import uuid4
 
 from bson import ObjectId
 from pymongo import ASCENDING, DESCENDING
+from pymongo.errors import PyMongoError
+from pymongo.read_preferences import ReadPreference
+from flask import current_app
 
 from extensions import get_collection
 from models.incident import serialize_incident
@@ -12,6 +16,12 @@ from services.maintenance_service import create_maintenance_job
 from services.notification_service import notify_roles
 from utils.api_error import ApiError
 from utils.file_validation import validate_attachment_list
+from services.cloudflare_images_service import (
+    CloudflareImagesError,
+    delete_image,
+    upload_image,
+    validate_image,
+)
 from utils.mongo_indexes import ensure_indexes_for_collection
 
 
@@ -105,6 +115,7 @@ def ensure_incident_indexes():
             {"keys": [("vehicle_id", ASCENDING), ("created_at", DESCENDING)]},
             {"keys": [("driver_id", ASCENDING), ("created_at", DESCENDING)]},
             {"keys": [("status", ASCENDING), ("created_at", DESCENDING)]},
+            {"keys": [("status", ASCENDING), ("severity", ASCENDING)]},
         ],
         collection_name="incidents",
     )
@@ -294,22 +305,38 @@ def _validate_driver_incident_scope(current_user_id: str, vehicle_id: str | None
     return _to_object_id(current_user_id, "driver_id"), _to_object_id(assigned_vehicle_id, "vehicle_id")
 
 
-def _validate_attachments(attachments) -> list[dict]:
+def _validate_attachments(attachments, *, uploaded_by: str | None = None) -> list[dict]:
     validated_attachments = validate_attachment_list(attachments, field_name="attachments", max_files=10)
     normalized: list[dict] = []
+    uploaded_assets: list[str] = []
     for item in validated_attachments:
-        normalized.append(
-            {
+        base = {
                 "id": _normalize_string(item.get("id")) or str(uuid4()),
                 "name": _normalize_string(item.get("name")) or "Attachment",
                 "file_name": _normalize_string(item.get("file_name")) or "attachment",
                 "file_kind": _normalize_slug(item.get("file_kind")) or "document",
                 "content_type": _normalize_string(item.get("content_type")),
-                "data_url": item.get("data_url"),
                 "size_bytes": item.get("size_bytes") if isinstance(item.get("size_bytes"), int) else None,
                 "uploaded_at": now_utc(),
             }
-        )
+        if current_app.config.get("CLOUDFLARE_IMAGES_ENABLED") and item.get("data_url"):
+            try:
+                data, mime = validate_image(item.get("data_url"), base["file_name"], base.get("content_type"))
+                uploaded = upload_image(data, filename=base["file_name"], content_type=mime)
+            except Exception as exc:
+                for asset_id in uploaded_assets:
+                    delete_image(asset_id)
+                if isinstance(exc, ApiError):
+                    raise
+                if isinstance(exc, CloudflareImagesError):
+                    raise ApiError(str(exc), status_code=502) from exc
+                raise ApiError("Evidence upload failed. Please retry.", status_code=502) from exc
+            uploaded_assets.append(uploaded["provider_asset_id"])
+            base.update({"provider": "cloudflare_images", "provider_asset_id": uploaded["provider_asset_id"], "public_variant": uploaded["public_variant"], "thumbnail_variant": uploaded["thumbnail_variant"], "public_url": uploaded["public_url"], "thumbnail_url": uploaded["thumbnail_url"], "uploaded_by": uploaded_by, "migration_status": "native"})
+        else:
+            # Legacy/local deployments retain the existing data-url compatibility path.
+            base["data_url"] = item.get("data_url")
+        normalized.append(base)
     return normalized
 
 
@@ -510,7 +537,7 @@ def _load_relationship_maps(documents: list[dict]) -> tuple[dict[str, dict], dic
     return vehicle_map, user_map
 
 
-def _build_dashboard(documents: list[dict], *, vehicle_map: dict[str, dict]) -> dict:
+def _build_dashboard(documents: list[dict], *, vehicle_map: dict[str, dict], user_map: dict[str, dict]) -> dict:
     total_repair_cost = round(sum(float(item.get("repair_cost") or 0) for item in documents), 2)
     total_approved = round(sum(float(item.get("insurance_approved_amount") or 0) for item in documents), 2)
     total_paid = round(sum(float(item.get("paid_amount") or 0) for item in documents), 2)
@@ -544,10 +571,6 @@ def _build_dashboard(documents: list[dict], *, vehicle_map: dict[str, dict]) -> 
         if item.get("incident_type") in {"accident", "injury", "fire", "theft"}:
             summary["critical_incidents"] += 1
 
-    user_map = {
-        str(item["_id"]): item
-        for item in users_collection().find({"_id": {"$in": [_to_object_id(driver_id, "driver_id") for driver_id in driver_summary]}})
-    } if driver_summary else {}
     for driver_id, summary in driver_summary.items():
         summary["driver_name"] = (user_map.get(driver_id) or {}).get("full_name")
         summary["estimated_revenue_lost"] = round(summary["estimated_revenue_lost"], 2)
@@ -655,27 +678,132 @@ def _build_dashboard(documents: list[dict], *, vehicle_map: dict[str, dict]) -> 
 
 
 def list_incidents(*, current_user_id: str, current_role: str) -> dict:
+    started_at = perf_counter()
+    role = (current_role or "").strip().lower()
     query = {}
-    if current_role == "driver":
+    if role == "driver":
         query["driver_id"] = _to_object_id(current_user_id, "current_user_id")
-    documents = list(incidents_collection().find(query).sort([("incident_at", DESCENDING), ("created_at", DESCENDING)]))
-    vehicle_map, user_map = _load_relationship_maps(documents)
-    dashboard = _build_dashboard(documents, vehicle_map=vehicle_map)
+    read_collection = incidents_collection().with_options(read_preference=ReadPreference.SECONDARY_PREFERRED)
+    query_started_at = perf_counter()
+    documents = list(
+        read_collection.find(query, {"attachments.data_url": 0})
+        .sort([("incident_at", DESCENDING), ("created_at", DESCENDING)])
+        .limit(250)
+    )
+    query_ms = (perf_counter() - query_started_at) * 1000
+    section_errors = {}
+    relationships_started_at = perf_counter()
+    try:
+        vehicle_map, user_map = _load_relationship_maps(documents)
+    except PyMongoError as error:
+        current_app.logger.exception("[Flux Incidents] Relationship enrichment failed: %s", error)
+        vehicle_map, user_map = {}, {}
+        section_errors["relationships"] = "Vehicle and driver details are temporarily unavailable."
+    relationships_ms = (perf_counter() - relationships_started_at) * 1000
+    dashboard_started_at = perf_counter()
+    try:
+        dashboard = _build_dashboard(documents, vehicle_map=vehicle_map, user_map=user_map)
+    except (ApiError, PyMongoError, TypeError, ValueError) as error:
+        current_app.logger.exception("[Flux Incidents] Dashboard enrichment failed: %s", error)
+        dashboard = {
+            "summary": {
+                "total_incidents": len(documents),
+                "open_incidents": sum(1 for item in documents if item.get("status") not in {"resolved", "rejected", "closed"}),
+                "repair_cost": 0,
+                "insurance_approved_amount": 0,
+                "amount_paid": 0,
+                "outstanding_claim": 0,
+                "downtime_days": 0,
+                "estimated_revenue_lost": 0,
+            },
+            "high_risk_drivers": [],
+            "insurance_directory": [],
+            "alerts": [],
+        }
+        section_errors["dashboard"] = "Risk, claim, and insurance summaries are temporarily unavailable."
+    dashboard_ms = (perf_counter() - dashboard_started_at) * 1000
+    serialize_started_at = perf_counter()
+    serialized_incidents = [_enrich_incident(document, vehicle_map=vehicle_map, user_map=user_map) for document in documents]
+    serialize_ms = (perf_counter() - serialize_started_at) * 1000
+    current_app.logger.info(
+        "[Flux Incidents] list role=%s count=%s query_ms=%.2f relationships_ms=%.2f dashboard_ms=%.2f serialize_ms=%.2f total_ms=%.2f section_errors=%s",
+        role, len(documents), query_ms, relationships_ms, dashboard_ms, serialize_ms,
+        (perf_counter() - started_at) * 1000, sorted(section_errors),
+    )
     return {
-        "incidents": [_enrich_incident(document, vehicle_map=vehicle_map, user_map=user_map) for document in documents],
+        "incidents": serialized_incidents,
         "dashboard": dashboard["summary"],
         "high_risk_drivers": dashboard["high_risk_drivers"],
         "insurance_directory": dashboard["insurance_directory"],
         "alerts": dashboard["alerts"],
         "status_options": sorted(ALLOWED_INCIDENT_STATUSES),
+        "section_errors": section_errors,
     }
 
 
 def get_incident_by_id(incident_id: str, *, current_user_id: str, current_role: str) -> dict:
-    document = _get_incident_document(incident_id)
-    if current_role == "driver" and str(document.get("driver_id")) != current_user_id:
+    incident_object_id = _to_object_id(incident_id, "incident_id")
+    document = incidents_collection().with_options(
+        read_preference=ReadPreference.SECONDARY_PREFERRED
+    ).find_one({"_id": incident_object_id}, {"attachments.data_url": 0})
+    if not document:
+        raise ApiError("Incident not found.", status_code=404)
+    if (current_role or "").strip().lower() == "driver" and str(document.get("driver_id")) != current_user_id:
         raise ApiError("You can only view incidents you reported.", status_code=403)
     return _enrich_incident(document)
+
+
+def get_incident_attachment(incident_id: str, attachment_id: str, *, current_user_id: str, current_role: str) -> dict:
+    incident_object_id = _to_object_id(incident_id, "incident_id")
+    # Evidence payloads are larger than list metadata; use the primary so a lagging/slow
+    # secondary cannot make the attachment appear missing or time out independently.
+    document = incidents_collection().find_one(
+        {"_id": incident_object_id, "attachments.id": attachment_id},
+        {"driver_id": 1, "attachments.$": 1},
+    )
+    if not document:
+        incident_scope = incidents_collection().find_one({"_id": incident_object_id}, {"driver_id": 1})
+        if not incident_scope:
+            raise ApiError("Incident not found.", status_code=404)
+        if (current_role or "").strip().lower() == "driver" and str(incident_scope.get("driver_id")) != current_user_id:
+            raise ApiError("You can only view evidence for incidents you reported.", status_code=403)
+        raise ApiError("Evidence file unavailable.", status_code=404)
+    if (current_role or "").strip().lower() == "driver" and str(document.get("driver_id")) != current_user_id:
+        raise ApiError("You can only view evidence for incidents you reported.", status_code=403)
+    attachment = next((item for item in document.get("attachments") or [] if str(item.get("id")) == str(attachment_id)), None)
+    if not attachment or (not attachment.get("data_url") and not attachment.get("provider_asset_id")):
+        raise ApiError("Evidence file unavailable.", status_code=404)
+    if attachment.get("provider_asset_id"):
+        return {
+            "id": attachment.get("id"), "name": attachment.get("name"), "file_name": attachment.get("file_name"),
+            "file_kind": attachment.get("file_kind"), "content_type": attachment.get("content_type"),
+            "size_bytes": attachment.get("size_bytes"), "provider": "cloudflare_images",
+            "provider_asset_id": attachment.get("provider_asset_id"), "public_url": attachment.get("public_url"),
+            "thumbnail_url": attachment.get("thumbnail_url"), "public_variant": attachment.get("public_variant"),
+            "thumbnail_variant": attachment.get("thumbnail_variant"),
+        }
+    return {
+        "id": attachment.get("id"),
+        "name": attachment.get("name"),
+        "file_name": attachment.get("file_name"),
+        "file_kind": attachment.get("file_kind"),
+        "content_type": attachment.get("content_type"),
+        "size_bytes": attachment.get("size_bytes"),
+        "data_url": attachment.get("data_url"),
+    }
+
+
+def delete_incident_attachment(incident_id: str, attachment_id: str, *, current_user_id: str, current_role: str) -> dict:
+    if current_role not in {"owner", "admin"}:
+        raise ApiError("Only admins and owners can remove incident evidence.", status_code=403)
+    document = _get_incident_document(incident_id)
+    attachment = next((item for item in document.get("attachments") or [] if str(item.get("id")) == str(attachment_id)), None)
+    if not attachment:
+        raise ApiError("Evidence file unavailable.", status_code=404)
+    if attachment.get("provider_asset_id") and not delete_image(attachment.get("provider_asset_id")):
+        raise ApiError("Evidence provider could not remove the image. Please retry.", status_code=502)
+    incidents_collection().update_one({"_id": document["_id"]}, {"$pull": {"attachments": {"id": attachment_id}}})
+    return {"attachment_id": attachment_id, "deleted": True}
 
 
 def create_incident(payload: dict, *, current_user_id: str, current_role: str) -> dict:
@@ -723,7 +851,7 @@ def create_incident(payload: dict, *, current_user_id: str, current_role: str) -
         "witness_phone": _normalize_string(payload.get("witness_phone")),
         "police_station": _normalize_string(payload.get("police_station")),
         "police_report_number": _normalize_string(payload.get("police_report_number")),
-        "attachments": _validate_attachments(payload.get("attachments") or payload.get("photos") or []),
+        "attachments": _validate_attachments(payload.get("attachments") or payload.get("photos") or [], uploaded_by=current_user_id),
         "investigation_notes": [],
         "claim_number": None,
         "claim_submitted_date": None,
@@ -750,7 +878,13 @@ def create_incident(payload: dict, *, current_user_id: str, current_role: str) -
     _update_downtime_fields(document, vehicle_document=vehicle_document)
     document["vehicle_status_after_incident"] = _status_for_incident_vehicle(document)
 
-    result = incidents_collection().insert_one(document)
+    try:
+        result = incidents_collection().insert_one(document)
+    except Exception:
+        for attachment in document.get("attachments") or []:
+            if attachment.get("provider_asset_id"):
+                delete_image(attachment.get("provider_asset_id"))
+        raise
     document["_id"] = result.inserted_id
     _sync_vehicle_status_for_incident(document)
     _append_audit_log(
@@ -817,7 +951,7 @@ def update_incident(incident_id: str, payload: dict, *, current_user_id: str, cu
             audit_changes.append("Investigation note added.")
 
     if "attachments" in payload:
-        attachments = _validate_attachments(payload.get("attachments"))
+        attachments = _validate_attachments(payload.get("attachments"), uploaded_by=current_user_id)
         if attachments:
             update_fields["$push_attachments"] = attachments
             audit_changes.append(f"{len(attachments)} attachment(s) added.")
@@ -933,7 +1067,13 @@ def update_incident(incident_id: str, payload: dict, *, current_user_id: str, cu
         mongo_update.setdefault("$push", {})["attachments"] = {"$each": update_fields["$push_attachments"]}
         document.setdefault("attachments", []).extend(update_fields["$push_attachments"])
 
-    incidents_collection().update_one({"_id": document["_id"]}, mongo_update)
+    try:
+        incidents_collection().update_one({"_id": document["_id"]}, mongo_update)
+    except Exception:
+        for attachment in update_fields.get("$push_attachments") or []:
+            if attachment.get("provider_asset_id"):
+                delete_image(attachment.get("provider_asset_id"))
+        raise
     if "status" in update_fields or "vehicle_status_after_incident" in update_fields:
         _sync_vehicle_status_for_incident(document)
     _append_audit_log(

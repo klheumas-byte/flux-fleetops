@@ -410,8 +410,13 @@ export default function Maintenance() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isActionSubmitting, setIsActionSubmitting] = useState(false);
   const [pageError, setPageError] = useState('');
+  const [supportingDataError, setSupportingDataError] = useState('');
+  const [dueFollowUpsError, setDueFollowUpsError] = useState('');
+  const [overdueFollowUpsError, setOverdueFollowUpsError] = useState('');
   const [formError, setFormError] = useState('');
   const [actionError, setActionError] = useState('');
+  const [activeRowActionJobId, setActiveRowActionJobId] = useState<string | null>(null);
+  const [rowActionFeedback, setRowActionFeedback] = useState<Record<string, { tone: 'success' | 'error'; message: string }>>({});
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editingJob, setEditingJob] = useState<MaintenanceJob | null>(null);
   const [statusTarget, setStatusTarget] = useState<MaintenanceJob | null>(null);
@@ -422,6 +427,9 @@ export default function Maintenance() {
     notes: '',
     actual_cost: '',
     completion_date: '',
+    completion_odometer: '',
+    work_performed: '',
+    parts_changed: '',
     vendor_name: '',
     vendor_contact: '',
   });
@@ -439,9 +447,19 @@ export default function Maintenance() {
   const loadMaintenance = async () => {
     setIsLoading(true);
     setPageError('');
+    setSupportingDataError('');
+    setDueFollowUpsError('');
+    setOverdueFollowUpsError('');
     try {
-      const [
-        jobsResult,
+      const jobsResponse = await apiRequest<MaintenanceJobsResponse>('/maintenance', { cacheTtlMs: 10000, timeoutMs: 15000 });
+      setJobs(Array.isArray(jobsResponse?.data?.jobs) ? jobsResponse.data.jobs : []);
+    } catch (error) {
+      setPageError(error instanceof ApiRequestError ? error.message : 'Unable to load maintenance jobs right now.');
+    } finally {
+      setIsLoading(false);
+    }
+
+    const [
         faultsResult,
         vehiclesResult,
         driversResult,
@@ -451,7 +469,6 @@ export default function Maintenance() {
         dueResult,
         overdueResult,
       ] = await Promise.allSettled([
-        apiRequest<MaintenanceJobsResponse>('/maintenance', { cacheTtlMs: 10000, timeoutMs: 15000 }),
         apiRequest<FaultsResponse>('/faults', { cacheTtlMs: 10000, timeoutMs: 15000 }),
         apiRequest<VehiclesResponse>('/vehicles', { cacheTtlMs: 10000, timeoutMs: 15000 }),
         apiRequest<DriversResponse>('/drivers', { cacheTtlMs: 10000, timeoutMs: 15000 }),
@@ -462,7 +479,6 @@ export default function Maintenance() {
         apiRequest<MaintenanceJobsResponse>('/maintenance/follow-ups/overdue', { cacheTtlMs: 10000, timeoutMs: 15000 }),
       ]);
 
-      const jobsResponse = getSettledData<MaintenanceJobsResponse | null>(jobsResult, null);
       const faultsResponse = getSettledData<FaultsResponse | null>(faultsResult, null);
       const vehiclesResponse = getSettledData<VehiclesResponse | null>(vehiclesResult, null);
       const driversResponse = getSettledData<DriversResponse | null>(driversResult, null);
@@ -471,31 +487,18 @@ export default function Maintenance() {
       const coordinatorsResponse = getSettledData<AccountabilityResponse | null>(coordinatorsResult, null);
       const dueResponse = getSettledData<MaintenanceJobsResponse | null>(dueResult, null);
       const overdueResponse = getSettledData<MaintenanceJobsResponse | null>(overdueResult, null);
-      const errors = [
-        getSettledError(jobsResult),
-        getSettledError(faultsResult),
-        getSettledError(vehiclesResult),
-        getSettledError(driversResult),
-        getSettledError(expensesResult),
-        getSettledError(financeAccountsResult),
-        getSettledError(coordinatorsResult),
-        getSettledError(dueResult),
-        getSettledError(overdueResult),
-      ];
-
       const nextCoordinators = (coordinatorsResponse?.data?.admins || [])
         .map((entry) => entry.admin)
         .filter(Boolean);
 
-      setJobs(Array.isArray(jobsResponse?.data?.jobs) ? jobsResponse.data.jobs : []);
       setFaults(Array.isArray(faultsResponse?.data?.faults) ? faultsResponse.data.faults : []);
       setVehicles(Array.isArray(vehiclesResponse?.data?.vehicles) ? vehiclesResponse.data.vehicles : []);
       setDrivers(Array.isArray(driversResponse?.data?.drivers) ? driversResponse.data.drivers : []);
       setExpenses(Array.isArray(expensesResponse?.data?.expenses) ? expensesResponse.data.expenses : []);
       setFinanceAccounts(Array.isArray(financeAccountsResponse?.data?.accounts) ? financeAccountsResponse.data.accounts : []);
       setCoordinators(nextCoordinators);
-      setDueFollowUps(Array.isArray(dueResponse?.data?.jobs) ? dueResponse.data.jobs : []);
-      setOverdueFollowUps(Array.isArray(overdueResponse?.data?.jobs) ? overdueResponse.data.jobs : []);
+      if (dueResponse) setDueFollowUps(Array.isArray(dueResponse.data?.jobs) ? dueResponse.data.jobs : []);
+      if (overdueResponse) setOverdueFollowUps(Array.isArray(overdueResponse.data?.jobs) ? overdueResponse.data.jobs : []);
 
       setFormState((current) => ({
         ...current,
@@ -507,12 +510,24 @@ export default function Maintenance() {
           current.linked_expense_finance_account_id || financeAccountsResponse?.data?.accounts?.find((account) => account.status === 'active')?.id || '',
       }));
 
-      const primaryError = getSettledError(jobsResult);
-      if (primaryError) {
-        setPageError(primaryError);
-      }
-    } finally {
-      setIsLoading(false);
+      const supportErrors = [faultsResult, vehiclesResult, driversResult, expensesResult, financeAccountsResult, coordinatorsResult]
+        .map(getSettledError)
+        .filter(Boolean);
+      setSupportingDataError(supportErrors.length ? `Some form options could not be loaded: ${supportErrors.join(' ')}` : '');
+      setDueFollowUpsError(getSettledError(dueResult) || '');
+      setOverdueFollowUpsError(getSettledError(overdueResult) || '');
+  };
+
+  const retryFollowUps = async (kind: 'due' | 'overdue') => {
+    const setError = kind === 'due' ? setDueFollowUpsError : setOverdueFollowUpsError;
+    setError('');
+    try {
+      const response = await apiRequest<MaintenanceJobsResponse>(`/maintenance/follow-ups/${kind}`, { timeoutMs: 15000 });
+      const nextJobs = Array.isArray(response.data?.jobs) ? response.data.jobs : [];
+      if (kind === 'due') setDueFollowUps(nextJobs);
+      else setOverdueFollowUps(nextJobs);
+    } catch (error) {
+      setError(error instanceof ApiRequestError ? error.message : `Unable to load ${kind} follow-ups.`);
     }
   };
 
@@ -612,6 +627,9 @@ export default function Maintenance() {
       start_date: job.start_date || '',
       target_completion_date: job.target_completion_date || '',
       completion_date: job.completion_date || '',
+      completion_odometer: job.odometer_reading != null ? String(job.odometer_reading) : '',
+      work_performed: job.notes || '',
+      parts_changed: '',
       notes: job.notes || '',
       maintenance_coordinator_id: job.maintenance_coordinator_id || '',
       current_stage: job.current_stage || 'assigned_to_mechanic',
@@ -795,19 +813,23 @@ export default function Maintenance() {
     setActionError('');
     setIsActionSubmitting(true);
     try {
-      await apiRequest<MaintenanceJobMutationResponse>(`/maintenance/${statusTarget.id}/status`, {
+      const response = await apiRequest<MaintenanceJobMutationResponse>(`/maintenance/${statusTarget.id}/status`, {
         method: 'PATCH',
         body: JSON.stringify({
           status: statusForm.status,
           notes: statusForm.notes,
           actual_cost: statusForm.actual_cost ? Number(statusForm.actual_cost) : null,
           completion_date: statusForm.completion_date || null,
+          completion_odometer: statusForm.completion_odometer ? Number(statusForm.completion_odometer) : null,
+          work_performed: statusForm.work_performed || null,
+          parts_changed: statusForm.parts_changed || null,
           vendor_name: statusForm.vendor_name,
           vendor_contact: statusForm.vendor_contact,
         }),
       });
+      setJobs((current) => current.map((job) => job.id === response.data.job.id ? response.data.job : job));
+      setRowActionFeedback((current) => ({ ...current, [statusTarget.id]: { tone: 'success', message: 'Maintenance status updated.' } }));
       closeStatusModal();
-      await loadMaintenance();
     } catch (error) {
       if (error instanceof ApiRequestError) {
         setActionError(error.message);
@@ -820,24 +842,29 @@ export default function Maintenance() {
   };
 
   const handleAssignCoordinator = async (job: MaintenanceJob, coordinatorId: string) => {
+    if (activeRowActionJobId === job.id) return;
     setActionError('');
+    setActiveRowActionJobId(job.id);
     setIsActionSubmitting(true);
     try {
-      await apiRequest<MaintenanceJobMutationResponse>(`/maintenance/${job.id}/assign-coordinator`, {
+      const response = await apiRequest<MaintenanceJobMutationResponse>(`/maintenance/${job.id}/assign-coordinator`, {
         method: 'PATCH',
         body: JSON.stringify({
           maintenance_coordinator_id: coordinatorId,
         }),
       });
-      await loadMaintenance();
+      setJobs((current) => current.map((item) => item.id === response.data.job.id ? response.data.job : item));
+      setRowActionFeedback((current) => ({ ...current, [job.id]: { tone: 'success', message: 'Coordinator updated.' } }));
     } catch (error) {
       if (error instanceof ApiRequestError) {
         setActionError(error.message);
+        setRowActionFeedback((current) => ({ ...current, [job.id]: { tone: 'error', message: error.message } }));
       } else {
         setActionError('Unable to assign maintenance coordinator right now.');
       }
     } finally {
       setIsActionSubmitting(false);
+      setActiveRowActionJobId(null);
     }
   };
 
@@ -901,6 +928,11 @@ export default function Maintenance() {
           {pageError}
         </div>
       )}
+      {supportingDataError && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          {supportingDataError}
+        </div>
+      )}
 
       {actionError && !selectedProgressJob && !statusTarget && !selectedTimelineJob && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
@@ -925,6 +957,8 @@ export default function Maintenance() {
           emptyMessage="No maintenance follow-ups due today."
           onProgress={openProgressModal}
           onTimeline={(job) => void openTimelineModal(job)}
+          error={dueFollowUpsError}
+          onRetry={() => void retryFollowUps('due')}
         />
         <FollowUpPanel
           title={isOwner ? 'Overdue Follow-ups' : 'My Overdue Follow-ups'}
@@ -933,6 +967,8 @@ export default function Maintenance() {
           emptyMessage="No overdue maintenance follow-ups."
           onProgress={openProgressModal}
           onTimeline={(job) => void openTimelineModal(job)}
+          error={overdueFollowUpsError}
+          onRetry={() => void retryFollowUps('overdue')}
         />
       </div>
 
@@ -1037,6 +1073,7 @@ export default function Maintenance() {
                       <select
                         value={job.maintenance_coordinator_id || ''}
                         onChange={(event) => void handleAssignCoordinator(job, event.target.value)}
+                        disabled={activeRowActionJobId === job.id}
                         className="mt-2 w-full rounded-lg border border-gray-300 px-2 py-1.5 text-xs focus:border-transparent focus:ring-2 focus:ring-[#2563EB]"
                       >
                         <option value="">Choose coordinator...</option>
@@ -1046,6 +1083,8 @@ export default function Maintenance() {
                           </option>
                         ))}
                       </select>
+                      {activeRowActionJobId === job.id ? <div className="mt-1 text-xs text-blue-600">Saving assignment…</div> : null}
+                      {rowActionFeedback[job.id]?.message ? <div className={`mt-1 text-xs ${rowActionFeedback[job.id].tone === 'error' ? 'text-red-600' : 'text-emerald-600'}`}>{rowActionFeedback[job.id].message}</div> : null}
                     </td>
                     <td className="px-6 py-4 text-sm text-gray-700">
                       <div>{formatLabel(job.current_stage || 'assigned_to_mechanic')}</div>
@@ -1185,8 +1224,8 @@ export default function Maintenance() {
 
       {showCreateModal && (
         <ModalShell title={editingJob ? 'Edit Maintenance Job' : 'Create Maintenance Job'} onClose={closeCreateModal} maxWidth="max-w-5xl">
-          <form onSubmit={handleSubmit} className="flex h-full flex-col">
-            <div className="flex-1 space-y-5 overflow-y-auto px-6 py-5">
+          <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
+            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain px-6 py-5">
               {formError && (
                 <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
                   {formError}
@@ -1358,8 +1397,8 @@ export default function Maintenance() {
 
       {selectedProgressJob && (
         <ModalShell title="Add Progress Update" subtitle={selectedProgressJob.title} onClose={closeProgressModal} maxWidth="max-w-3xl">
-          <form onSubmit={handleProgressSubmit} className="flex h-full flex-col">
-            <div className="flex-1 space-y-5 overflow-y-auto px-6 py-5">
+          <form onSubmit={handleProgressSubmit} className="flex min-h-0 flex-1 flex-col">
+            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain px-6 py-5">
               {actionError && (
                 <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
                   {actionError}
@@ -1396,8 +1435,8 @@ export default function Maintenance() {
 
       {statusTarget && (
         <ModalShell title="Update Maintenance Status" subtitle={statusTarget.title} onClose={closeStatusModal} maxWidth="max-w-2xl">
-          <form onSubmit={handleStatusSubmit} className="flex h-full flex-col">
-            <div className="flex-1 space-y-5 overflow-y-auto px-6 py-5">
+          <form onSubmit={handleStatusSubmit} className="flex min-h-0 flex-1 flex-col">
+            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain px-6 py-5">
               {actionError && (
                 <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
                   {actionError}
@@ -1415,7 +1454,14 @@ export default function Maintenance() {
                 <InputField label="Vendor Contact" value={statusForm.vendor_contact} onChange={(value) => setStatusForm((current) => ({ ...current, vendor_contact: value }))} />
                 <InputField label="Actual Cost" type="number" value={statusForm.actual_cost} onChange={(value) => setStatusForm((current) => ({ ...current, actual_cost: value }))} />
                 <InputField label="Completion Date" type="date" value={statusForm.completion_date} onChange={(value) => setStatusForm((current) => ({ ...current, completion_date: value }))} />
+                <InputField label="Completion Odometer" type="number" value={statusForm.completion_odometer} onChange={(value) => setStatusForm((current) => ({ ...current, completion_odometer: value }))} />
               </div>
+              {statusForm.status === 'completed' ? (
+                <>
+                  <TextAreaField label="Work Performed" value={statusForm.work_performed} onChange={(value) => setStatusForm((current) => ({ ...current, work_performed: value }))} minHeight="min-h-[96px]" />
+                  <TextAreaField label="Parts Changed" value={statusForm.parts_changed} onChange={(value) => setStatusForm((current) => ({ ...current, parts_changed: value }))} minHeight="min-h-[80px]" />
+                </>
+              ) : null}
               <TextAreaField label="Notes" value={statusForm.notes} onChange={(value) => setStatusForm((current) => ({ ...current, notes: value }))} minHeight="min-h-[120px]" />
             </div>
             <ModalFooter onCancel={closeStatusModal} submitLabel={isActionSubmitting ? 'Updating...' : 'Update Status'} isSubmitting={isActionSubmitting} />
@@ -1425,7 +1471,7 @@ export default function Maintenance() {
 
       {selectedTimelineJob && (
         <ModalShell title="Maintenance Timeline" subtitle={selectedTimelineJob.title} onClose={closeTimelineModal} maxWidth="max-w-4xl">
-          <div className="flex-1 overflow-y-auto px-6 py-5">
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-5">
             {timelineLoading ? (
               <div className="flex items-center justify-center gap-3 px-6 py-16 text-gray-500">
                 <Loader2 className="h-5 w-5 animate-spin" />
@@ -1529,6 +1575,8 @@ function FollowUpPanel({
   emptyMessage,
   onProgress,
   onTimeline,
+  error,
+  onRetry,
 }: {
   title: string;
   subtitle: string;
@@ -1536,6 +1584,8 @@ function FollowUpPanel({
   emptyMessage: string;
   onProgress: (job: MaintenanceJob) => void;
   onTimeline: (job: MaintenanceJob) => void;
+  error?: string;
+  onRetry?: () => void;
 }) {
   return (
     <div className="rounded-xl border border-gray-200 bg-white">
@@ -1544,7 +1594,12 @@ function FollowUpPanel({
         <p className="mt-1 text-sm text-gray-600">{subtitle}</p>
       </div>
       <div className="space-y-3 px-6 py-5">
-        {jobs.length === 0 ? (
+        {error ? (
+          <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-4 text-sm text-red-700">
+            <div>{error}</div>
+            {onRetry ? <button type="button" onClick={onRetry} className="mt-3 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-medium hover:bg-red-100">Retry this section</button> : null}
+          </div>
+        ) : jobs.length === 0 ? (
           <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 px-4 py-8 text-center text-sm text-gray-500">
             {emptyMessage}
           </div>
@@ -1598,19 +1653,32 @@ function ModalShell({
   children: ReactNode;
   maxWidth?: string;
 }) {
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [onClose]);
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4 py-6">
-      <div className={`flex max-h-[92vh] w-full flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-2xl ${maxWidth || 'max-w-3xl'}`}>
-        <div className="flex items-start justify-between border-b border-gray-200 px-6 py-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-black/50 p-2 sm:p-4" role="presentation">
+      <div role="dialog" aria-modal="true" aria-labelledby="maintenance-modal-title" className={`flex max-h-[90dvh] min-h-0 w-full flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-2xl ${maxWidth || 'max-w-3xl'}`}>
+        <div className="shrink-0 flex items-start justify-between border-b border-gray-200 px-6 py-4">
           <div>
-            <h2 className="text-xl font-semibold text-[#0F172A]">{title}</h2>
+            <h2 id="maintenance-modal-title" className="text-xl font-semibold text-[#0F172A]">{title}</h2>
             {subtitle && <p className="mt-1 text-sm text-gray-500">{subtitle}</p>}
           </div>
-          <button onClick={onClose} className="rounded-lg p-2 transition-all hover:bg-gray-100">
+          <button type="button" onClick={onClose} aria-label="Close modal" className="rounded-lg p-2 transition-all hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-[#2563EB]">
             <XCircle className="h-5 w-5 text-gray-500" />
           </button>
         </div>
-        {children}
+        <div className="flex min-h-0 flex-1 flex-col">{children}</div>
       </div>
     </div>
   );

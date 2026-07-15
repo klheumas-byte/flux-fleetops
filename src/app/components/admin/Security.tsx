@@ -69,7 +69,7 @@ export default function Security() {
     {
       id: '1',
       user: 'Admin User',
-      email: 'admin@fluxfleet.com',
+      email: 'operations@company.com',
       ipAddress: '192.168.1.100',
       location: 'Accra, Ghana',
       device: 'Chrome on Windows',
@@ -79,7 +79,7 @@ export default function Security() {
     {
       id: '2',
       user: 'John Mensah',
-      email: 'john@fluxfleet.com',
+      email: 'john@company.com',
       ipAddress: '192.168.1.105',
       location: 'Kumasi, Ghana',
       device: 'Safari on iPhone',
@@ -89,7 +89,7 @@ export default function Security() {
     {
       id: '3',
       user: 'Unknown',
-      email: 'admin@fluxfleet.com',
+      email: 'operations@company.com',
       ipAddress: '45.123.45.67',
       location: 'Lagos, Nigeria',
       device: 'Firefox on Linux',
@@ -100,7 +100,7 @@ export default function Security() {
     {
       id: '4',
       user: 'Ama Boateng',
-      email: 'ama@fluxfleet.com',
+      email: 'ama@company.com',
       ipAddress: '192.168.1.110',
       location: 'Accra, Ghana',
       device: 'Chrome on Android',
@@ -110,7 +110,7 @@ export default function Security() {
     {
       id: '5',
       user: 'Unknown',
-      email: 'admin@fluxfleet.com',
+      email: 'operations@company.com',
       ipAddress: '89.234.56.78',
       location: 'London, UK',
       device: 'Chrome on Windows',
@@ -706,28 +706,28 @@ export default function Security() {
                     <div className="flex items-center justify-between p-3 bg-green-50 rounded-lg border border-green-200">
                       <div>
                         <div className="font-medium text-sm text-gray-900">Admin User</div>
-                        <div className="text-xs text-gray-600">admin@fluxfleet.com</div>
+                        <div className="text-xs text-gray-600">operations@company.com</div>
                       </div>
                       <span className="text-xs font-semibold text-green-700 bg-green-100 px-2 py-1 rounded">Enrolled</span>
                     </div>
                     <div className="flex items-center justify-between p-3 bg-green-50 rounded-lg border border-green-200">
                       <div>
                         <div className="font-medium text-sm text-gray-900">John Mensah</div>
-                        <div className="text-xs text-gray-600">john@fluxfleet.com</div>
+                        <div className="text-xs text-gray-600">john@company.com</div>
                       </div>
                       <span className="text-xs font-semibold text-green-700 bg-green-100 px-2 py-1 rounded">Enrolled</span>
                     </div>
                     <div className="flex items-center justify-between p-3 bg-yellow-50 rounded-lg border border-yellow-200">
                       <div>
                         <div className="font-medium text-sm text-gray-900">Ama Boateng</div>
-                        <div className="text-xs text-gray-600">ama@fluxfleet.com</div>
+                        <div className="text-xs text-gray-600">ama@company.com</div>
                       </div>
                       <span className="text-xs font-semibold text-yellow-700 bg-yellow-100 px-2 py-1 rounded">Pending</span>
                     </div>
                     <div className="flex items-center justify-between p-3 bg-red-50 rounded-lg border border-red-200">
                       <div>
                         <div className="font-medium text-sm text-gray-900">Kofi Asante</div>
-                        <div className="text-xs text-gray-600">kofi@fluxfleet.com</div>
+                        <div className="text-xs text-gray-600">kofi@company.com</div>
                       </div>
                       <span className="text-xs font-semibold text-red-700 bg-red-100 px-2 py-1 rounded">Not Enrolled</span>
                     </div>

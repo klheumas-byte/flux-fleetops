@@ -1,5 +1,7 @@
 from bson import ObjectId
 
+from utils.fuel_levels import build_fuel_level_details, normalize_fuel_level_eighths
+
 
 def _serialize_reference_id(value):
     if isinstance(value, ObjectId):
@@ -20,6 +22,7 @@ def serialize_vehicle(vehicle_document: dict, *, include_sensitive: bool = True)
         "color": vehicle_document.get("color"),
         "transmission": vehicle_document.get("transmission"),
         "fuel_type": vehicle_document.get("fuel_type"),
+        "tank_capacity_litres": vehicle_document.get("tank_capacity_litres"),
         "chassis_number": vehicle_document.get("chassis_number"),
         "engine_number": vehicle_document.get("engine_number"),
         "insurance_expiry": vehicle_document.get("insurance_expiry"),
@@ -57,6 +60,17 @@ def serialize_vehicle(vehicle_document: dict, *, include_sensitive: bool = True)
         if vehicle_document.get("updated_at")
         else None,
     }
+    current_fuel_level, current_fuel_warning = normalize_fuel_level_eighths(
+        vehicle_document.get("current_fuel_level")
+    )
+    data["current_fuel_level"] = current_fuel_level
+    data["current_fuel_level_details"] = build_fuel_level_details(
+        current_fuel_level,
+        tank_capacity_litres=vehicle_document.get("tank_capacity_litres"),
+    )
+    if current_fuel_level is None and vehicle_document.get("current_fuel_level") not in (None, ""):
+        data["current_fuel_level_legacy_value"] = vehicle_document.get("current_fuel_level")
+        data["current_fuel_level_warning"] = current_fuel_warning
     if include_sensitive:
         data["asset_owner_type"] = vehicle_document.get("asset_owner_type") or "Axelera Owned"
         data["asset_owner_name"] = vehicle_document.get("asset_owner_name") or "Axelera"

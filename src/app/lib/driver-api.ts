@@ -1,3 +1,4 @@
+import type { FuelLevelDetails } from './fuel-gauge';
 import { apiRequest } from './api';
 
 export interface DriverAssignedVehicle {
@@ -10,6 +11,9 @@ export interface DriverAssignedVehicle {
   color?: string | null;
   transmission?: string | null;
   fuel_type?: string | null;
+  tank_capacity_litres?: number | null;
+  current_fuel_level?: number | null;
+  current_fuel_level_details?: FuelLevelDetails | null;
   insurance_expiry?: string | null;
   insurance_profile?: {
     insurance_company?: string | null;
@@ -147,6 +151,88 @@ export interface DriverWalletData {
   ledger_entries: DriverWalletLedgerEntry[];
 }
 
+export interface DriverDispatchStop {
+  stop_id: string;
+  stop_sequence?: number | null;
+  stop_type?: string | null;
+  location?: string | null;
+  contact_name?: string | null;
+  contact_phone?: string | null;
+  load_note?: string | null;
+  planned_arrival_time?: string | null;
+  planned_departure_time?: string | null;
+  stop_status?: string | null;
+  delivery_status?: string | null;
+  delivered_at?: string | null;
+  delivery_note?: string | null;
+  completed_at?: string | null;
+  completion_note?: string | null;
+}
+
+export interface DriverDispatchTimelineEntry {
+  event_id: string;
+  event_type: string;
+  title: string;
+  status: string;
+  note?: string | null;
+  updated_by?: string | null;
+  timestamp?: string | null;
+}
+
+export interface DriverDispatchJob {
+  id: string;
+  dispatch_job_id: string;
+  dispatch_request_id: string;
+  status: string;
+  driver_workflow_status?: string | null;
+  is_paused?: boolean;
+  paused_at?: string | null;
+  paused_reason?: string | null;
+  driver_response_status: string;
+  driver_response_reason?: string | null;
+  scheduled_start_time?: string | null;
+  expected_arrival_time?: string | null;
+  expected_return_time?: string | null;
+  pickup?: string | null;
+  destination?: string | null;
+  goods_description?: string | null;
+  quantity?: string | null;
+  weight_category?: string | null;
+  loading_notes?: string | null;
+  dispatch_instructions?: string | null;
+  customer_contact?: string | null;
+  receiver_contact?: string | null;
+  stops?: DriverDispatchStop[];
+  vehicle?: DriverAssignedVehicle | null;
+  dispatcher?: {
+    id: string;
+    full_name: string;
+    phone?: string | null;
+    email?: string | null;
+  } | null;
+  timeline?: DriverDispatchTimelineEntry[];
+}
+
+export interface DriverDispatchWorkspaceSummary {
+  todays_dispatches: number;
+  upcoming_dispatches: number;
+  current_active_dispatch: DriverDispatchJob | null;
+  pending_acceptance: number;
+  completed_today: number;
+}
+
+export interface DriverDispatchWorkspacePage {
+  jobs: DriverDispatchJob[];
+  pagination: {
+    page: number;
+    page_size: number;
+    total: number;
+    total_pages: number;
+  };
+  section: string;
+  summary?: DriverDispatchWorkspaceSummary;
+}
+
 interface DriverActiveAssignmentResponse {
   success: boolean;
   message: string;
@@ -168,6 +254,25 @@ interface DriverWalletResponse {
   message: string;
   data: {
     wallet: DriverWalletData;
+  };
+}
+
+interface DriverDispatchJobsResponse {
+  success: boolean;
+  message: string;
+  data: {
+    jobs: DriverDispatchJob[];
+    pagination?: DriverDispatchWorkspacePage['pagination'];
+    section?: string;
+    summary?: DriverDispatchWorkspaceSummary;
+  };
+}
+
+interface DriverDispatchJobResponse {
+  success: boolean;
+  message: string;
+  data: {
+    job: DriverDispatchJob;
   };
 }
 
@@ -221,4 +326,91 @@ export async function submitDriverPayment(payload: {
     body: JSON.stringify(payload),
   });
   return response.data.payment;
+}
+
+export async function fetchDriverDispatchJobs(): Promise<DriverDispatchJob[]> {
+  const response = await apiRequest<DriverDispatchJobsResponse>('/driver/dispatch-jobs', {
+    cacheTtlMs: 5000,
+    dedupeKey: 'driver-dispatch-jobs',
+    componentName: 'DriverDashboard',
+    requestLabel: 'dispatch-jobs',
+  });
+  return response.data.jobs || [];
+}
+
+export async function fetchDriverDispatchWorkspace(options: {
+  section: 'upcoming' | 'active' | 'completed' | 'cancelled';
+  page?: number;
+  pageSize?: number;
+  includeSummary?: boolean;
+}): Promise<DriverDispatchWorkspacePage> {
+  const query = new URLSearchParams({
+    section: options.section,
+    page: String(options.page || 1),
+    page_size: String(options.pageSize || 10),
+    include_summary: options.includeSummary ? 'true' : 'false',
+  });
+  const response = await apiRequest<DriverDispatchJobsResponse>(`/driver/dispatch-jobs?${query.toString()}`, {
+    cacheTtlMs: 5000,
+    dedupeKey: `driver-dispatch-workspace:${query.toString()}`,
+    componentName: 'DriverDispatches',
+    requestLabel: 'dispatch-workspace',
+  });
+  return {
+    jobs: response.data.jobs || [],
+    pagination: response.data.pagination || {
+      page: 1,
+      page_size: options.pageSize || 10,
+      total: response.data.jobs?.length || 0,
+      total_pages: 1,
+    },
+    section: response.data.section || options.section,
+    summary: response.data.summary,
+  };
+}
+
+export async function fetchDriverDispatchJob(jobId: string): Promise<DriverDispatchJob> {
+  const response = await apiRequest<DriverDispatchJobResponse>(`/driver/dispatch-jobs/${jobId}`, {
+    cacheTtlMs: 3000,
+    dedupeKey: `driver-dispatch-job:${jobId}`,
+    componentName: 'DriverDispatches',
+    requestLabel: 'dispatch-detail',
+  });
+  return response.data.job;
+}
+
+export async function acceptDriverDispatchJob(jobId: string): Promise<DriverDispatchJob> {
+  const response = await apiRequest<DriverDispatchJobResponse>(`/driver/dispatch-jobs/${jobId}/accept`, {
+    method: 'PATCH',
+  });
+  return response.data.job;
+}
+
+export async function clarifyDriverDispatchJob(jobId: string, payload: { reason: string }): Promise<DriverDispatchJob> {
+  const response = await apiRequest<DriverDispatchJobResponse>(`/driver/dispatch-jobs/${jobId}/clarify`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+  return response.data.job;
+}
+
+export async function rejectDriverDispatchJob(jobId: string, payload: { reason: string }): Promise<DriverDispatchJob> {
+  const response = await apiRequest<DriverDispatchJobResponse>(`/driver/dispatch-jobs/${jobId}/reject`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+  return response.data.job;
+}
+
+export async function updateDriverDispatchWorkflow(jobId: string, payload: {
+  action: 'start' | 'pause' | 'resume' | 'goods_loaded' | 'stop_completed' | 'delivery_completed' | 'end';
+  note?: string;
+  stop_id?: string;
+  movement_id?: string;
+}): Promise<DriverDispatchJob> {
+  const response = await apiRequest<DriverDispatchJobResponse>(`/driver/dispatch-jobs/${jobId}/workflow`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+  return response.data.job;
 }

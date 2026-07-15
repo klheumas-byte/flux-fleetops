@@ -84,6 +84,12 @@ class BaseConfig:
     MONGO_URI = os.getenv("MONGO_URI", DEVELOPMENT_DEFAULT_MONGO_URI)
     MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "flux_fleet")
     MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "5"))
+    CLOUDFLARE_IMAGES_ENABLED = _get_bool_env("CLOUDFLARE_IMAGES_ENABLED", default=False)
+    CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
+    CLOUDFLARE_IMAGES_API_TOKEN = os.getenv("CLOUDFLARE_IMAGES_API_TOKEN", "").strip()
+    CLOUDFLARE_IMAGES_ACCOUNT_HASH = os.getenv("CLOUDFLARE_IMAGES_ACCOUNT_HASH", "").strip()
+    CLOUDFLARE_IMAGES_PUBLIC_VARIANT = os.getenv("CLOUDFLARE_IMAGES_PUBLIC_VARIANT", "public").strip()
+    CLOUDFLARE_IMAGES_THUMBNAIL_VARIANT = os.getenv("CLOUDFLARE_IMAGES_THUMBNAIL_VARIANT", "thumbnail").strip()
     ENABLE_PROFILE_EXPLAINS = _get_bool_env("ENABLE_PROFILE_EXPLAINS", default=False)
     MONGO_SERVER_SELECTION_TIMEOUT_MS = int(os.getenv("MONGO_SERVER_SELECTION_TIMEOUT_MS", "5000"))
     MONGO_CONNECT_TIMEOUT_MS = int(os.getenv("MONGO_CONNECT_TIMEOUT_MS", "5000"))
@@ -92,8 +98,20 @@ class BaseConfig:
     MASTER_DATA_SEED_RETRY_DELAY_SECONDS = float(
         os.getenv("MASTER_DATA_SEED_RETRY_DELAY_SECONDS", "1.5")
     )
+    MAINTENANCE_REMINDER_SWEEP_ENABLED = _get_bool_env(
+        "MAINTENANCE_REMINDER_SWEEP_ENABLED", default=True
+    )
+    MAINTENANCE_REMINDER_SWEEP_INTERVAL_MINUTES = int(
+        os.getenv("MAINTENANCE_REMINDER_SWEEP_INTERVAL_MINUTES", "15")
+    )
+    MAINTENANCE_REMINDER_SWEEP_BATCH_SIZE = int(
+        os.getenv("MAINTENANCE_REMINDER_SWEEP_BATCH_SIZE", "50")
+    )
+    RUN_STARTUP_MAINTENANCE = _get_bool_env(
+        "RUN_STARTUP_MAINTENANCE",
+        default=ENV_NAME == "production",
+    )
     CORS_ORIGINS = _normalize_cors_origins(ENV_NAME)
-    SEED_DEMO_ON_STARTUP = os.getenv("SEED_DEMO_ON_STARTUP", "false").lower() == "true"
 
     @classmethod
     def validate(cls) -> None:
@@ -119,6 +137,17 @@ class BaseConfig:
             if field_name in {"SECRET_KEY", "JWT_SECRET_KEY"} and normalized_value in PLACEHOLDER_SECRET_VALUES:
                 insecure_fields.append(field_name)
 
+        if cls.CLOUDFLARE_IMAGES_ENABLED:
+            for field_name in (
+                "CLOUDFLARE_ACCOUNT_ID",
+                "CLOUDFLARE_IMAGES_API_TOKEN",
+                "CLOUDFLARE_IMAGES_ACCOUNT_HASH",
+                "CLOUDFLARE_IMAGES_PUBLIC_VARIANT",
+                "CLOUDFLARE_IMAGES_THUMBNAIL_VARIANT",
+            ):
+                if not str(getattr(cls, field_name, "") or "").strip():
+                    missing_fields.append(field_name)
+
         cors_env_value = os.getenv("CORS_ORIGINS", "").strip()
         if not cors_env_value:
             missing_fields.append("CORS_ORIGINS")
@@ -135,9 +164,6 @@ class BaseConfig:
             or any(localhost_token in mongo_uri for localhost_token in LOCALHOST_TOKENS)
         ):
             insecure_fields.append("MONGO_URI")
-
-        if cls.SEED_DEMO_ON_STARTUP:
-            insecure_fields.append("SEED_DEMO_ON_STARTUP")
 
         if missing_fields or insecure_fields:
             problem_parts: list[str] = []

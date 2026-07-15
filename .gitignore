@@ -17,3 +17,12 @@ backend/flask-error.log
 
 # Environment variables
 .env
+# Local backups and audit reports
+backups/
+reports/
+
+# Runtime logs
+backend/logs/*
+!backend/logs/.gitkeep
+*.log
+*.log.*

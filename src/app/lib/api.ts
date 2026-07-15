@@ -1,17 +1,31 @@
 function buildLocalApiBaseCandidates(hostname: string, protocol: string) {
-  const candidates = new Set<string>(['/api']);
   const normalizedProtocol = protocol || 'http:';
-  const add = (host: string) => candidates.add(`${normalizedProtocol}//${host}:5000/api`);
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  const localhostAliases =
+    hostname === 'localhost'
+      ? ['localhost', '127.0.0.1']
+      : hostname === '127.0.0.1'
+      ? ['127.0.0.1', 'localhost']
+      : [hostname];
+  const ports = ['5001', '5000'];
 
-  add(hostname);
-  if (hostname === 'localhost') {
-    add('127.0.0.1');
-  }
-  if (hostname === '127.0.0.1') {
-    add('localhost');
-  }
+  const add = (baseUrl: string) => {
+    if (seen.has(baseUrl)) {
+      return;
+    }
+    seen.add(baseUrl);
+    candidates.push(baseUrl);
+  };
 
-  return Array.from(candidates);
+  localhostAliases.forEach((host) => {
+    ports.forEach((port) => {
+      add(`${normalizedProtocol}//${host}:${port}/api`);
+    });
+  });
+  add('/api');
+
+  return candidates;
 }
 
 function resolveApiBaseUrl() {
@@ -192,17 +206,30 @@ function isLikelyHtmlPayload(response: Response, responseText: string) {
   return trimmed.startsWith('<!doctype html') || trimmed.startsWith('<html');
 }
 
+function isLikelyMissingRoutePayload(status: number, data: any) {
+  if (status !== 404) {
+    return false;
+  }
+  const message = String(data?.error || data?.message || '').trim().toLowerCase();
+  return message.includes('requested url was not found on the server');
+}
+
 function shouldRetryWithNextCandidate(response: Response, responseText: string, candidateUrl: string, candidateUrls: string[]) {
-  if (candidateUrls.length <= 1 || candidateUrl !== candidateUrls[0]) {
+  if (candidateUrls.length <= 1 || candidateUrl === candidateUrls[candidateUrls.length - 1]) {
     return false;
   }
 
   const status = response.status;
-  if (!isLikelyHtmlPayload(response, responseText)) {
-    return false;
+  if (isLikelyHtmlPayload(response, responseText)) {
+    return status === 404 || status === 502 || status === 503 || status === 504;
   }
 
-  return status === 404 || status === 502 || status === 503 || status === 504;
+  try {
+    const data = responseText ? JSON.parse(responseText) : null;
+    return isLikelyMissingRoutePayload(status, data);
+  } catch {
+    return false;
+  }
 }
 
 export async function apiRequest<T>(
@@ -409,6 +436,12 @@ export async function apiRequest<T>(
         data,
       });
       throw new ApiRequestError(message, response.status, data?.errors || [], data);
+    }
+
+    if (method !== 'GET' && typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('flux-notifications-changed', {
+        detail: { path, method },
+      }));
     }
 
     const durationMs =

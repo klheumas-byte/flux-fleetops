@@ -13,12 +13,16 @@ interface DriverTopNavProps {
   currentUser: SessionUser | null;
   activeAssignment: DriverActiveAssignment | null;
   onMenuToggle: () => void;
+  onNavigate: (section: string) => void;
+  actionableCount: number;
 }
 
 export default function DriverTopNav({
   currentUser,
   activeAssignment,
   onMenuToggle,
+  onNavigate,
+  actionableCount,
 }: DriverTopNavProps) {
   return (
     <div className="flex h-16 min-w-0 items-center justify-between border-b border-gray-200 bg-white px-4 sm:px-6">
@@ -38,8 +42,9 @@ export default function DriverTopNav({
       </div>
 
       <div className="flex min-w-0 items-center gap-2 sm:gap-4">
-        <button className="relative rounded-lg p-2 transition-colors hover:bg-gray-100">
+        <button onClick={() => onNavigate('notifications')} aria-label={`Notifications${actionableCount ? `, ${actionableCount} actions pending` : ''}`} className="relative rounded-lg p-2 transition-colors hover:bg-gray-100">
           <Bell className="h-5 w-5 text-gray-600" />
+          {actionableCount > 0 && <span aria-hidden="true" className="absolute right-0 top-0 min-w-4 rounded-full bg-orange-500 px-1 text-[10px] font-semibold leading-4 text-white">{actionableCount > 99 ? '99+' : actionableCount}</span>}
         </button>
 
         <div className="flex min-w-0 items-center gap-2 border-l border-gray-200 pl-2 sm:gap-3 sm:pl-4">

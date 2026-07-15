@@ -14,6 +14,8 @@ import {
   Settings as SettingsIcon,
   Shield,
   Truck,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
 
 import { ApiRequestError } from '../../lib/api';
@@ -30,6 +32,12 @@ import {
   updateSystemSettings,
   type SystemSettingsRecord,
 } from '../../lib/system-settings-api';
+import {
+  getNotificationSoundState,
+  playNotificationSound,
+  setNotificationSoundsEnabled,
+  unlockNotificationSound,
+} from '../../lib/notification-sound';
 
 type SettingsTab =
   | 'master-data'
@@ -93,6 +101,14 @@ const typeLabels: Record<string, string> = {
   positions_or_occupations: 'Legacy Positions / Occupations',
   payment_methods: 'Payment Methods',
   ride_purposes: 'Trip Purposes',
+  dispatch_request_types: 'Dispatch Request Types',
+  dispatch_pickup_locations: 'Dispatch Pickup Locations',
+  dispatch_vehicle_types: 'Dispatch Vehicle Types',
+  dispatch_load_types: 'Dispatch Load Types',
+  dispatch_load_weight_categories: 'Dispatch Load Weight Categories',
+  dispatch_load_size_categories: 'Dispatch Load Size Categories',
+  dispatch_urgencies: 'Dispatch Urgencies',
+  dispatch_payment_statuses: 'Dispatch Payment Statuses',
 };
 
 const knownMasterDataTypes = Object.keys(typeLabels);
@@ -174,6 +190,15 @@ export default function Settings() {
   const [baseFare, setBaseFare] = useState('10');
   const [emailNotifications, setEmailNotifications] = useState(true);
   const [smsNotifications, setSmsNotifications] = useState(true);
+  const [soundState, setSoundState] = useState(getNotificationSoundState);
+
+  useEffect(() => {
+    const updateSoundState = (event: Event) => {
+      setSoundState((event as CustomEvent<ReturnType<typeof getNotificationSoundState>>).detail);
+    };
+    window.addEventListener('flux-notification-sound-state', updateSoundState);
+    return () => window.removeEventListener('flux-notification-sound-state', updateSoundState);
+  }, []);
 
   const loadMasterData = async () => {
     setIsLoadingMasterData(true);
@@ -988,6 +1013,38 @@ export default function Settings() {
                       className="h-4 w-4 rounded border-gray-300 text-[#2563EB] focus:ring-[#2563EB]"
                     />
                   </label>
+                  <div className="rounded-xl border border-gray-200 px-4 py-3">
+                    <div className="flex items-center justify-between gap-4">
+                      <div>
+                        <span className="text-sm font-medium text-[#0F172A]">In-app notification sounds</span>
+                        <p className="mt-1 text-xs text-gray-500">Plays once for a new actionable alert after browser audio is enabled.</p>
+                      </div>
+                      <input
+                        aria-label="Enable in-app notification sounds"
+                        type="checkbox"
+                        checked={soundState.enabled}
+                        onChange={(event) => { setNotificationSoundsEnabled(event.target.checked); setSoundState(getNotificationSoundState()); }}
+                        className="h-4 w-4 rounded border-gray-300 text-[#2563EB] focus:ring-[#2563EB]"
+                      />
+                    </div>
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={!soundState.enabled || !soundState.supported}
+                        onClick={() => void unlockNotificationSound().then(() => playNotificationSound('action_required'))}
+                        className="inline-flex items-center gap-2 rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {soundState.enabled ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
+                        Test Sound
+                      </button>
+                      <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${soundState.unlocked ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-800'}`}>
+                        {soundState.supported ? (soundState.unlocked ? 'Sound enabled' : 'Tap to enable sound') : 'Web Audio unsupported'}
+                      </span>
+                      <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-700">
+                        Browser alerts: {typeof Notification === 'undefined' ? 'unsupported' : Notification.permission}
+                      </span>
+                    </div>
+                  </div>
                 </div>
               </div>
               <EmptyState

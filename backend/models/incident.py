@@ -7,6 +7,12 @@ def _serialize_reference_id(value):
     return value
 
 
+def _serialize_datetime(value):
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
 def serialize_incident_attachment(attachment_document: dict) -> dict:
     return {
         "id": attachment_document.get("id"),
@@ -14,11 +20,20 @@ def serialize_incident_attachment(attachment_document: dict) -> dict:
         "file_name": attachment_document.get("file_name"),
         "file_kind": attachment_document.get("file_kind"),
         "content_type": attachment_document.get("content_type"),
+        "provider": attachment_document.get("provider"),
+        "provider_asset_id": attachment_document.get("provider_asset_id"),
+        "public_variant": attachment_document.get("public_variant"),
+        "thumbnail_variant": attachment_document.get("thumbnail_variant"),
+        "public_url": attachment_document.get("public_url"),
+        "thumbnail_url": attachment_document.get("thumbnail_url"),
+        # Legacy evidence only. New provider-backed uploads never include this field.
         "data_url": attachment_document.get("data_url"),
+        "migration_status": attachment_document.get("migration_status"),
+        "availability": attachment_document.get("availability"),
+        "removed_at": _serialize_datetime(attachment_document.get("removed_at")),
+        "uploaded_by": _serialize_reference_id(attachment_document.get("uploaded_by")),
         "size_bytes": attachment_document.get("size_bytes"),
-        "uploaded_at": attachment_document.get("uploaded_at").isoformat()
-        if attachment_document.get("uploaded_at")
-        else None,
+        "uploaded_at": _serialize_datetime(attachment_document.get("uploaded_at")),
     }
 
 
@@ -31,9 +46,7 @@ def serialize_incident_audit_log(audit_document: dict) -> dict:
         "note": audit_document.get("note"),
         "reason": audit_document.get("reason"),
         "changes": audit_document.get("changes") or [],
-        "created_at": audit_document.get("created_at").isoformat()
-        if audit_document.get("created_at")
-        else None,
+        "created_at": _serialize_datetime(audit_document.get("created_at")),
     }
 
 
@@ -64,9 +77,7 @@ def serialize_vehicle_insurance_snapshot(snapshot_document: dict | None) -> dict
         "assessment_date": snapshot_document.get("assessment_date"),
         "claim_status": snapshot_document.get("claim_status"),
         "insurance_notified": bool(snapshot_document.get("insurance_notified")),
-        "insurance_notified_at": snapshot_document.get("insurance_notified_at").isoformat()
-        if snapshot_document.get("insurance_notified_at")
-        else None,
+        "insurance_notified_at": _serialize_datetime(snapshot_document.get("insurance_notified_at")),
     }
 
 
@@ -79,9 +90,7 @@ def serialize_incident(incident_document: dict) -> dict:
         "maintenance_job_id": _serialize_reference_id(incident_document.get("maintenance_job_id")),
         "incident_type": incident_document.get("incident_type"),
         "status": incident_document.get("status"),
-        "incident_at": incident_document.get("incident_at").isoformat()
-        if incident_document.get("incident_at")
-        else None,
+        "incident_at": _serialize_datetime(incident_document.get("incident_at")),
         "location": incident_document.get("location"),
         "description": incident_document.get("description"),
         "can_vehicle_move": incident_document.get("can_vehicle_move"),
@@ -112,12 +121,8 @@ def serialize_incident(incident_document: dict) -> dict:
         "emergency_checklist": incident_document.get("emergency_checklist") or [],
         "created_by": _serialize_reference_id(incident_document.get("created_by")),
         "updated_by": _serialize_reference_id(incident_document.get("updated_by")),
-        "created_at": incident_document.get("created_at").isoformat()
-        if incident_document.get("created_at")
-        else None,
-        "updated_at": incident_document.get("updated_at").isoformat()
-        if incident_document.get("updated_at")
-        else None,
+        "created_at": _serialize_datetime(incident_document.get("created_at")),
+        "updated_at": _serialize_datetime(incident_document.get("updated_at")),
         "audit_logs": [
             serialize_incident_audit_log(item)
             for item in incident_document.get("audit_logs", [])

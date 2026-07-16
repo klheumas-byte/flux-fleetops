@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -60,23 +60,37 @@ function formatDateTime(value?: string | null) {
   return parsed.toLocaleString();
 }
 
-function toDatetimeLocalValue(value?: string | null) {
-  if (!value) {
-    return new Date().toISOString().slice(0, 16);
-  }
-  const parsed = new Date(value);
+function getLocalReturnParts(value?: string | null) {
+  const parsed = value ? new Date(value) : new Date();
+  const safeDate = Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+  const year = safeDate.getFullYear();
+  const month = String(safeDate.getMonth() + 1).padStart(2, '0');
+  const day = String(safeDate.getDate()).padStart(2, '0');
+  const hours = String(safeDate.getHours()).padStart(2, '0');
+  const minutes = String(safeDate.getMinutes()).padStart(2, '0');
+  return {
+    return_date: `${year}-${month}-${day}`,
+    return_time: `${hours}:${minutes}`,
+  };
+}
+
+function combineReturnDateTimeIso(returnDate: string, returnTime: string) {
+  const parsed = new Date(`${returnDate}T${returnTime}`);
   if (Number.isNaN(parsed.getTime())) {
-    return value.slice(0, 16);
+    return null;
   }
-  return new Date(parsed.getTime() - parsed.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  return parsed.toISOString();
 }
 
 type ConfirmFormState = {
-  actual_return_time: string;
+  return_date: string;
+  return_time: string;
   closing_odometer: string;
   closing_fuel_level: string;
   notes: string;
 };
+
+type ConfirmFormErrors = Partial<Record<'return_date' | 'return_time' | 'closing_odometer' | 'closing_fuel_level', string>>;
 
 type InspectionFormState = {
   return_date: string;
@@ -104,8 +118,13 @@ type FaultCreateState = {
 };
 
 function buildConfirmState(detail: DispatchReturnDetail): ConfirmFormState {
+  const checklist = detail.return_checklist || {};
+  const returnParts = checklist.return_date && checklist.return_time
+    ? { return_date: checklist.return_date, return_time: checklist.return_time }
+    : getLocalReturnParts(detail.movement?.actual_return_at || detail.movement?.actual_return_time);
   return {
-    actual_return_time: toDatetimeLocalValue(detail.movement?.actual_return_time || detail.job.expected_return_time as string | undefined),
+    return_date: returnParts.return_date,
+    return_time: returnParts.return_time,
     closing_odometer: detail.movement?.closing_odometer != null ? String(detail.movement.closing_odometer) : '',
     closing_fuel_level: detail.movement?.closing_fuel_level != null ? String(detail.movement.closing_fuel_level) : '',
     notes: detail.movement?.notes || (detail.movement?.origin ? `Returned from ${detail.movement.origin}` : ''),
@@ -118,9 +137,10 @@ function getFuelFormValue(value: string) {
 
 function buildInspectionState(detail: DispatchReturnDetail): InspectionFormState {
   const checklist = detail.return_checklist || {};
+  const returnParts = getLocalReturnParts(detail.movement?.actual_return_at || detail.movement?.actual_return_time);
   return {
-    return_date: checklist.return_date || new Date().toISOString().slice(0, 10),
-    return_time: checklist.return_time || new Date().toISOString().slice(11, 16),
+    return_date: checklist.return_date || returnParts.return_date,
+    return_time: checklist.return_time || returnParts.return_time,
     closing_odometer: checklist.closing_odometer != null ? String(checklist.closing_odometer) : '',
     closing_fuel_level: checklist.closing_fuel_level != null ? String(checklist.closing_fuel_level) : '',
     vehicle_condition: checklist.vehicle_condition || detail.vehicle_conditions[0] || '',
@@ -168,6 +188,8 @@ export default function DispatchReturns() {
   const [isSavingFault, setIsSavingFault] = useState(false);
   const [isClosingDispatch, setIsClosingDispatch] = useState(false);
   const [detailWarnings, setDetailWarnings] = useState<string[]>([]);
+  const [confirmErrors, setConfirmErrors] = useState<ConfirmFormErrors>({});
+  const confirmRequestInFlight = useRef(false);
 
   const loadReturns = async ({
     refresh = false,
@@ -214,6 +236,7 @@ export default function DispatchReturns() {
     setDetail(null);
     setDetailError('');
     setDetailWarnings([]);
+    setConfirmErrors({});
     setIsLoadingDetail(true);
     try {
       const response = await fetchDispatchReturnDetail(jobId);
@@ -242,7 +265,7 @@ export default function DispatchReturns() {
               current_dispatch_status: nextDetail.job.status,
               driver_workflow_status: nextDetail.job.driver_workflow_status || null,
               return_status: nextDetail.return_status,
-              return_time: nextDetail.movement?.actual_return_time || item.return_time,
+              return_time: nextDetail.movement?.actual_return_at || nextDetail.movement?.actual_return_time || item.return_time,
               movement_id: nextDetail.movement?.id || item.movement_id,
               movement_status: nextDetail.movement?.status || item.movement_status,
             }
@@ -258,23 +281,66 @@ export default function DispatchReturns() {
   };
 
   const handleConfirmReturn = async () => {
-    if (!detail || !confirmForm) {
+    if (!detail || !confirmForm || confirmRequestInFlight.current) {
       return;
     }
+    const nextErrors: ConfirmFormErrors = {};
+    if (!confirmForm.return_date) {
+      nextErrors.return_date = 'Return date is required.';
+    }
+    if (!confirmForm.return_time) {
+      nextErrors.return_time = 'Return time is required.';
+    }
+    if (
+      confirmForm.closing_odometer !== ''
+      && (!Number.isFinite(Number(confirmForm.closing_odometer)) || Number(confirmForm.closing_odometer) < 0)
+    ) {
+      nextErrors.closing_odometer = 'Closing odometer must be a non-negative number.';
+    }
+    const closingFuelLevel = normalizeFuelLevelEighths(confirmForm.closing_fuel_level);
+    if (confirmForm.closing_fuel_level === '') {
+      nextErrors.closing_fuel_level = 'Closing fuel level is required.';
+    } else if (closingFuelLevel == null) {
+      nextErrors.closing_fuel_level = 'Select a valid closing fuel level.';
+    }
+    const actualReturnAt = combineReturnDateTimeIso(confirmForm.return_date, confirmForm.return_time);
+    if (!actualReturnAt && !nextErrors.return_date && !nextErrors.return_time) {
+      nextErrors.return_date = 'Enter a valid return date and time.';
+      nextErrors.return_time = 'Enter a valid return date and time.';
+    }
+    if (Object.keys(nextErrors).length || !actualReturnAt) {
+      setConfirmErrors(nextErrors);
+      return;
+    }
+    setConfirmErrors({});
+    confirmRequestInFlight.current = true;
     setIsSavingReturn(true);
     try {
       const response = await confirmDispatchReturn(detail.job.id, {
-        actual_return_time: confirmForm.actual_return_time || undefined,
-        closing_odometer: confirmForm.closing_odometer ? Number(confirmForm.closing_odometer) : undefined,
-        closing_fuel_level: confirmForm.closing_fuel_level ? normalizeFuelLevelEighths(confirmForm.closing_fuel_level) ?? undefined : undefined,
+        return_date: confirmForm.return_date,
+        return_time: confirmForm.return_time,
+        actual_return_at: actualReturnAt,
+        timezone_offset_minutes: new Date(`${confirmForm.return_date}T${confirmForm.return_time}`).getTimezoneOffset(),
+        closing_odometer: confirmForm.closing_odometer === '' ? undefined : Number(confirmForm.closing_odometer),
+        closing_fuel_level: closingFuelLevel as number,
         notes: confirmForm.notes || undefined,
       });
       replaceDetail(response.detail);
+      setConfirmErrors({});
       toast.success('Vehicle return confirmed.');
       await loadReturns({ refresh: true });
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Unable to confirm vehicle return right now.');
+      const message = error instanceof Error ? error.message : 'Unable to confirm vehicle return right now.';
+      if (/return|departure|actual_return_at/i.test(message)) {
+        setConfirmErrors({ return_date: message, return_time: message });
+      } else if (/odometer/i.test(message)) {
+        setConfirmErrors({ closing_odometer: message });
+      } else if (/fuel/i.test(message)) {
+        setConfirmErrors({ closing_fuel_level: message });
+      }
+      toast.error(message);
     } finally {
+      confirmRequestInFlight.current = false;
       setIsSavingReturn(false);
     }
   };
@@ -541,23 +607,59 @@ export default function DispatchReturns() {
                     <DetailRow label="Driver" value={detail.driver?.full_name || 'Unknown driver'} />
                     <DetailRow label="Current Dispatch Status" value={detail.job.status.replaceAll('_', ' ')} />
                     <DetailRow label="Return Status" value={RETURN_STATUS_LABELS[detail.return_status]} />
-                    <DetailRow label="Return Time" value={formatDateTime(detail.movement?.actual_return_time)} />
+                    <DetailRow label="Return Time" value={formatDateTime(detail.movement?.actual_return_at || detail.movement?.actual_return_time)} />
                   </DetailGrid>
                 </DetailSection>
 
                 <DetailSection title="Confirm Vehicle Returned">
                   <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                    <InputField label="Return Time" type="datetime-local" value={confirmForm.actual_return_time} onChange={(value) => setConfirmForm((current) => current ? { ...current, actual_return_time: value } : current)} />
-                    <InputField label="Closing Odometer" type="number" value={confirmForm.closing_odometer} onChange={(value) => setConfirmForm((current) => current ? { ...current, closing_odometer: value } : current)} />
+                    <InputField
+                      label="Return Date"
+                      type="date"
+                      value={confirmForm.return_date}
+                      error={confirmErrors.return_date}
+                      required
+                      onChange={(value) => {
+                        setConfirmErrors((current) => ({ ...current, return_date: undefined, return_time: undefined }));
+                        setConfirmForm((current) => current ? { ...current, return_date: value } : current);
+                      }}
+                    />
+                    <InputField
+                      label="Return Time"
+                      type="time"
+                      value={confirmForm.return_time}
+                      error={confirmErrors.return_time}
+                      required
+                      onChange={(value) => {
+                        setConfirmErrors((current) => ({ ...current, return_date: undefined, return_time: undefined }));
+                        setConfirmForm((current) => current ? { ...current, return_time: value } : current);
+                      }}
+                    />
+                    <InputField
+                      label="Closing Odometer"
+                      type="number"
+                      value={confirmForm.closing_odometer}
+                      error={confirmErrors.closing_odometer}
+                      onChange={(value) => {
+                        setConfirmErrors((current) => ({ ...current, closing_odometer: undefined }));
+                        setConfirmForm((current) => current ? { ...current, closing_odometer: value } : current);
+                      }}
+                    />
                     <div className="md:col-span-2">
                       <FuelGaugeSelector
                         label="Closing Fuel Level"
                         value={getFuelFormValue(confirmForm.closing_fuel_level)}
-                        onChange={(value) => setConfirmForm((current) => current ? { ...current, closing_fuel_level: String(value) } : current)}
+                        onChange={(value) => {
+                          setConfirmErrors((current) => ({ ...current, closing_fuel_level: undefined }));
+                          setConfirmForm((current) => current ? { ...current, closing_fuel_level: String(value) } : current);
+                        }}
                         compareToValue={detail.movement?.opening_fuel_level ?? null}
                         showEstimatedLitres
                         tankCapacityLitres={detail.vehicle?.tank_capacity_litres}
                       />
+                      {confirmErrors.closing_fuel_level ? (
+                        <p className="mt-2 whitespace-pre-line text-sm text-red-600">{confirmErrors.closing_fuel_level}</p>
+                      ) : null}
                     </div>
                     <div className="md:col-span-2">
                       <TextAreaField label="Return Remarks" value={confirmForm.notes} onChange={(value) => setConfirmForm((current) => current ? { ...current, notes: value } : current)} placeholder="Capture return notes, handover context, or exceptions." />
@@ -573,8 +675,8 @@ export default function DispatchReturns() {
 
                 <DetailSection title="Return Checklist">
                   <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                    <InputField label="Return Date" type="date" value={inspectionForm.return_date} onChange={(value) => setInspectionForm((current) => current ? { ...current, return_date: value } : current)} />
-                    <InputField label="Return Time" type="time" value={inspectionForm.return_time} onChange={(value) => setInspectionForm((current) => current ? { ...current, return_time: value } : current)} />
+                    <InputField label="Return Date" type="date" value={inspectionForm.return_date} onChange={() => {}} disabled />
+                    <InputField label="Return Time" type="time" value={inspectionForm.return_time} onChange={() => {}} disabled />
                     <InputField label="Closing Odometer" type="number" value={inspectionForm.closing_odometer} onChange={(value) => setInspectionForm((current) => current ? { ...current, closing_odometer: value } : current)} />
                     <div className="md:col-span-2">
                       <FuelGaugeSelector
@@ -835,21 +937,35 @@ function InputField({
   value,
   onChange,
   type = 'text',
+  error,
+  required = false,
+  disabled = false,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   type?: string;
+  error?: string;
+  required?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <div>
-      <label className="mb-2 block text-sm font-medium text-gray-700">{label}</label>
+      <label className="mb-2 block text-sm font-medium text-gray-700">
+        {label}{required ? <span className="text-red-600"> *</span> : null}
+      </label>
       <input
         type={type}
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="w-full rounded-lg border border-gray-300 px-4 py-2.5 text-sm"
+        required={required}
+        disabled={disabled}
+        aria-invalid={Boolean(error)}
+        className={`w-full rounded-lg border px-4 py-2.5 text-sm disabled:cursor-not-allowed disabled:bg-gray-50 ${
+          error ? 'border-red-400 bg-red-50/40' : 'border-gray-300'
+        }`}
       />
+      {error ? <p className="mt-2 whitespace-pre-line text-sm text-red-600">{error}</p> : null}
     </div>
   );
 }

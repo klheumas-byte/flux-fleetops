@@ -54,6 +54,7 @@ export interface DispatchReturnChecklist {
   driver_id?: string | null;
   return_date?: string | null;
   return_time?: string | null;
+  actual_return_at?: string | null;
   closing_odometer?: number | null;
   closing_fuel_level?: number | null;
   vehicle_condition?: string | null;
@@ -93,8 +94,10 @@ export interface DispatchReturnMovementRecord {
   movement_id: string;
   status: string;
   requested_departure_time?: string | null;
+  actual_departure_at?: string | null;
   departure_time?: string | null;
   expected_return_time?: string | null;
+  actual_return_at?: string | null;
   actual_return_time?: string | null;
   origin?: string | null;
   destination?: string | null;
@@ -114,6 +117,8 @@ export interface DispatchReturnDetail {
     status: string;
     driver_workflow_status?: string | null;
     return_status?: string | null;
+    actual_departure_at?: string | null;
+    actual_return_at?: string | null;
     scheduled_start_time?: string | null;
     expected_return_time?: string | null;
     goods_description?: string | null;
@@ -215,9 +220,12 @@ async function patchDispatchReturnAction(jobId: string, action: string, payload?
 }
 
 export async function confirmDispatchReturn(jobId: string, payload: {
-  actual_return_time?: string;
+  return_date: string;
+  return_time: string;
+  actual_return_at: string;
+  timezone_offset_minutes: number;
   closing_odometer?: number;
-  closing_fuel_level?: number;
+  closing_fuel_level: number;
   notes?: string;
 }) {
   return patchDispatchReturnAction(jobId, 'confirm-return', payload);

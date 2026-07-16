@@ -62,6 +62,8 @@ def serialize_dispatch_job(document: dict) -> dict:
         "driver_response_reason": document.get("driver_response_reason"),
         "driver_responded_at": _serialize_datetime(document.get("driver_responded_at")),
         "return_status": document.get("return_status"),
+        "actual_departure_at": _serialize_datetime(document.get("actual_departure_at") or document.get("started_at")),
+        "actual_return_at": _serialize_datetime(document.get("actual_return_at")),
         "return_confirmed_at": _serialize_datetime(document.get("return_confirmed_at")),
         "return_confirmed_by": _serialize_reference_id(document.get("return_confirmed_by")),
         "inspection_completed_at": _serialize_datetime(document.get("inspection_completed_at")),

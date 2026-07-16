@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from math import ceil
 from time import perf_counter
 from uuid import uuid4
@@ -51,6 +51,8 @@ LIST_JOB_PROJECTION = {
     "dispatch_date": 1,
     "dispatch_time": 1,
     "completed_at": 1,
+    "actual_departure_at": 1,
+    "actual_return_at": 1,
     "expected_return_time": 1,
     "linked_vehicle_movement_id": 1,
     "return_status": 1,
@@ -149,20 +151,84 @@ def _parse_datetime(value, field_name: str, *, required: bool = False) -> dateti
             raise ApiError(f"{field_name} is required.", status_code=400)
         return None
     if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    try:
-        parsed = datetime.fromisoformat(str(value).strip())
-    except ValueError as error:
-        raise ApiError(f"{field_name} must be a valid ISO datetime.", status_code=400) from error
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ApiError(f"{field_name} must be a valid ISO datetime.", status_code=400) from error
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _coerce_utc_datetime(value) -> datetime | None:
     if value is None:
         return None
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
     return _parse_datetime(value, "datetime", required=False)
+
+
+def _parse_return_datetime(payload: dict) -> tuple[datetime, str, str]:
+    return_date_value = _normalize_text((payload or {}).get("return_date"))
+    return_time_value = _normalize_text((payload or {}).get("return_time"))
+    if not return_date_value:
+        raise ApiError("return_date is required.", status_code=400)
+    if not return_time_value:
+        raise ApiError("return_time is required.", status_code=400)
+    try:
+        parsed_date = date.fromisoformat(return_date_value)
+    except ValueError as error:
+        raise ApiError("return_date must use YYYY-MM-DD format.", status_code=400) from error
+    try:
+        parsed_time = time.fromisoformat(return_time_value)
+    except ValueError as error:
+        raise ApiError("return_time must be a valid time.", status_code=400) from error
+
+    offset_value = (payload or {}).get("timezone_offset_minutes", 0)
+    if isinstance(offset_value, bool) or not isinstance(offset_value, (int, float)):
+        raise ApiError("timezone_offset_minutes must be numeric.", status_code=400)
+    if abs(float(offset_value)) > 14 * 60:
+        raise ApiError("timezone_offset_minutes is invalid.", status_code=400)
+    local_timezone = timezone(timedelta(minutes=-float(offset_value)))
+    combined_return_at = datetime.combine(parsed_date, parsed_time, tzinfo=local_timezone).astimezone(timezone.utc)
+
+    supplied_return_at = _parse_datetime(
+        (payload or {}).get("actual_return_at") or (payload or {}).get("actual_return_time"),
+        "actual_return_at",
+        required=False,
+    )
+    if supplied_return_at is not None and abs((supplied_return_at - combined_return_at).total_seconds()) >= 1:
+        raise ApiError("actual_return_at does not match the selected return date and time.", status_code=400)
+    return combined_return_at, parsed_date.isoformat(), parsed_time.strftime("%H:%M")
+
+
+def _resolve_actual_departure_at(job_document: dict, movement_document: dict) -> datetime:
+    for value in (
+        job_document.get("actual_departure_at"),
+        movement_document.get("actual_departure_at"),
+        job_document.get("started_at"),
+    ):
+        normalized = _coerce_utc_datetime(value)
+        if normalized is not None:
+            return normalized
+    raise ApiError(
+        "The recorded departure time is unavailable. Start the dispatch before confirming vehicle return.",
+        status_code=400,
+    )
+
+
+def _format_safe_datetime(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%d-%b-%Y %I:%M %p UTC")
+
+
+def _validate_return_after_departure(*, actual_return_at: datetime, actual_departure_at: datetime):
+    if actual_return_at <= actual_departure_at:
+        raise ApiError(
+            "Return time must be after the recorded departure time.\n"
+            f"Recorded departure: {_format_safe_datetime(actual_departure_at)}\n"
+            f"Entered return: {_format_safe_datetime(actual_return_at)}",
+            status_code=400,
+        )
 
 
 def _validate_non_negative_number(value, field_name: str):
@@ -183,6 +249,12 @@ def _validate_fuel_level(value, field_name: str):
             status_code=400,
         )
     return normalized
+
+
+def _validate_required_fuel_level(value, field_name: str):
+    if value in (None, ""):
+        raise ApiError(f"{field_name} is required.", status_code=400)
+    return _validate_fuel_level(value, field_name)
 
 
 def _normalize_return_status(value: str | None, *, default: str = "awaiting_return") -> str:
@@ -350,8 +422,10 @@ def _ensure_linked_vehicle_movement(job_document: dict, *, current_user_id: str)
         "movement_type": "customer_dispatch",
         "status": "in_progress",
         "requested_departure_time": job_document.get("scheduled_start_time"),
-        "departure_time": job_document.get("started_at") or job_document.get("scheduled_start_time"),
+        "actual_departure_at": job_document.get("actual_departure_at") or job_document.get("started_at"),
+        "departure_time": job_document.get("actual_departure_at") or job_document.get("started_at"),
         "expected_return_time": job_document.get("expected_return_time"),
+        "actual_return_at": None,
         "actual_return_time": None,
         "origin": job_document.get("pickup"),
         "destination": job_document.get("destination"),
@@ -426,11 +500,11 @@ def _build_return_list_payload(job_documents: list[dict], movement_lookup: dict[
                 "driver_workflow_status": job_document.get("driver_workflow_status"),
                 "return_status": return_status,
                 "return_time": (
-                    movement_document.get("actual_return_time").isoformat()
-                    if movement_document and movement_document.get("actual_return_time")
+                    (movement_document.get("actual_return_at") or movement_document.get("actual_return_time")).isoformat()
+                    if movement_document and (movement_document.get("actual_return_at") or movement_document.get("actual_return_time"))
                     else (
-                        job_document.get("return_confirmed_at").isoformat()
-                        if job_document.get("return_confirmed_at")
+                        (job_document.get("actual_return_at") or job_document.get("return_confirmed_at")).isoformat()
+                        if (job_document.get("actual_return_at") or job_document.get("return_confirmed_at"))
                         else None
                     )
                 ),
@@ -590,35 +664,73 @@ def confirm_dispatch_return(job_id: str, payload: dict, *, current_user_id: str,
             status_code=400,
         )
     timestamp = now_utc()
-    actual_return_time = _parse_datetime((payload or {}).get("actual_return_time"), "actual_return_time", required=False) or timestamp
-    departure_time = _coerce_utc_datetime(movement_document.get("departure_time"))
-    if departure_time and actual_return_time <= departure_time:
-        raise ApiError("actual_return_time must be after the recorded departure time.", status_code=400)
-    closing_odometer = _validate_non_negative_number((payload or {}).get("closing_odometer"), "closing_odometer")
+    actual_return_at, return_date_value, return_time_value = _parse_return_datetime(payload or {})
+    actual_departure_at = _resolve_actual_departure_at(job_document, movement_document)
+    _validate_return_after_departure(
+        actual_return_at=actual_return_at,
+        actual_departure_at=actual_departure_at,
+    )
+    closing_odometer = _validate_non_negative_number(
+        (payload or {}).get("closing_odometer"),
+        "closing_odometer",
+    )
+    recorded_closing_odometer = (
+        closing_odometer
+        if closing_odometer is not None
+        else movement_document.get("closing_odometer")
+    )
     opening_odometer = movement_document.get("opening_odometer")
-    if opening_odometer is not None and closing_odometer is not None and closing_odometer < opening_odometer:
+    if (
+        opening_odometer is not None
+        and recorded_closing_odometer is not None
+        and recorded_closing_odometer < opening_odometer
+    ):
         raise ApiError("closing_odometer must be greater than or equal to opening_odometer.", status_code=400)
-    closing_fuel_level = _validate_fuel_level((payload or {}).get("closing_fuel_level"), "closing_fuel_level")
+    closing_fuel_level = _validate_required_fuel_level(
+        (payload or {}).get("closing_fuel_level"),
+        "closing_fuel_level",
+    )
     notes = _normalize_text((payload or {}).get("notes")) or movement_document.get("notes")
+    return_checklist = {
+        **(movement_document.get("return_checklist") or job_document.get("return_checklist") or {}),
+        "vehicle_id": str(job_document.get("vehicle_id")) if job_document.get("vehicle_id") else None,
+        "driver_id": str(job_document.get("driver_id")) if job_document.get("driver_id") else None,
+        "return_date": return_date_value,
+        "return_time": return_time_value,
+        "actual_return_at": actual_return_at.isoformat(),
+        "closing_odometer": recorded_closing_odometer,
+        "closing_fuel_level": closing_fuel_level,
+    }
     movement_update_fields = {
         "status": "returned",
-        "actual_return_time": actual_return_time,
-        "closing_odometer": closing_odometer if closing_odometer is not None else movement_document.get("closing_odometer"),
-        "closing_fuel_level": closing_fuel_level if closing_fuel_level is not None else movement_document.get("closing_fuel_level"),
+        "actual_departure_at": actual_departure_at,
+        "actual_return_at": actual_return_at,
+        "actual_return_time": actual_return_at,
+        "closing_odometer": recorded_closing_odometer,
+        "closing_fuel_level": closing_fuel_level,
+        "return_checklist": return_checklist,
         "notes": notes,
         "returned_by": _to_object_id(current_user_id, "current_user_id"),
         "returned_at": timestamp,
         "updated_at": timestamp,
     }
-    vehicle_movements_collection().update_one({"_id": movement_document["_id"]}, {"$set": movement_update_fields})
+    movement_update_result = vehicle_movements_collection().update_one(
+        {"_id": movement_document["_id"], "status": {"$in": ["checked_out", "in_progress"]}},
+        {"$set": movement_update_fields},
+    )
+    if movement_update_result.matched_count != 1:
+        raise ApiError("This dispatch return has already been confirmed.", status_code=409)
     _release_job_reservations(job_document, reason="dispatch vehicle returned")
     if isinstance(job_document.get("vehicle_id"), ObjectId):
         _set_vehicle_status(job_document["vehicle_id"], next_status="available")
     job_update_fields = {
         "return_status": "returned",
+        "actual_departure_at": actual_departure_at,
+        "actual_return_at": actual_return_at,
         "return_confirmed_at": timestamp,
         "return_confirmed_by": _to_object_id(current_user_id, "current_user_id"),
         "linked_vehicle_movement_id": movement_document["_id"],
+        "return_checklist": return_checklist,
         "timeline": _append_timeline_entry(
             job_document,
             title="Vehicle returned and received",
@@ -664,11 +776,19 @@ def save_dispatch_return_inspection(job_id: str, payload: dict, *, current_user_
         if linked_fault_document.get("vehicle_id") != job_document.get("vehicle_id"):
             raise ApiError("Linked fault must belong to the same vehicle.", status_code=400)
     timestamp = now_utc()
+    actual_return_at = _coerce_utc_datetime(
+        movement_document.get("actual_return_at") or movement_document.get("actual_return_time")
+    )
+    if actual_return_at is None:
+        raise ApiError("The confirmed return time is unavailable. Confirm vehicle return again.", status_code=400)
+    existing_checklist = movement_document.get("return_checklist") or job_document.get("return_checklist") or {}
     checklist = {
+        **existing_checklist,
         "vehicle_id": str(job_document.get("vehicle_id")) if job_document.get("vehicle_id") else None,
         "driver_id": str(job_document.get("driver_id")) if job_document.get("driver_id") else None,
-        "return_date": ((payload or {}).get("return_date") or timestamp.date().isoformat()),
-        "return_time": (_normalize_text((payload or {}).get("return_time")) or timestamp.strftime("%H:%M")),
+        "return_date": existing_checklist.get("return_date") or actual_return_at.date().isoformat(),
+        "return_time": existing_checklist.get("return_time") or actual_return_at.strftime("%H:%M"),
+        "actual_return_at": actual_return_at.isoformat(),
         "closing_odometer": _validate_non_negative_number((payload or {}).get("closing_odometer"), "closing_odometer"),
         "closing_fuel_level": _validate_fuel_level((payload or {}).get("closing_fuel_level"), "closing_fuel_level"),
         "vehicle_condition": vehicle_condition,

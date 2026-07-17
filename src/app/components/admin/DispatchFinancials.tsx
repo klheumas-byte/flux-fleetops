@@ -27,6 +27,7 @@ import {
   type DispatchFinancialExpenseStatus,
   type DispatchFinancialIncident,
   type DispatchFinancialListItem,
+  type DriverCompensationType,
 } from '../../lib/dispatch-financial-api';
 import { Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle } from '../ui/drawer';
 import { Skeleton } from '../ui/skeleton';
@@ -99,6 +100,13 @@ export default function DispatchFinancials() {
   const [pagination, setPagination] = useState({ page: 1, page_size: 20, total: 0, total_pages: 1 });
   const [summary, setSummary] = useState({
     dispatch_revenue: 0,
+    paid_dispatch_revenue: 0,
+    internal_dispatch_operating_costs: 0,
+    partner_contract_dispatches: 0,
+    partner_contract_revenue: 0,
+    partner_contract_costs: 0,
+    complimentary_dispatch_costs: 0,
+    driver_dispatch_compensation: 0,
     outstanding_dispatch_payments: 0,
     driver_liabilities: 0,
     company_operational_costs: 0,
@@ -118,6 +126,9 @@ export default function DispatchFinancials() {
     incident_types: string[];
     responsibility_types: string[];
     incident_statuses: string[];
+    dispatch_financial_types?: string[];
+    partner_billing_methods?: string[];
+    driver_compensation_types?: string[];
   } | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -131,6 +142,8 @@ export default function DispatchFinancials() {
   const [detailError, setDetailError] = useState('');
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
   const [financeNotes, setFinanceNotes] = useState('');
+  const [compensationType, setCompensationType] = useState<DriverCompensationType>('none');
+  const [compensationValue, setCompensationValue] = useState('0');
   const [expenseReviews, setExpenseReviews] = useState<ExpenseReviewState>({});
   const [incidentReviews, setIncidentReviews] = useState<IncidentReviewState>({});
   const [newIncident, setNewIncident] = useState(initialIncidentCreateState);
@@ -178,6 +191,8 @@ export default function DispatchFinancials() {
     const cacheKey = nextDetail.job?.id || nextDetail.record.dispatch_job_id;
     setDetailCache((current) => ({ ...current, [cacheKey]: nextDetail }));
     setFinanceNotes(nextDetail.record.finance_notes || '');
+    setCompensationType(nextDetail.record.driver_compensation_type || 'none');
+    setCompensationValue(String(nextDetail.record.driver_compensation_value || 0));
     setExpenseReviews(
       Object.fromEntries(
         nextDetail.expenses.map((expense) => [
@@ -249,7 +264,11 @@ export default function DispatchFinancials() {
     const busyKey = 'verify';
     setBusy(busyKey, true);
     try {
-      const response = await verifyDispatchFinancial(detail.job?.id || detail.record.dispatch_job_id, { finance_notes: financeNotes || undefined });
+      const response = await verifyDispatchFinancial(detail.job?.id || detail.record.dispatch_job_id, {
+        finance_notes: financeNotes || undefined,
+        driver_compensation_type: compensationType,
+        driver_compensation_value: Number(compensationValue || 0),
+      });
       hydrateDetailState(response);
       toast.success('Dispatch financials verified.');
       await loadPage({ refresh: true });
@@ -410,7 +429,7 @@ export default function DispatchFinancials() {
   const canCloseRecord = Boolean(detail && !detail.record.is_financially_closed && detail.record.verified_at);
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="space-y-6 p-6" aria-busy={isLoading || isRefreshing}>
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-[#0F172A]">Dispatch Financials</h1>
@@ -421,25 +440,40 @@ export default function DispatchFinancials() {
         <button
           type="button"
           onClick={() => void loadPage({ refresh: true })}
-          className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 transition-all hover:bg-gray-50"
+          disabled={isLoading || isRefreshing}
+          className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 transition-all hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {isRefreshing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
-          Refresh
+          {isLoading || isRefreshing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
+          {isLoading ? 'Loading…' : isRefreshing ? 'Refreshing…' : 'Refresh'}
         </button>
       </div>
 
+      {isLoading ? (
+        <div role="status" className="flex items-center gap-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm font-medium text-blue-800">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Loading dispatch financial records and dashboard totals…
+        </div>
+      ) : null}
+
       <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
-        <StatCard icon={PiggyBank} label="Dispatch Revenue" value={formatCurrency(summary.dispatch_revenue)} tint="bg-blue-100 text-blue-700" />
-        <StatCard icon={FileWarning} label="Outstanding" value={formatCurrency(summary.outstanding_dispatch_payments)} tint="bg-amber-100 text-amber-700" />
-        <StatCard icon={AlertTriangle} label="Driver Liability" value={formatCurrency(summary.driver_liabilities)} tint="bg-rose-100 text-rose-700" />
-        <StatCard icon={Receipt} label="Company Cost" value={formatCurrency(summary.company_operational_costs)} tint="bg-slate-100 text-slate-700" />
-        <StatCard icon={DollarSign} label="Profitability" value={formatCurrency(summary.dispatch_profitability)} tint="bg-emerald-100 text-emerald-700" />
+        <StatCard icon={PiggyBank} label="Paid Dispatch Revenue" value={formatCurrency(summary.paid_dispatch_revenue)} tint="bg-blue-100 text-blue-700" loading={isLoading} />
+        <StatCard icon={FileWarning} label="Outstanding" value={formatCurrency(summary.outstanding_dispatch_payments)} tint="bg-amber-100 text-amber-700" loading={isLoading} />
+        <StatCard icon={AlertTriangle} label="Driver Liability" value={formatCurrency(summary.driver_liabilities)} tint="bg-rose-100 text-rose-700" loading={isLoading} />
+        <StatCard icon={Receipt} label="Company Cost" value={formatCurrency(summary.company_operational_costs)} tint="bg-slate-100 text-slate-700" loading={isLoading} />
+        <StatCard icon={DollarSign} label="Profitability" value={formatCurrency(summary.dispatch_profitability)} tint="bg-emerald-100 text-emerald-700" loading={isLoading} />
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+        <MiniStat label="Internal Operating Costs" value={formatCurrency(summary.internal_dispatch_operating_costs)} loading={isLoading} />
+        <MiniStat label="Partner Contract Revenue" value={formatCurrency(summary.partner_contract_revenue)} loading={isLoading} />
+        <MiniStat label="Complimentary Costs" value={formatCurrency(summary.complimentary_dispatch_costs)} loading={isLoading} />
+        <MiniStat label="Driver Compensation" value={formatCurrency(summary.driver_dispatch_compensation)} loading={isLoading} />
       </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        <MiniStat label="Records Outstanding" value={String(outstandingCount)} />
-        <MiniStat label="Verified Records" value={String(verifiedCount)} />
-        <MiniStat label="Incidents Under Investigation" value={String(summary.incident_trends.under_investigation)} />
+        <MiniStat label="Records Outstanding" value={String(outstandingCount)} loading={isLoading} />
+        <MiniStat label="Verified Records" value={String(verifiedCount)} loading={isLoading} />
+        <MiniStat label="Incidents Under Investigation" value={String(summary.incident_trends.under_investigation)} loading={isLoading} />
       </div>
 
       <div className="rounded-xl border border-gray-200 bg-white p-5">
@@ -589,6 +623,9 @@ export default function DispatchFinancials() {
                     <Info label="Dispatch Status" value={formatLabel(String(detail.job?.status || '-'))} />
                     <Info label="Return Status" value={formatLabel(String(detail.job?.return_status || '-'))} />
                     <Info label="Financial Status" value={formatLabel(detail.record.financial_status)} />
+                    <Info label="Payment Classification" value={`${formatLabel(detail.record.dispatch_financial_type)}${detail.record.dispatch_financial_type_is_legacy ? ' (legacy inferred)' : ''}`} />
+                    <Info label="Partner / Reference" value={detail.record.partner_organization_reference || 'Not applicable'} />
+                    <Info label="Partner Billing" value={formatLabel(detail.record.partner_billing_method)} />
                     <Info label="Approved Charge" value={formatCurrency(detail.record.approved_charge)} />
                     <Info label="Outstanding Balance" value={formatCurrency(detail.record.outstanding_balance)} />
                     <Info label="Expected Net Revenue" value={formatCurrency(detail.record.expected_net_revenue)} />
@@ -604,7 +641,18 @@ export default function DispatchFinancials() {
                     <Info label="Payment Reference" value={detail.record.payment_reference || 'Not provided'} />
                     <Info label="Submitted At" value={formatDateTime(detail.record.submitted_at)} />
                     <Info label="Verified At" value={formatDateTime(detail.record.verified_at)} />
+                    <Info label="Driver Compensation" value={`${formatLabel(detail.record.driver_compensation_type)} · ${formatCurrency(detail.record.driver_compensation_amount)}`} />
                   </Grid>
+                  <div className="mt-4 grid gap-4 md:grid-cols-2">
+                    <label className="text-sm font-medium text-gray-700">Compensation Type
+                      <select value={compensationType} onChange={(event) => setCompensationType(event.target.value as DriverCompensationType)} className="mt-2 w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm">
+                        <option value="none">None</option><option value="fixed_tip">Fixed Tip</option><option value="fixed_allowance">Fixed Allowance</option><option value="percentage_of_charge">Percentage of Charge</option><option value="manual_amount">Manual Amount</option>
+                      </select>
+                    </label>
+                    <label className="text-sm font-medium text-gray-700">Compensation Value
+                      <input type="number" min="0" value={compensationValue} onChange={(event) => setCompensationValue(event.target.value)} className="mt-2 w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm" />
+                    </label>
+                  </div>
                   <div className="mt-4">
                     <label className="mb-2 block text-sm font-medium text-gray-700">Finance Notes</label>
                     <textarea
@@ -888,28 +936,30 @@ function StatCard({
   label,
   value,
   tint,
+  loading = false,
 }: {
   icon: typeof DollarSign;
   label: string;
   value: string;
   tint: string;
+  loading?: boolean;
 }) {
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-5">
       <div className={`mb-3 flex h-10 w-10 items-center justify-center rounded-lg ${tint}`}>
         <Icon className="h-5 w-5" />
       </div>
-      <div className="text-xl font-semibold text-[#0F172A]">{value}</div>
+      {loading ? <Skeleton className="mb-1 h-7 w-28" /> : <div className="text-xl font-semibold text-[#0F172A]">{value}</div>}
       <div className="text-sm text-gray-600">{label}</div>
     </div>
   );
 }
 
-function MiniStat({ label, value }: { label: string; value: string }) {
+function MiniStat({ label, value, loading = false }: { label: string; value: string; loading?: boolean }) {
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-4">
       <div className="text-xs font-semibold uppercase tracking-[0.16em] text-gray-500">{label}</div>
-      <div className="mt-2 text-2xl font-semibold text-[#0F172A]">{value}</div>
+      {loading ? <Skeleton className="mt-2 h-8 w-24" /> : <div className="mt-2 text-2xl font-semibold text-[#0F172A]">{value}</div>}
     </div>
   );
 }

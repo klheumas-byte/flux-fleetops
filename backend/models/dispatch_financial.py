@@ -5,6 +5,7 @@ from models.incident import serialize_incident
 from models.user import serialize_user
 from models.vehicle import serialize_vehicle
 from models.vehicle_movement import serialize_vehicle_movement
+from utils.dispatch_payment_classification import resolve_dispatch_financial_type
 
 
 def _serialize_reference_id(value):
@@ -74,6 +75,7 @@ def serialize_dispatch_financial_incident(document: dict) -> dict:
 
 
 def serialize_dispatch_financial_record(document: dict) -> dict:
+    financial_type, is_legacy = resolve_dispatch_financial_type(document)
     return {
         "id": str(document.get("_id")),
         "dispatch_financial_id": str(document.get("_id")) if document.get("_id") else None,
@@ -83,6 +85,16 @@ def serialize_dispatch_financial_record(document: dict) -> dict:
         "vehicle_id": _serialize_reference_id(document.get("vehicle_id")),
         "driver_id": _serialize_reference_id(document.get("driver_id")),
         "approved_charge": document.get("approved_charge"),
+        "amount_paid": document.get("amount_paid", 0),
+        "dispatch_financial_type": financial_type,
+        "dispatch_financial_type_is_legacy": bool(document.get("dispatch_financial_type_is_legacy", is_legacy)),
+        "partner_organization_reference": document.get("partner_organization_reference"),
+        "partner_billing_method": document.get("partner_billing_method"),
+        "driver_compensation_type": document.get("driver_compensation_type") or "none",
+        "driver_compensation_value": document.get("driver_compensation_value", 0),
+        "driver_compensation_amount": document.get("driver_compensation_amount", 0),
+        "driver_compensation_approved_by": _serialize_reference_id(document.get("driver_compensation_approved_by")),
+        "driver_compensation_approved_at": _serialize_datetime(document.get("driver_compensation_approved_at")),
         "amount_collected_from_customer": document.get("amount_collected_from_customer"),
         "amount_submitted_by_driver": document.get("amount_submitted_by_driver"),
         "outstanding_balance": document.get("outstanding_balance"),

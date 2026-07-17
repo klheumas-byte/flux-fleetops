@@ -9,6 +9,8 @@ export type DispatchFinancialStatus =
   | 'verified'
   | 'disputed'
   | 'cancelled';
+export type DispatchFinancialType = 'external_paid' | 'internal_company' | 'partner_contract' | 'complimentary';
+export type DriverCompensationType = 'none' | 'fixed_tip' | 'fixed_allowance' | 'percentage_of_charge' | 'manual_amount';
 
 export type DispatchFinancialExpenseStatus = 'pending' | 'approved' | 'rejected' | 'reimbursed' | 'cancelled';
 export type DispatchFinancialIncidentStatus =
@@ -54,6 +56,16 @@ export interface DispatchFinancialRecord {
   vehicle_id?: string | null;
   driver_id?: string | null;
   approved_charge: number;
+  amount_paid: number;
+  dispatch_financial_type: DispatchFinancialType;
+  dispatch_financial_type_is_legacy?: boolean;
+  partner_organization_reference?: string | null;
+  partner_billing_method?: string | null;
+  driver_compensation_type: DriverCompensationType;
+  driver_compensation_value: number;
+  driver_compensation_amount: number;
+  driver_compensation_approved_by?: string | null;
+  driver_compensation_approved_at?: string | null;
   amount_collected_from_customer: number;
   amount_submitted_by_driver: number;
   outstanding_balance: number;
@@ -189,6 +201,13 @@ export interface DispatchFinancialListResponse {
   };
   summary: {
     dispatch_revenue: number;
+    paid_dispatch_revenue: number;
+    internal_dispatch_operating_costs: number;
+    partner_contract_dispatches: number;
+    partner_contract_revenue: number;
+    partner_contract_costs: number;
+    complimentary_dispatch_costs: number;
+    driver_dispatch_compensation: number;
     outstanding_dispatch_payments: number;
     driver_liabilities: number;
     company_operational_costs: number;
@@ -283,7 +302,7 @@ export async function createDispatchFinancialIncident(jobId: string, payload: Re
   return response.data;
 }
 
-export async function verifyDispatchFinancial(jobId: string, payload?: { finance_notes?: string }) {
+export async function verifyDispatchFinancial(jobId: string, payload?: { finance_notes?: string; driver_compensation_type?: DriverCompensationType; driver_compensation_value?: number }) {
   const response = await apiRequest<Envelope<DispatchFinancialDetail>>(`/dispatch-financials/${jobId}/verify`, {
     method: 'PATCH',
     body: JSON.stringify(payload || {}),

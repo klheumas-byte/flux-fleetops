@@ -40,6 +40,9 @@ import {
   updateDispatchSchedule,
   updateDispatchStop,
   type DispatchLoadSizeCategory,
+  type DispatchFinancialType,
+  type DriverCompensationType,
+  type PartnerBillingMethod,
   type DispatchLoadType,
   type DispatchLoadWeightCategory,
   type DispatchPaymentStatus,
@@ -82,6 +85,13 @@ interface DispatchRequestFormState {
   urgency: DispatchUrgency;
   proposed_charge: string;
   payment_status: DispatchPaymentStatus;
+  dispatch_financial_type: DispatchFinancialType;
+  partner_organization_reference: string;
+  partner_billing_method: PartnerBillingMethod | '';
+  payment_method: string;
+  amount_paid: string;
+  driver_compensation_type: DriverCompensationType;
+  driver_compensation_value: string;
   notes: string;
   status: '' | 'new' | 'reviewing' | 'pricing_pending';
 }
@@ -202,6 +212,13 @@ const initialFormState = (): DispatchRequestFormState => ({
   urgency: 'Normal',
   proposed_charge: '0',
   payment_status: 'Unpaid',
+  dispatch_financial_type: 'external_paid',
+  partner_organization_reference: '',
+  partner_billing_method: '',
+  payment_method: '',
+  amount_paid: '0',
+  driver_compensation_type: 'none',
+  driver_compensation_value: '0',
   notes: '',
   status: 'new',
 });
@@ -308,8 +325,15 @@ function buildRequestPayload(form: DispatchRequestFormState) {
     preferred_pickup_time: form.preferred_pickup_time,
     expected_delivery_time: form.expected_delivery_time || undefined,
     urgency: form.urgency || undefined,
-    proposed_charge: form.proposed_charge ? Number(form.proposed_charge) : 0,
+    proposed_charge: ['internal_company', 'complimentary'].includes(form.dispatch_financial_type) ? 0 : Number(form.proposed_charge || 0),
     payment_status: form.payment_status,
+    dispatch_financial_type: form.dispatch_financial_type,
+    partner_organization_reference: form.dispatch_financial_type === 'partner_contract' ? form.partner_organization_reference : undefined,
+    partner_billing_method: form.dispatch_financial_type === 'partner_contract' ? form.partner_billing_method : undefined,
+    payment_method: ['external_paid', 'partner_contract'].includes(form.dispatch_financial_type) ? form.payment_method || undefined : undefined,
+    amount_paid: ['external_paid', 'partner_contract'].includes(form.dispatch_financial_type) ? Number(form.amount_paid || 0) : 0,
+    driver_compensation_type: form.driver_compensation_type,
+    driver_compensation_value: Number(form.driver_compensation_value || 0),
     notes: form.notes || undefined,
     status: form.status || undefined,
   };
@@ -496,7 +520,9 @@ export default function DispatchRequests() {
     if (vehicleTypeOptions[0]) nextForm.vehicle_type_needed = vehicleTypeOptions[0];
     if (loadTypeOptions[0]) nextForm.load_type = loadTypeOptions[0];
     if (urgencyOptions[0]) nextForm.urgency = urgencyOptions[0];
-    if (paymentStatusOptions[0]) nextForm.payment_status = paymentStatusOptions[0];
+    if (paymentStatusOptions.length && !paymentStatusOptions.includes(nextForm.payment_status)) {
+      nextForm.payment_status = paymentStatusOptions[0];
+    }
     setEditingRequest(null);
     setFormError('');
     setFormState(nextForm);
@@ -525,6 +551,13 @@ export default function DispatchRequests() {
       urgency: requestItem.urgency || 'Normal',
       proposed_charge: String(requestItem.proposed_charge ?? 0),
       payment_status: requestItem.payment_status || 'Unpaid',
+      dispatch_financial_type: requestItem.dispatch_financial_type || 'external_paid',
+      partner_organization_reference: requestItem.partner_organization_reference || '',
+      partner_billing_method: requestItem.partner_billing_method || '',
+      payment_method: requestItem.payment_method || '',
+      amount_paid: String(requestItem.amount_paid ?? 0),
+      driver_compensation_type: requestItem.driver_compensation_type || 'none',
+      driver_compensation_value: String(requestItem.driver_compensation_value ?? 0),
       notes: requestItem.notes || '',
       status: toEditableStatus(requestItem.status),
     });
@@ -1231,14 +1264,55 @@ export default function DispatchRequests() {
               <InputField label="Preferred Pickup Date" type="date" value={formState.preferred_pickup_date} onChange={(value) => setFormState((current) => ({ ...current, preferred_pickup_date: value }))} />
               <InputField label="Preferred Pickup Time" type="time" value={formState.preferred_pickup_time} onChange={(value) => setFormState((current) => ({ ...current, preferred_pickup_time: value }))} />
               <InputField label="Expected Delivery Time (Optional)" type="datetime-local" value={formState.expected_delivery_time} onChange={(value) => setFormState((current) => ({ ...current, expected_delivery_time: value }))} />
-              <InputField label="Proposed Charge" type="number" value={formState.proposed_charge} onChange={(value) => setFormState((current) => ({ ...current, proposed_charge: value }))} />
-              <SelectField label="Payment Status" value={formState.payment_status} onChange={(value) => setFormState((current) => ({ ...current, payment_status: value as DispatchPaymentStatus }))}>
-                {paymentStatusOptions.map((paymentStatus) => (
-                  <option key={paymentStatus} value={paymentStatus}>
-                    {formatLabel(paymentStatus)}
-                  </option>
-                ))}
+              <div className="md:col-span-2 rounded-xl border border-blue-100 bg-blue-50/60 p-4">
+                <SelectField label="Dispatch Payment Classification" value={formState.dispatch_financial_type} onChange={(value) => setFormState((current) => ({ ...current, dispatch_financial_type: value as DispatchFinancialType }))}>
+                  <option value="external_paid">External Paid</option>
+                  <option value="internal_company">Internal Company</option>
+                  <option value="partner_contract">Partner Contract</option>
+                  <option value="complimentary">Complimentary</option>
+                </SelectField>
+                <p className="mt-2 text-xs text-blue-800">
+                  {formState.dispatch_financial_type === 'external_paid' && 'Customer-funded dispatch. Charge and payment are tracked as customer revenue and receivables.'}
+                  {formState.dispatch_financial_type === 'internal_company' && 'Company-funded internal movement. No customer charge or receivable is created.'}
+                  {formState.dispatch_financial_type === 'partner_contract' && 'Partner-funded work. Billing follows the selected contract method and is reported separately.'}
+                  {formState.dispatch_financial_type === 'complimentary' && 'No-charge dispatch. Operational costs and driver compensation are still tracked.'}
+                </p>
+              </div>
+              {formState.dispatch_financial_type === 'partner_contract' && (
+                <>
+                  <InputField label="Partner Organization / Reference" value={formState.partner_organization_reference} onChange={(value) => setFormState((current) => ({ ...current, partner_organization_reference: value }))} />
+                  <SelectField label="Partner Billing Method" value={formState.partner_billing_method} onChange={(value) => setFormState((current) => ({ ...current, partner_billing_method: value as PartnerBillingMethod }))}>
+                    <option value="">Select billing method</option>
+                    <option value="no_individual_payment">No Individual Payment</option>
+                    <option value="billed_later">Billed Later</option>
+                    <option value="monthly_contract">Monthly Contract</option>
+                    <option value="prepaid_contract">Prepaid Contract</option>
+                    <option value="manual_settlement">Manual Settlement</option>
+                  </SelectField>
+                </>
+              )}
+              {(formState.dispatch_financial_type === 'external_paid' || formState.dispatch_financial_type === 'partner_contract') && (
+                <InputField label={formState.dispatch_financial_type === 'partner_contract' ? 'Contract / Agreed Charge' : 'Proposed Charge'} type="number" value={formState.proposed_charge} onChange={(value) => setFormState((current) => ({ ...current, proposed_charge: value }))} />
+              )}
+              {(formState.dispatch_financial_type === 'external_paid' || formState.partner_billing_method === 'manual_settlement') && (
+                <>
+                  <SelectField label="Payment Status" value={formState.payment_status} onChange={(value) => setFormState((current) => ({ ...current, payment_status: value as DispatchPaymentStatus }))}>
+                    {paymentStatusOptions.map((paymentStatus) => <option key={paymentStatus} value={paymentStatus}>{formatLabel(paymentStatus)}</option>)}
+                  </SelectField>
+                  <InputField label="Payment Method" value={formState.payment_method} onChange={(value) => setFormState((current) => ({ ...current, payment_method: value }))} />
+                  <InputField label="Amount Paid" type="number" value={formState.amount_paid} onChange={(value) => setFormState((current) => ({ ...current, amount_paid: value }))} />
+                </>
+              )}
+              <SelectField label="Driver Compensation" value={formState.driver_compensation_type} onChange={(value) => setFormState((current) => ({ ...current, driver_compensation_type: value as DriverCompensationType }))}>
+                <option value="none">None</option>
+                <option value="fixed_tip">Fixed Tip</option>
+                <option value="fixed_allowance">Fixed Allowance</option>
+                <option value="percentage_of_charge">Percentage of Charge</option>
+                <option value="manual_amount">Manual Amount</option>
               </SelectField>
+              {formState.driver_compensation_type !== 'none' && (
+                <InputField label={formState.driver_compensation_type === 'percentage_of_charge' ? 'Compensation Percentage' : 'Compensation Amount'} type="number" value={formState.driver_compensation_value} onChange={(value) => setFormState((current) => ({ ...current, driver_compensation_value: value }))} />
+              )}
               <div className="md:col-span-2">
                 <TextAreaField label="Load Description" value={formState.load_description} onChange={(value) => setFormState((current) => ({ ...current, load_description: value }))} placeholder="Describe the goods, package count, handling notes, or special requirements." />
               </div>

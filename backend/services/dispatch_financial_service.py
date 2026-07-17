@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from math import ceil
 from time import perf_counter
@@ -19,6 +20,16 @@ from models.user import serialize_user
 from models.vehicle import serialize_vehicle
 from services.dispatch_return_service import dispatch_jobs_collection, vehicle_movements_collection
 from utils.api_error import ApiError
+from utils.dispatch_payment_classification import (
+    DISPATCH_FINANCIAL_TYPES,
+    DRIVER_COMPENSATION_TYPES,
+    PARTNER_BILLING_METHODS,
+    calculate_driver_compensation,
+    normalize_key,
+    recognizes_individual_customer_revenue,
+    requires_immediate_customer_payment,
+    resolve_dispatch_financial_type,
+)
 from utils.mongo_indexes import ensure_indexes_for_collection
 from utils.performance import log_db_duration
 
@@ -86,6 +97,16 @@ LIST_PROJECTION = {
     "driver_id": 1,
     "vehicle_movement_id": 1,
     "approved_charge": 1,
+    "amount_paid": 1,
+    "dispatch_financial_type": 1,
+    "partner_organization_reference": 1,
+    "partner_billing_method": 1,
+    "driver_compensation_type": 1,
+    "driver_compensation_value": 1,
+    "driver_compensation_amount": 1,
+    "driver_compensation_approved_by": 1,
+    "driver_compensation_approved_at": 1,
+    "company_operational_cost": 1,
     "amount_collected_from_customer": 1,
     "amount_submitted_by_driver": 1,
     "outstanding_balance": 1,
@@ -108,6 +129,16 @@ DISPATCH_REQUEST_PROJECTION = {
     "fuel_estimate_cost": 1,
     "other_expected_costs": 1,
     "expected_net_revenue": 1,
+    "dispatch_financial_type": 1,
+    "partner_organization_reference": 1,
+    "partner_billing_method": 1,
+    "payment_method": 1,
+    "amount_paid": 1,
+    "driver_compensation_type": 1,
+    "driver_compensation_value": 1,
+    "driver_compensation_amount": 1,
+    "driver_compensation_approved_by": 1,
+    "driver_compensation_approved_at": 1,
 }
 
 
@@ -327,12 +358,21 @@ def _create_financial_record(job_document: dict) -> dict:
     request_document = _get_dispatch_request(job_document) or {}
     movement_document = _get_vehicle_movement_for_job(job_document)
     approved_charge = round(float(request_document.get("approved_charge") if request_document.get("approved_charge") is not None else request_document.get("proposed_charge") or 0), 2)
+    classification_source = {**job_document, **request_document}
+    financial_type, is_legacy = resolve_dispatch_financial_type(classification_source)
+    billing_method = normalize_key(classification_source.get("partner_billing_method"))
+    immediate_payment = requires_immediate_customer_payment(financial_type, billing_method)
+    compensation_type = normalize_key(classification_source.get("driver_compensation_type")) or "none"
+    compensation_value = float(classification_source.get("driver_compensation_value") or 0)
+    compensation_amount = calculate_driver_compensation(compensation_type, compensation_value, approved_charge)
+    recorded_amount_paid = round(float(classification_source.get("amount_paid") or 0), 2)
     expected_fuel_cost = round(float(request_document.get("fuel_estimate_cost") or 0), 2)
     estimated_other_costs = round(float(request_document.get("other_expected_costs") or 0), 2)
     expected_net_revenue = round(
         float(request_document.get("expected_net_revenue"))
         if request_document.get("expected_net_revenue") is not None
-        else approved_charge - expected_fuel_cost - estimated_other_costs,
+        else (approved_charge if recognizes_individual_customer_revenue(financial_type, billing_method) else 0)
+        - compensation_amount - expected_fuel_cost - estimated_other_costs,
         2,
     )
     document = {
@@ -342,16 +382,26 @@ def _create_financial_record(job_document: dict) -> dict:
         "vehicle_id": job_document.get("vehicle_id"),
         "driver_id": job_document.get("driver_id"),
         "approved_charge": approved_charge,
-        "amount_collected_from_customer": 0.0,
+        "dispatch_financial_type": financial_type,
+        "dispatch_financial_type_is_legacy": is_legacy,
+        "partner_organization_reference": classification_source.get("partner_organization_reference"),
+        "partner_billing_method": billing_method,
+        "driver_compensation_type": compensation_type,
+        "driver_compensation_value": compensation_value,
+        "driver_compensation_amount": compensation_amount,
+        "driver_compensation_approved_by": classification_source.get("driver_compensation_approved_by"),
+        "driver_compensation_approved_at": classification_source.get("driver_compensation_approved_at"),
+        "amount_paid": recorded_amount_paid,
+        "amount_collected_from_customer": recorded_amount_paid,
         "amount_submitted_by_driver": 0.0,
-        "outstanding_balance": approved_charge,
+        "outstanding_balance": approved_charge if immediate_payment else 0.0,
         "expected_fuel_cost": expected_fuel_cost,
         "actual_fuel_cost": 0.0,
         "estimated_other_costs": estimated_other_costs,
         "approved_expenses": 0.0,
         "company_incident_costs": 0.0,
         "driver_liability_total": 0.0,
-        "company_operational_cost": 0.0,
+        "company_operational_cost": compensation_amount,
         "expected_net_revenue": expected_net_revenue,
         "actual_net_revenue": 0.0,
         "finance_notes": None,
@@ -361,7 +411,7 @@ def _create_financial_record(job_document: dict) -> dict:
         "submitted_at": None,
         "verified_by": None,
         "verified_at": None,
-        "financial_status": "pending_collection",
+        "financial_status": "pending_collection" if immediate_payment else "fully_submitted",
         "is_financially_closed": False,
         "financial_closed_at": None,
         "financial_closed_by": None,
@@ -422,7 +472,7 @@ def _incident_driver_share(document: dict) -> float:
     return 0.0
 
 
-def _derive_financial_status(document: dict, *, outstanding_balance: float, has_pending_review: bool) -> str:
+def _derive_financial_status(document: dict, *, outstanding_balance: float, has_pending_review: bool, immediate_payment: bool = True) -> str:
     if document.get("financial_status") == "cancelled":
         return "cancelled"
     if document.get("financial_status") == "disputed":
@@ -432,6 +482,10 @@ def _derive_financial_status(document: dict, *, outstanding_balance: float, has_
     submitted_amount = round(float(document.get("amount_submitted_by_driver") or 0), 2)
     if has_pending_review:
         return "under_review"
+    if not immediate_payment:
+        return "fully_submitted"
+    if outstanding_balance <= 0 and float(document.get("approved_charge") or 0) > 0:
+        return "fully_submitted"
     if submitted_amount <= 0:
         return "pending_collection"
     if submitted_amount < round(float(document.get("approved_charge") or 0), 2):
@@ -444,12 +498,21 @@ def _sync_financial_record(document: dict, *, job_document: dict | None = None, 
     request_document = _get_dispatch_request(job) or {}
     movement_document = _get_vehicle_movement_for_job(job)
     approved_charge = round(float(request_document.get("approved_charge") if request_document.get("approved_charge") is not None else request_document.get("proposed_charge") or document.get("approved_charge") or 0), 2)
+    classification_source = {**job, **request_document, **document}
+    financial_type, is_legacy = resolve_dispatch_financial_type(classification_source)
+    billing_method = normalize_key(classification_source.get("partner_billing_method"))
+    immediate_payment = requires_immediate_customer_payment(financial_type, billing_method)
+    recognizes_revenue = recognizes_individual_customer_revenue(financial_type, billing_method)
+    compensation_type = normalize_key(classification_source.get("driver_compensation_type")) or "none"
+    compensation_value = float(classification_source.get("driver_compensation_value") or 0)
+    compensation_amount = calculate_driver_compensation(compensation_type, compensation_value, approved_charge)
+    recorded_amount_paid = round(float(classification_source.get("amount_paid") or 0), 2)
     expected_fuel_cost = round(float(request_document.get("fuel_estimate_cost") or document.get("expected_fuel_cost") or 0), 2)
     estimated_other_costs = round(float(request_document.get("other_expected_costs") or document.get("estimated_other_costs") or 0), 2)
     expected_net_revenue = round(
         float(request_document.get("expected_net_revenue"))
         if request_document.get("expected_net_revenue") is not None
-        else approved_charge - expected_fuel_cost - estimated_other_costs,
+        else (approved_charge if recognizes_revenue else 0) - compensation_amount - expected_fuel_cost - estimated_other_costs,
         2,
     )
     expenses = list(dispatch_financial_expenses_collection().find({"dispatch_financial_id": document["_id"]}))
@@ -470,19 +533,34 @@ def _sync_financial_record(document: dict, *, job_document: dict | None = None, 
     driver_liability_total = round(sum(_incident_driver_share(item) for item in incidents), 2)
     amount_submitted_by_driver = round(float(document.get("amount_submitted_by_driver") or 0), 2)
     amount_collected_from_customer = round(float(document.get("amount_collected_from_customer") or 0), 2)
-    outstanding_balance = round(max(approved_charge - amount_submitted_by_driver, 0), 2)
-    company_operational_cost = round(approved_expenses + company_incident_costs, 2)
-    actual_net_revenue = round(amount_submitted_by_driver - approved_expenses - company_incident_costs, 2)
+    settled_amount = max(recorded_amount_paid, amount_submitted_by_driver)
+    outstanding_balance = round(max(approved_charge - settled_amount, 0), 2) if immediate_payment else 0.0
+    company_operational_cost = round(compensation_amount + approved_expenses + company_incident_costs, 2)
+    recognized_actual_revenue = settled_amount if recognizes_revenue else 0.0
+    actual_net_revenue = round(recognized_actual_revenue - company_operational_cost, 2)
     has_pending_review = any(item.get("status") == "pending" for item in expenses) or any(
         item.get("status") in {"reported", "under_review"} for item in incidents
     )
-    financial_status = _derive_financial_status(document, outstanding_balance=outstanding_balance, has_pending_review=has_pending_review)
+    financial_status = _derive_financial_status(
+        document, outstanding_balance=outstanding_balance, has_pending_review=has_pending_review,
+        immediate_payment=immediate_payment,
+    )
     update_fields = {
         "dispatch_request_id": job.get("dispatch_request_id"),
         "vehicle_movement_id": movement_document.get("_id") if movement_document else document.get("vehicle_movement_id"),
         "vehicle_id": job.get("vehicle_id"),
         "driver_id": job.get("driver_id"),
         "approved_charge": approved_charge,
+        "dispatch_financial_type": financial_type,
+        "dispatch_financial_type_is_legacy": is_legacy,
+        "partner_organization_reference": classification_source.get("partner_organization_reference"),
+        "partner_billing_method": billing_method,
+        "driver_compensation_type": compensation_type,
+        "driver_compensation_value": compensation_value,
+        "driver_compensation_amount": compensation_amount,
+        "driver_compensation_approved_by": classification_source.get("driver_compensation_approved_by"),
+        "driver_compensation_approved_at": classification_source.get("driver_compensation_approved_at"),
+        "amount_paid": recorded_amount_paid,
         "expected_fuel_cost": expected_fuel_cost,
         "estimated_other_costs": estimated_other_costs,
         "expected_net_revenue": expected_net_revenue,
@@ -573,11 +651,16 @@ def _build_list_item(record: dict, *, vehicle_document: dict | None, driver_docu
 
 
 def _build_dashboard_summary(records: list[dict], incidents: list[dict]) -> dict:
-    dispatch_revenue = round(sum(float(item.get("amount_submitted_by_driver") or 0) for item in records), 2)
+    external_records = [item for item in records if resolve_dispatch_financial_type(item)[0] == "external_paid"]
+    internal_records = [item for item in records if resolve_dispatch_financial_type(item)[0] == "internal_company"]
+    partner_records = [item for item in records if resolve_dispatch_financial_type(item)[0] == "partner_contract"]
+    complimentary_records = [item for item in records if resolve_dispatch_financial_type(item)[0] == "complimentary"]
+    dispatch_revenue = round(sum(float(item.get("amount_submitted_by_driver") or 0) for item in external_records), 2)
     outstanding_dispatch_payments = round(sum(float(item.get("outstanding_balance") or 0) for item in records), 2)
     driver_liabilities = round(sum(float(item.get("driver_liability_total") or 0) for item in records), 2)
     company_operational_costs = round(sum(float(item.get("company_operational_cost") or 0) for item in records), 2)
     dispatch_profitability = round(sum(float(item.get("actual_net_revenue") or 0) for item in records), 2)
+    driver_dispatch_compensation = round(sum(float(item.get("driver_compensation_amount") or 0) for item in records), 2)
     incident_trends = {
         "total": len(incidents),
         "under_investigation": len([item for item in incidents if item.get("responsibility_type") == "under_investigation"]),
@@ -596,6 +679,13 @@ def _build_dashboard_summary(records: list[dict], incidents: list[dict]) -> dict
     top_driver_id = max(by_driver, key=by_driver.get) if by_driver else None
     return {
         "dispatch_revenue": dispatch_revenue,
+        "paid_dispatch_revenue": dispatch_revenue,
+        "internal_dispatch_operating_costs": round(sum(float(item.get("company_operational_cost") or 0) for item in internal_records), 2),
+        "partner_contract_dispatches": len(partner_records),
+        "partner_contract_revenue": round(sum(float(item.get("approved_charge") or 0) for item in partner_records), 2),
+        "partner_contract_costs": round(sum(float(item.get("company_operational_cost") or 0) for item in partner_records), 2),
+        "complimentary_dispatch_costs": round(sum(float(item.get("company_operational_cost") or 0) for item in complimentary_records), 2),
+        "driver_dispatch_compensation": driver_dispatch_compensation,
         "outstanding_dispatch_payments": outstanding_dispatch_payments,
         "driver_liabilities": driver_liabilities,
         "company_operational_costs": company_operational_costs,
@@ -636,16 +726,62 @@ def list_dispatch_financials(*, current_role: str, page: int = 1, page_size: int
     records = list(
         dispatch_financials_collection().find(query, LIST_PROJECTION).sort([("updated_at", DESCENDING), ("submitted_at", DESCENDING)]).skip(skip).limit(normalized_page_size)
     )
-    total = dispatch_financials_collection().count_documents(query)
     log_db_duration("dispatch_financials.list", list_started_at)
     # The list endpoint is intentionally read-only. Financial totals are
     # persisted by the submit/approval/closure workflows; recomputing and
     # writing each record here caused slow N+1 reads and write-on-read.
     full_records = records
-    vehicle_map = _vehicle_lookup(full_records)
-    user_map = _user_lookup(full_records)
-    job_map = _job_lookup(full_records)
-    movement_map = _movement_lookup(full_records)
+    financial_collection = dispatch_financials_collection()
+    financial_incident_collection = dispatch_financial_incidents_collection()
+    vehicle_collection = vehicles_collection()
+    user_collection = users_collection()
+    job_collection = dispatch_jobs_collection()
+    movement_collection = vehicle_movements_collection()
+    vehicle_ids = {record.get("vehicle_id") for record in full_records if isinstance(record.get("vehicle_id"), ObjectId)}
+    driver_ids = {record.get("driver_id") for record in full_records if isinstance(record.get("driver_id"), ObjectId)}
+    job_ids = {record.get("dispatch_job_id") for record in full_records if isinstance(record.get("dispatch_job_id"), ObjectId)}
+    movement_ids = {record.get("vehicle_movement_id") for record in full_records if isinstance(record.get("vehicle_movement_id"), ObjectId)}
+
+    def load_summary() -> dict:
+        summary_records = list(financial_collection.find(query, LIST_PROJECTION))
+        summary_incidents = list(
+            financial_incident_collection.find(
+                {"dispatch_financial_id": {"$in": [item["_id"] for item in summary_records]}}
+            )
+        ) if summary_records else []
+        return _build_dashboard_summary(summary_records, summary_incidents)
+
+    enrichment_started_at = perf_counter()
+    # Atlas round-trip latency dominates this endpoint. These reads are
+    # independent, and PyMongo collection handles are thread-safe, so run them
+    # in one batch instead of paying for each network trip sequentially.
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        total_future = executor.submit(financial_collection.count_documents, query)
+        vehicle_future = executor.submit(
+            lambda: {item["_id"]: item for item in vehicle_collection.find({"_id": {"$in": list(vehicle_ids)}}, VEHICLE_PROJECTION)}
+            if vehicle_ids else {}
+        )
+        user_future = executor.submit(
+            lambda: {item["_id"]: item for item in user_collection.find({"_id": {"$in": list(driver_ids)}}, USER_PROJECTION)}
+            if driver_ids else {}
+        )
+        job_future = executor.submit(
+            lambda: {item["_id"]: item for item in job_collection.find({"_id": {"$in": list(job_ids)}})}
+            if job_ids else {}
+        )
+        movement_future = executor.submit(
+            lambda: {item["_id"]: item for item in movement_collection.find({"_id": {"$in": list(movement_ids)}})}
+            if movement_ids else {}
+        )
+        summary_future = executor.submit(load_summary)
+        total = total_future.result()
+        vehicle_map = vehicle_future.result()
+        user_map = user_future.result()
+        job_map = job_future.result()
+        movement_map = movement_future.result()
+        summary = summary_future.result()
+    log_db_duration("dispatch_financials.enrichment_and_summary", enrichment_started_at)
+
     page_payload = [
         _build_list_item(
             record,
@@ -656,8 +792,6 @@ def list_dispatch_financials(*, current_role: str, page: int = 1, page_size: int
         )
         for record in full_records
     ]
-    summary_records = list(dispatch_financials_collection().find(query, LIST_PROJECTION))
-    summary_incidents = list(dispatch_financial_incidents_collection().find({"dispatch_financial_id": {"$in": [item["_id"] for item in summary_records]}})) if summary_records else []
     return {
         "records": page_payload,
         "pagination": {
@@ -666,7 +800,7 @@ def list_dispatch_financials(*, current_role: str, page: int = 1, page_size: int
             "total": total,
             "total_pages": max(1, ceil(total / normalized_page_size)) if normalized_page_size else 1,
         },
-        "summary": _build_dashboard_summary(summary_records, summary_incidents),
+        "summary": summary,
         "filters": {"q": search_query, "financial_status": financial_status},
     }
 
@@ -705,6 +839,9 @@ def submit_driver_dispatch_money(job_id: str, payload: dict, *, current_user_id:
     _assert_financial_stage_ready(job_document)
     _assert_driver_scope(job_document, current_user_id)
     record = _get_financial_record_for_job(job_document)
+    financial_type, _ = resolve_dispatch_financial_type(record)
+    if not requires_immediate_customer_payment(financial_type, record.get("partner_billing_method")):
+        raise ApiError("This dispatch classification does not accept an individual customer payment.", status_code=400)
     if record.get("is_financially_closed"):
         raise ApiError("Closed financial records cannot be modified.", status_code=400)
     amount_collected = _normalize_positive_amount((payload or {}).get("amount_collected_from_customer"), "amount_collected_from_customer", required=True)
@@ -964,10 +1101,22 @@ def verify_dispatch_financial(job_id: str, payload: dict, *, current_user_id: st
     if unresolved_investigation:
         raise ApiError("Financial verification requires all incidents under investigation to be resolved.", status_code=400)
     timestamp = now_utc()
+    compensation_type = normalize_key((payload or {}).get("driver_compensation_type")) or record.get("driver_compensation_type") or "none"
+    compensation_value = (
+        (payload or {}).get("driver_compensation_value")
+        if "driver_compensation_value" in (payload or {})
+        else record.get("driver_compensation_value", 0)
+    )
+    compensation_amount = calculate_driver_compensation(compensation_type, compensation_value, record.get("approved_charge"))
     update_fields = {
         "finance_notes": _normalize_text((payload or {}).get("finance_notes")) or record.get("finance_notes"),
         "verified_by": _to_object_id(current_user_id, "verified_by"),
         "verified_at": timestamp,
+        "driver_compensation_type": compensation_type,
+        "driver_compensation_value": float(compensation_value or 0),
+        "driver_compensation_amount": compensation_amount,
+        "driver_compensation_approved_by": _to_object_id(current_user_id, "driver_compensation_approved_by"),
+        "driver_compensation_approved_at": timestamp,
         "updated_at": timestamp,
     }
     dispatch_financials_collection().update_one({"_id": record["_id"]}, {"$set": update_fields})
@@ -1039,6 +1188,9 @@ def get_dispatch_financial_reference_options(*, current_role: str) -> dict:
     _assert_admin_role(current_role)
     return {
         "financial_statuses": sorted(FINANCIAL_STATUSES),
+        "dispatch_financial_types": sorted(DISPATCH_FINANCIAL_TYPES),
+        "partner_billing_methods": sorted(PARTNER_BILLING_METHODS),
+        "driver_compensation_types": sorted(DRIVER_COMPENSATION_TYPES),
         "expense_types": sorted(EXPENSE_TYPES),
         "expense_statuses": sorted(EXPENSE_STATUSES),
         "incident_types": sorted(FINANCIAL_INCIDENT_TYPES),

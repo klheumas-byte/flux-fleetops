@@ -1,4 +1,5 @@
 from bson import ObjectId
+from utils.dispatch_payment_classification import resolve_dispatch_financial_type
 
 
 def _serialize_reference_id(value):
@@ -53,6 +54,7 @@ def _serialize_pricing_history(entry: dict) -> dict:
 
 
 def serialize_dispatch_request(document: dict) -> dict:
+    financial_type, is_legacy = resolve_dispatch_financial_type(document)
     return {
         "id": str(document.get("_id")),
         "request_id": document.get("request_id"),
@@ -84,6 +86,20 @@ def serialize_dispatch_request(document: dict) -> dict:
         "other_expected_costs": document.get("other_expected_costs"),
         "expected_net_revenue": document.get("expected_net_revenue"),
         "payment_status": document.get("payment_status"),
+        "dispatch_financial_type": financial_type,
+        "dispatch_financial_type_is_legacy": is_legacy,
+        "partner_organization_reference": document.get("partner_organization_reference"),
+        "partner_billing_method": document.get("partner_billing_method"),
+        "payment_method": document.get("payment_method"),
+        "amount_paid": document.get("amount_paid", 0),
+        "outstanding_balance": document.get("outstanding_balance", 0),
+        "driver_compensation_type": document.get("driver_compensation_type") or "none",
+        "driver_compensation_value": document.get("driver_compensation_value", 0),
+        "driver_compensation_amount": document.get("driver_compensation_amount", 0),
+        "financial_type_changed_by": _serialize_reference_id(document.get("financial_type_changed_by")),
+        "financial_type_changed_at": _serialize_datetime(document.get("financial_type_changed_at")),
+        "driver_compensation_approved_by": _serialize_reference_id(document.get("driver_compensation_approved_by")),
+        "driver_compensation_approved_at": _serialize_datetime(document.get("driver_compensation_approved_at")),
         "planning_status": document.get("planning_status"),
         "active_dispatch_job_id": _serialize_reference_id(document.get("active_dispatch_job_id")),
         "schedule_type": document.get("schedule_type"),

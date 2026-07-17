@@ -15,6 +15,9 @@ export type DispatchLoadWeightCategory = string;
 export type DispatchLoadSizeCategory = string;
 export type DispatchUrgency = string;
 export type DispatchPaymentStatus = string;
+export type DispatchFinancialType = 'external_paid' | 'internal_company' | 'partner_contract' | 'complimentary';
+export type PartnerBillingMethod = 'no_individual_payment' | 'billed_later' | 'monthly_contract' | 'prepaid_contract' | 'manual_settlement';
+export type DriverCompensationType = 'none' | 'fixed_tip' | 'fixed_allowance' | 'percentage_of_charge' | 'manual_amount';
 export type DispatchVehicleTypeNeeded = string;
 export type DispatchPricingStatus =
   | 'pricing_pending'
@@ -63,6 +66,16 @@ export interface DispatchRequestRecord {
   other_expected_costs?: number | null;
   expected_net_revenue?: number | null;
   payment_status: DispatchPaymentStatus;
+  dispatch_financial_type: DispatchFinancialType;
+  dispatch_financial_type_is_legacy?: boolean;
+  partner_organization_reference?: string | null;
+  partner_billing_method?: PartnerBillingMethod | null;
+  payment_method?: string | null;
+  amount_paid?: number;
+  outstanding_balance?: number;
+  driver_compensation_type?: DriverCompensationType;
+  driver_compensation_value?: number;
+  driver_compensation_amount?: number;
   schedule_type?: DispatchScheduleType | null;
   scheduled_start_time?: string | null;
   scheduled_end_time?: string | null;
@@ -142,6 +155,9 @@ export interface DispatchRequestOptionsResponse {
   load_size_categories: DispatchLoadSizeCategory[];
   urgencies: DispatchUrgency[];
   payment_statuses: DispatchPaymentStatus[];
+  dispatch_financial_types: DispatchFinancialType[];
+  partner_billing_methods: PartnerBillingMethod[];
+  driver_compensation_types: DriverCompensationType[];
   statuses: DispatchRequestStatus[];
   editable_statuses: DispatchRequestStatus[];
   pricing_statuses: DispatchPricingStatus[];

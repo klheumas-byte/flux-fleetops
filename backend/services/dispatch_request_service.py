@@ -15,6 +15,17 @@ from models.user import serialize_user
 from services.master_data_service import assert_master_data_value, get_active_master_data_items
 from services.notification_service import create_notification, notify_roles, resolve_action_notifications
 from utils.api_error import ApiError
+from utils.dispatch_payment_classification import (
+    DISPATCH_FINANCIAL_TYPES,
+    DRIVER_COMPENSATION_TYPES,
+    PARTNER_BILLING_METHODS,
+    calculate_driver_compensation,
+    normalize_key,
+    payment_status_is_recorded,
+    recognizes_individual_customer_revenue,
+    requires_immediate_customer_payment,
+    resolve_dispatch_financial_type,
+)
 from utils.mongo_indexes import ensure_indexes_for_collection
 from utils.performance import build_cache_key, get_ttl_cached, log_db_duration, set_ttl_cached
 
@@ -80,6 +91,19 @@ LIST_PROJECTION = {
     "other_expected_costs": 1,
     "expected_net_revenue": 1,
     "payment_status": 1,
+    "dispatch_financial_type": 1,
+    "partner_organization_reference": 1,
+    "partner_billing_method": 1,
+    "payment_method": 1,
+    "amount_paid": 1,
+    "outstanding_balance": 1,
+    "driver_compensation_type": 1,
+    "driver_compensation_value": 1,
+    "driver_compensation_amount": 1,
+    "financial_type_changed_by": 1,
+    "financial_type_changed_at": 1,
+    "driver_compensation_approved_by": 1,
+    "driver_compensation_approved_at": 1,
     "status": 1,
     "planning_status": 1,
     "active_dispatch_job_id": 1,
@@ -135,6 +159,13 @@ EDITOR_PATCHABLE_FIELDS = {
     "urgency",
     "proposed_charge",
     "payment_status",
+    "dispatch_financial_type",
+    "partner_organization_reference",
+    "partner_billing_method",
+    "payment_method",
+    "amount_paid",
+    "driver_compensation_type",
+    "driver_compensation_value",
     "notes",
     "status",
 }
@@ -321,11 +352,75 @@ def _parse_positive_integer(value, field_name: str, *, required: bool = False) -
     return parsed
 
 
-def _compute_expected_net_revenue(*, approved_charge, proposed_charge, fuel_estimate_cost, other_expected_costs):
+def _compute_expected_net_revenue(
+    *, approved_charge, proposed_charge, fuel_estimate_cost, other_expected_costs,
+    dispatch_financial_type="external_paid", partner_billing_method=None, driver_compensation_amount=0,
+):
     base_charge = approved_charge if approved_charge is not None else proposed_charge
     if base_charge is None:
         return None
-    return round(float(base_charge) - float(fuel_estimate_cost or 0) - float(other_expected_costs or 0), 2)
+    recognized_charge = float(base_charge) if recognizes_individual_customer_revenue(
+        dispatch_financial_type, partner_billing_method
+    ) else 0.0
+    return round(
+        recognized_charge
+        - float(driver_compensation_amount or 0)
+        - float(fuel_estimate_cost or 0)
+        - float(other_expected_costs or 0),
+        2,
+    )
+
+
+def _validate_financial_classification(document: dict, *, require_explicit: bool = False) -> dict:
+    financial_type, is_legacy = resolve_dispatch_financial_type(document)
+    if require_explicit and is_legacy:
+        raise ApiError("dispatch_financial_type is required.", status_code=400)
+    billing_method = normalize_key(document.get("partner_billing_method"))
+    partner_reference = _normalize_text(document.get("partner_organization_reference"))
+    charge = document.get("approved_charge")
+    if charge is None:
+        charge = document.get("proposed_charge")
+    charge = float(charge or 0)
+    amount_paid = float(document.get("amount_paid") or 0)
+    payment_method = _normalize_text(document.get("payment_method"))
+
+    if financial_type == "partner_contract":
+        if not partner_reference:
+            raise ApiError("partner_organization_reference is required for partner contract dispatches.", status_code=400)
+        if billing_method not in PARTNER_BILLING_METHODS:
+            raise ApiError("A valid partner_billing_method is required for partner contract dispatches.", status_code=400)
+    elif billing_method or partner_reference:
+        raise ApiError("Partner billing fields are only valid for partner contract dispatches.", status_code=400)
+
+    immediate_payment = requires_immediate_customer_payment(financial_type, billing_method)
+    if financial_type in {"internal_company", "complimentary"}:
+        if charge != 0 or amount_paid != 0 or payment_method:
+            raise ApiError(f"{financial_type} dispatches cannot record a customer charge or payment.", status_code=400)
+    elif immediate_payment and charge <= 0:
+        raise ApiError("A customer charge greater than zero is required for this dispatch classification.", status_code=400)
+    if amount_paid < 0 or amount_paid > charge:
+        raise ApiError("amount_paid must be between zero and the customer charge.", status_code=400)
+    if (amount_paid > 0 or payment_status_is_recorded(document.get("payment_status"))) and immediate_payment and not payment_method:
+        raise ApiError("payment_method is required when a customer payment is recorded.", status_code=400)
+
+    compensation_type = normalize_key(document.get("driver_compensation_type")) or "none"
+    if compensation_type not in DRIVER_COMPENSATION_TYPES:
+        raise ApiError("Invalid driver_compensation_type.", status_code=400)
+    compensation_value = float(document.get("driver_compensation_value") or 0)
+    compensation_amount = calculate_driver_compensation(compensation_type, compensation_value, charge)
+    outstanding = round(max(charge - amount_paid, 0), 2) if immediate_payment else 0.0
+    return {
+        "dispatch_financial_type": financial_type,
+        "partner_organization_reference": partner_reference if financial_type == "partner_contract" else None,
+        "partner_billing_method": billing_method if financial_type == "partner_contract" else None,
+        "payment_method": payment_method if immediate_payment else None,
+        "amount_paid": round(amount_paid, 2) if immediate_payment else 0.0,
+        "outstanding_balance": outstanding,
+        "payment_status": document.get("payment_status") if immediate_payment else "Not Required",
+        "driver_compensation_type": compensation_type,
+        "driver_compensation_value": round(compensation_value, 2),
+        "driver_compensation_amount": compensation_amount,
+    }
 
 
 def _assert_view_role(current_role: str):
@@ -514,6 +609,27 @@ def _normalize_dispatch_request_payload(payload: dict, *, partial: bool = False,
             required=False,
             default="Unpaid" if not partial else None,
         )
+    if "dispatch_financial_type" in payload or not partial:
+        financial_type = normalize_key(payload.get("dispatch_financial_type"))
+        if financial_type not in DISPATCH_FINANCIAL_TYPES:
+            raise ApiError("A valid dispatch_financial_type is required.", status_code=400)
+        normalized["dispatch_financial_type"] = financial_type
+    for field_name in ("partner_organization_reference", "payment_method"):
+        if field_name in payload or not partial:
+            normalized[field_name] = _normalize_text(payload.get(field_name))
+    if "partner_billing_method" in payload or not partial:
+        normalized["partner_billing_method"] = normalize_key(payload.get("partner_billing_method"))
+    if "amount_paid" in payload or not partial:
+        normalized["amount_paid"] = _validate_non_negative_number(payload.get("amount_paid"), "amount_paid") or 0.0
+    if "driver_compensation_type" in payload or not partial:
+        compensation_type = normalize_key(payload.get("driver_compensation_type")) or "none"
+        if compensation_type not in DRIVER_COMPENSATION_TYPES:
+            raise ApiError("Invalid driver_compensation_type.", status_code=400)
+        normalized["driver_compensation_type"] = compensation_type
+    if "driver_compensation_value" in payload or not partial:
+        normalized["driver_compensation_value"] = (
+            _validate_non_negative_number(payload.get("driver_compensation_value"), "driver_compensation_value") or 0.0
+        )
     if "notes" in payload or not partial:
         normalized["notes"] = _normalize_text(payload.get("notes"))
     if "status" in payload:
@@ -532,11 +648,15 @@ def _normalize_dispatch_request_payload(payload: dict, *, partial: bool = False,
         normalized["fuel_estimate_amount"] = None
         normalized["fuel_estimate_cost"] = None
         normalized["other_expected_costs"] = None
+        normalized.update(_validate_financial_classification(normalized, require_explicit=True))
         normalized["expected_net_revenue"] = _compute_expected_net_revenue(
             approved_charge=None,
             proposed_charge=normalized.get("proposed_charge"),
             fuel_estimate_cost=None,
             other_expected_costs=None,
+            dispatch_financial_type=normalized.get("dispatch_financial_type"),
+            partner_billing_method=normalized.get("partner_billing_method"),
+            driver_compensation_amount=normalized.get("driver_compensation_amount"),
         )
         normalized["scheduled_start_time"] = None
         normalized["scheduled_end_time"] = None
@@ -642,11 +762,16 @@ def _validate_pricing_state(document: dict, update_fields: dict, *, action: str)
         raise ApiError("Pricing cannot be approved without proposed or approved charge.", status_code=400)
     if action == "reject" and not _normalize_text(merged.get("pricing_notes")):
         raise ApiError("pricing_notes is required when rejecting pricing.", status_code=400)
+    classification = _validate_financial_classification(merged)
+    merged.update(classification)
     merged["expected_net_revenue"] = _compute_expected_net_revenue(
         approved_charge=merged.get("approved_charge"),
         proposed_charge=merged.get("proposed_charge"),
         fuel_estimate_cost=merged.get("fuel_estimate_cost"),
         other_expected_costs=merged.get("other_expected_costs"),
+        dispatch_financial_type=classification["dispatch_financial_type"],
+        partner_billing_method=classification["partner_billing_method"],
+        driver_compensation_amount=classification["driver_compensation_amount"],
     )
     return merged
 
@@ -831,6 +956,9 @@ def list_dispatch_request_options(*, current_role: str, current_user_id: str) ->
         "load_size_categories": [item["name"] for item in get_active_master_data_items("dispatch_load_size_categories")],
         "urgencies": [item["name"] for item in get_active_master_data_items("dispatch_urgencies")],
         "payment_statuses": [item["name"] for item in get_active_master_data_items("dispatch_payment_statuses")],
+        "dispatch_financial_types": sorted(DISPATCH_FINANCIAL_TYPES),
+        "partner_billing_methods": sorted(PARTNER_BILLING_METHODS),
+        "driver_compensation_types": sorted(DRIVER_COMPENSATION_TYPES),
         "statuses": sorted(ALLOWED_DISPATCH_REQUEST_STATUSES),
         "editable_statuses": sorted(EDITABLE_UNAPPROVED_STATUSES),
         "pricing_statuses": sorted(ALLOWED_PRICING_STATUSES),
@@ -1039,12 +1167,17 @@ def create_dispatch_request(payload: dict, *, current_user_id: str, current_role
     normalized_payload = _normalize_dispatch_request_payload(payload or {}, partial=False, current_role=normalized_role)
     _validate_request_timing(normalized_payload)
     timestamp = now_utc()
+    actor_id = _to_object_id(current_user_id, "current_user_id")
     document = {
         **normalized_payload,
         "request_id": _generate_request_id(),
         "rejection_reason": None,
         "cancellation_reason": None,
-        "created_by": _to_object_id(current_user_id, "current_user_id"),
+        "created_by": actor_id,
+        "financial_type_changed_by": actor_id,
+        "financial_type_changed_at": timestamp,
+        "driver_compensation_approved_by": actor_id if normalized_role in OWNER_ADMIN_ROLES else None,
+        "driver_compensation_approved_at": timestamp if normalized_role in OWNER_ADMIN_ROLES else None,
         "reviewed_by": None,
         "approved_by": None,
         "rejected_by": None,
@@ -1096,6 +1229,10 @@ def create_dispatch_request_from_opportunity(opportunity_document: dict, *, curr
             "preferred_pickup_date": opportunity_document.get("preferred_pickup_date"),
             "preferred_pickup_time": opportunity_document.get("preferred_pickup_time"),
             "proposed_charge": opportunity_document.get("proposed_charge"),
+            "dispatch_financial_type": "external_paid",
+            "amount_paid": 0,
+            "driver_compensation_type": "none",
+            "driver_compensation_value": 0,
             "payment_status": opportunity_document.get("payment_status") or "Unpaid",
             "notes": opportunity_document.get("notes"),
             "status": "new",
@@ -1110,10 +1247,14 @@ def create_dispatch_request_from_opportunity(opportunity_document: dict, *, curr
         proposed_charge=normalized_payload.get("proposed_charge"),
         fuel_estimate_cost=normalized_payload.get("fuel_estimate_cost"),
         other_expected_costs=normalized_payload.get("other_expected_costs"),
+        dispatch_financial_type=normalized_payload.get("dispatch_financial_type"),
+        partner_billing_method=normalized_payload.get("partner_billing_method"),
+        driver_compensation_amount=normalized_payload.get("driver_compensation_amount"),
     )
     _validate_request_timing(normalized_payload)
 
     timestamp = now_utc()
+    actor_id = _to_object_id(current_user_id, "current_user_id")
     document = {
         **normalized_payload,
         "request_id": _generate_request_id(),
@@ -1122,7 +1263,11 @@ def create_dispatch_request_from_opportunity(opportunity_document: dict, *, curr
         "submitted_by_driver_id": opportunity_document.get("submitted_by_driver_id"),
         "rejection_reason": None,
         "cancellation_reason": None,
-        "created_by": _to_object_id(current_user_id, "current_user_id"),
+        "created_by": actor_id,
+        "financial_type_changed_by": actor_id,
+        "financial_type_changed_at": timestamp,
+        "driver_compensation_approved_by": actor_id if normalized_role in OWNER_ADMIN_ROLES else None,
+        "driver_compensation_approved_at": timestamp if normalized_role in OWNER_ADMIN_ROLES else None,
         "reviewed_by": None,
         "approved_by": None,
         "rejected_by": None,
@@ -1163,8 +1308,25 @@ def update_dispatch_request(request_id: str, payload: dict, *, current_user_id: 
 
     updated_document = {**document, **normalized_payload}
     _validate_request_timing(updated_document)
+    classification = _validate_financial_classification(updated_document)
+    normalized_payload.update(classification)
     timestamp = now_utc()
     update_fields = {**normalized_payload, "updated_at": timestamp}
+    if classification["dispatch_financial_type"] != resolve_dispatch_financial_type(document)[0]:
+        update_fields["financial_type_changed_by"] = _to_object_id(current_user_id, "current_user_id")
+        update_fields["financial_type_changed_at"] = timestamp
+    if any(key in filtered_payload for key in {"driver_compensation_type", "driver_compensation_value"}):
+        update_fields["driver_compensation_approved_by"] = (
+            _to_object_id(current_user_id, "current_user_id") if normalized_role in OWNER_ADMIN_ROLES else None
+        )
+        update_fields["driver_compensation_approved_at"] = timestamp if normalized_role in OWNER_ADMIN_ROLES else None
+    update_fields["expected_net_revenue"] = _compute_expected_net_revenue(
+        approved_charge=updated_document.get("approved_charge"), proposed_charge=updated_document.get("proposed_charge"),
+        fuel_estimate_cost=updated_document.get("fuel_estimate_cost"), other_expected_costs=updated_document.get("other_expected_costs"),
+        dispatch_financial_type=classification["dispatch_financial_type"],
+        partner_billing_method=classification["partner_billing_method"],
+        driver_compensation_amount=classification["driver_compensation_amount"],
+    )
     if next_status in {"reviewing", "pricing_pending"}:
         update_fields["reviewed_by"] = _to_object_id(current_user_id, "current_user_id")
         update_fields["reviewed_at"] = timestamp
@@ -1204,6 +1366,9 @@ def revise_dispatch_request_pricing(request_id: str, payload: dict, *, current_u
     )
     update_fields = {
         **normalized_payload,
+        **{key: merged_document.get(key) for key in (
+            "outstanding_balance", "driver_compensation_amount", "payment_status",
+        )},
         "pricing_status": "pricing_revised",
         "expected_net_revenue": merged_document.get("expected_net_revenue"),
         "pricing_reviewed_by": _to_object_id(current_user_id, "current_user_id"),
@@ -1244,6 +1409,9 @@ def approve_dispatch_request_pricing(request_id: str, payload: dict, *, current_
         "approved_charge": merged_document.get("approved_charge")
         if merged_document.get("approved_charge") is not None
         else merged_document.get("proposed_charge"),
+        **{key: merged_document.get(key) for key in (
+            "outstanding_balance", "driver_compensation_amount", "payment_status",
+        )},
         "expected_net_revenue": merged_document.get("expected_net_revenue"),
         "pricing_reviewed_by": _to_object_id(current_user_id, "current_user_id"),
         "pricing_reviewed_at": timestamp,
@@ -1426,16 +1594,22 @@ def approve_dispatch_request(request_id: str, payload: dict, *, current_user_id:
         raise ApiError("Only unapproved dispatch requests can be approved.", status_code=400)
 
     approved_charge = _validate_non_negative_number(payload.get("approved_charge"), "approved_charge")
+    final_charge = approved_charge if approved_charge is not None else document.get("proposed_charge") or 0.0
+    classification = _validate_financial_classification({**document, "approved_charge": final_charge})
     timestamp = now_utc()
     update_fields = {
         "status": "approved",
-        "approved_charge": approved_charge if approved_charge is not None else document.get("proposed_charge") or 0.0,
+        "approved_charge": final_charge,
+        **classification,
         "pricing_status": "pricing_approved",
         "expected_net_revenue": _compute_expected_net_revenue(
-            approved_charge=approved_charge if approved_charge is not None else document.get("proposed_charge") or 0.0,
+            approved_charge=final_charge,
             proposed_charge=document.get("proposed_charge"),
             fuel_estimate_cost=document.get("fuel_estimate_cost"),
             other_expected_costs=document.get("other_expected_costs"),
+            dispatch_financial_type=classification["dispatch_financial_type"],
+            partner_billing_method=classification["partner_billing_method"],
+            driver_compensation_amount=classification["driver_compensation_amount"],
         ),
         "reviewed_by": _to_object_id(current_user_id, "current_user_id"),
         "approved_by": _to_object_id(current_user_id, "current_user_id"),

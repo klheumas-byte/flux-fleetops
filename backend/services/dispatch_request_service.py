@@ -1558,19 +1558,25 @@ def confirm_dispatch_request_stop_delivery(
 
     stop = dict(stops[stop_index])
     linked_movement_id = _normalize_text((payload or {}).get("movement_id")) or _normalize_text(stop.get("linked_movement_id"))
+    linked_movement = None
     if normalized_role == "driver":
         if not linked_movement_id:
             raise ApiError("movement_id is required for driver stop delivery confirmation.", status_code=400)
-        _get_linked_vehicle_movement_for_stop(
+        linked_movement = _get_linked_vehicle_movement_for_stop(
             linked_movement_id,
             current_user_id=current_user_id,
             current_role=normalized_role,
         )
     elif linked_movement_id:
-        _get_linked_vehicle_movement_for_stop(
+        linked_movement = _get_linked_vehicle_movement_for_stop(
             linked_movement_id,
             current_user_id=current_user_id,
             current_role="admin",
+        )
+    if linked_movement and linked_movement.get("dispatch_request_id") != document["_id"]:
+        raise ApiError(
+            "Linked vehicle movement does not belong to this dispatch request.",
+            status_code=403 if normalized_role == "driver" else 400,
         )
 
     stop["linked_movement_id"] = _to_object_id(linked_movement_id, "movement_id", required=False) if linked_movement_id else None

@@ -1,6 +1,64 @@
 import type { FuelLevelDetails } from './fuel-gauge';
 import { apiRequest } from './api';
 
+export type DriverOperationalTaskType = 'supplier_pickup' | 'stock_transfer' | 'operational_request' | 'dispatch';
+
+export interface DriverOperationalTask {
+  id: string;
+  task_key: string;
+  operation_type: DriverOperationalTaskType;
+  operation_subtype?: string | null;
+  operation_label: string;
+  reference: string;
+  title: string;
+  schedule?: string | null;
+  origin?: string | null;
+  destination?: string | null;
+  vehicle?: {
+    id: string;
+    registration_number: string;
+    make?: string | null;
+    model?: string | null;
+  } | null;
+  status: string;
+  status_label: string;
+  current_action: { key: string; label: string };
+  linked_waybill_id?: string | null;
+  updated_at?: string | null;
+}
+
+export async function fetchDriverOperationalTasks() {
+  const response = await apiRequest<{ tasks: DriverOperationalTask[]; count: number }>('/driver/operational-tasks', {
+    componentName: 'DriverOperationalTasks',
+    requestLabel: 'summary',
+    dedupeKey: 'driver-operational-tasks',
+  });
+  return response.data;
+}
+
+export interface DriverOperationsSummary {
+  counts: {
+    current_task: number;
+    today: number;
+    upcoming: number;
+    pending_acceptance: number;
+    completed_today: number;
+  };
+  current_task: DriverOperationalTask | null;
+  upcoming_tasks: DriverOperationalTask[];
+  generated_at: string;
+}
+
+export async function fetchDriverOperationsSummary() {
+  const response = await apiRequest<DriverOperationsSummary>('/driver/operations-summary', {
+    cacheTtlMs: 5000,
+    componentName: 'DriverOperationsDashboard',
+    requestLabel: 'operations-summary',
+    dedupeKey: 'driver-operations-summary',
+  });
+  return response.data;
+}
+
 export interface DriverAssignedVehicle {
   id: string;
   registration_number: string;
@@ -34,7 +92,13 @@ export interface DriverActiveAssignment {
   vehicle_id: string;
   weekly_target: number;
   daily_target: number;
+  target_enabled: boolean;
+  target_amount?: number | null;
+  target_frequency: 'daily' | 'weekly';
+  operating_mode: 'operations_only' | 'target_only' | 'hybrid';
   start_date: string | null;
+  start_time?: string | null;
+  expected_end_at?: string | null;
   status: string;
   vehicle: DriverAssignedVehicle | null;
 }
@@ -179,6 +243,24 @@ export interface DriverDispatchTimelineEntry {
   timestamp?: string | null;
 }
 
+export interface DispatchFuelAccountability {
+  opening_fuel_level?: number | null;
+  opening_fuel_recorded_at?: string | null;
+  opening_odometer?: number | null;
+  closing_fuel_level?: number | null;
+  closing_fuel_recorded_at?: string | null;
+  closing_odometer?: number | null;
+  total_fuel_litres_added?: number;
+  total_fuel_cost?: number;
+  distance_travelled?: number | null;
+  estimated_fuel_consumed?: number | null;
+  estimated_fuel_efficiency?: number | null;
+  litre_values_are_estimates?: boolean;
+  tank_capacity_litres?: number | null;
+  fuel_summary_status?: string;
+  legacy_opening_missing?: boolean;
+}
+
 export interface DriverDispatchJob {
   id: string;
   dispatch_job_id: string;
@@ -211,6 +293,7 @@ export interface DriverDispatchJob {
     email?: string | null;
   } | null;
   timeline?: DriverDispatchTimelineEntry[];
+  fuel_accountability?: DispatchFuelAccountability;
 }
 
 export interface DriverDispatchWorkspaceSummary {
@@ -377,6 +460,22 @@ export async function fetchDriverDispatchJob(jobId: string): Promise<DriverDispa
     requestLabel: 'dispatch-detail',
   });
   return response.data.job;
+}
+
+export async function confirmDriverDispatchOpeningFuel(jobId: string, payload: {
+  opening_fuel_level: number;
+  opening_odometer?: number;
+  inspection_note?: string;
+  opening_fuel_photo?: string;
+}): Promise<{ summary: DispatchFuelAccountability }> {
+  const response = await apiRequest<{
+    success: boolean;
+    data: { summary: DispatchFuelAccountability };
+  }>(`/driver/dispatch-jobs/${jobId}/fuel/opening`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+  return response.data;
 }
 
 export async function acceptDriverDispatchJob(jobId: string): Promise<DriverDispatchJob> {

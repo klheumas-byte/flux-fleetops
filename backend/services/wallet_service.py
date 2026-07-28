@@ -194,7 +194,7 @@ def get_logged_in_driver_wallet(driver_user_id: str) -> dict:
         return cached
     driver = _get_driver_document(driver_user_id)
     active_assignment = assignments_collection().find_one(
-        {"driver_id": driver["_id"], "status": "active"}
+        {"driver_id": driver["_id"], "status": "active", "target_enabled": {"$ne": False}}
     )
     if not active_assignment:
         return set_ttl_cached(

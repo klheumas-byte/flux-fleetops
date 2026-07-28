@@ -201,7 +201,7 @@ def generate_default_preventive_schedules_route(vehicle_id: str):
 
 
 @preventive_maintenance_bp.get("/compliance/types")
-@role_required("owner", "admin", "driver")
+@role_required("owner", "admin", "driver", "fleet_owner")
 def get_compliance_item_types_route():
     return success_response(
         data={
@@ -237,7 +237,7 @@ def update_compliance_item_type_route(type_id: str):
 
 
 @preventive_maintenance_bp.get("/compliance/records")
-@role_required("owner", "admin", "driver")
+@role_required("owner", "admin", "driver", "fleet_owner")
 def get_compliance_records_route():
     vehicle_id = request.args.get("vehicle_id")
     current_user_id = get_jwt_identity()
@@ -256,7 +256,7 @@ def get_compliance_records_route():
 
 
 @preventive_maintenance_bp.post("/compliance/records")
-@role_required("owner", "admin")
+@role_required("owner", "admin", "fleet_owner")
 def create_compliance_record_route():
     record = create_compliance_record(
         payload=request.get_json(silent=True) or {},
@@ -267,7 +267,7 @@ def create_compliance_record_route():
 
 
 @preventive_maintenance_bp.patch("/compliance/records/<record_id>")
-@role_required("owner", "admin")
+@role_required("owner", "admin", "fleet_owner")
 def update_compliance_record_route(record_id: str):
     record = update_compliance_record(
         record_id=record_id,
@@ -279,7 +279,7 @@ def update_compliance_record_route(record_id: str):
 
 
 @preventive_maintenance_bp.patch("/compliance/records/<record_id>/renew")
-@role_required("owner", "admin")
+@role_required("owner", "admin", "fleet_owner")
 def renew_compliance_record_route(record_id: str):
     record = renew_compliance_record(
         record_id=record_id,

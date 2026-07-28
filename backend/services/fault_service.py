@@ -15,6 +15,7 @@ from models.user import serialize_user
 from models.vehicle import serialize_vehicle
 from services.assignment_service import get_active_assignment_for_driver
 from services.notification_service import create_notification, notify_roles, resolve_action_notifications
+from services.fleet_owner_service import notify_linked_owner
 from utils.api_error import ApiError
 from utils.file_validation import validate_file_reference_list
 from utils.mongo_indexes import ensure_indexes_for_collection
@@ -65,6 +66,9 @@ FAULT_LIST_PROJECTION = {
     "resolution_notes": 1,
     "maintenance_job_id": 1,
     "reported_at": 1,
+    "reported_by": 1,
+    "reporter_role": 1,
+    "participant_comments": 1,
     "reviewed_by": 1,
     "reviewed_at": 1,
     "approved_at": 1,
@@ -290,7 +294,14 @@ def ensure_fault_indexes():
     ensure_indexes_for_collection(
         maintenance_jobs_collection(),
         [
-            {"keys": [("fault_id", ASCENDING)], "options": {"unique": True}},
+            {
+                "keys": [("fault_id", ASCENDING)],
+                "options": {
+                    "name": "fault_id_unique_when_present",
+                    "unique": True,
+                    "partialFilterExpression": {"fault_id": {"$type": "objectId"}},
+                },
+            },
         ],
         collection_name="maintenance_jobs_fault_link",
     )
@@ -382,7 +393,7 @@ def _get_vehicle_document(vehicle_id: str | ObjectId):
 
 def _get_fault_document(fault_id: str | ObjectId):
     fault_object_id = _to_object_id(fault_id, "fault_id")
-    fault_document = faults_collection().find_one({"_id": fault_object_id})
+    fault_document = faults_collection().find_one({"_id": fault_object_id, "record_scope": {"$ne": "personal"}})
     if not fault_document:
         raise ApiError("Fault not found.", status_code=404)
     return fault_document
@@ -660,7 +671,7 @@ def _restore_vehicle_if_fault_block_cleared(fault_document: dict):
 
 def list_faults(current_user_id: str, current_role: str) -> list[dict]:
     current_role = (current_role or "").strip().lower()
-    query = {}
+    query = {"record_scope": {"$ne": "personal"}}
     if current_role == "driver":
         driver_object_id = _to_object_id(current_user_id, "current_user_id")
         scopes = [{"driver_id": driver_object_id}]
@@ -668,6 +679,9 @@ def list_faults(current_user_id: str, current_role: str) -> list[dict]:
         if active_assignment and active_assignment.get("vehicle_id"):
             scopes.append({"vehicle_id": _to_object_id(active_assignment.get("vehicle_id"), "vehicle_id")})
         query["$or"] = scopes
+    elif current_role == "fleet_owner":
+        from services.fleet_owner_service import _owner_vehicle_ids
+        query["vehicle_id"] = {"$in": _owner_vehicle_ids(current_user_id)}
 
     query_started_at = perf_counter()
     documents = list(
@@ -778,12 +792,15 @@ def get_fault_by_id(fault_id: str, current_user_id: str, current_role: str) -> d
     document = _get_fault_document(fault_id)
     if current_role == "driver" and str(document.get("driver_id")) != current_user_id:
         raise ApiError("You do not have permission to view this fault.", status_code=403)
+    if current_role == "fleet_owner":
+        from services.fleet_owner_service import require_owned_vehicle
+        require_owned_vehicle(current_user_id, document.get("vehicle_id"))
     return _enrich_single_fault(document)
 
 
 def create_fault(payload: dict, current_user_id: str, current_role: str) -> dict:
     current_role = (current_role or "").strip().lower()
-    if current_role not in {"driver", "admin", "owner"}:
+    if current_role not in {"driver", "admin", "owner", "fleet_owner"}:
         raise ApiError("You do not have permission to create fault reports.", status_code=403)
 
     category_document = _get_category_document(payload.get("category_id"))
@@ -804,6 +821,11 @@ def create_fault(payload: dict, current_user_id: str, current_role: str) -> dict
             vehicle_id=payload.get("vehicle_id"),
             driver_id=payload.get("driver_id"),
         )
+    elif current_role == "fleet_owner":
+        from services.fleet_owner_service import require_owned_vehicle
+        vehicle_document = require_owned_vehicle(current_user_id, payload.get("vehicle_id"))
+        vehicle_object_id = vehicle_document["_id"]
+        driver_object_id = vehicle_document.get("assigned_driver_id")
     else:
         driver_object_id = _to_object_id(payload.get("driver_id"), "driver_id")
         vehicle_object_id = _to_object_id(payload.get("vehicle_id"), "vehicle_id")
@@ -836,6 +858,8 @@ def create_fault(payload: dict, current_user_id: str, current_role: str) -> dict
         "resolution_notes": None,
         "maintenance_job_id": None,
         "reported_at": timestamp,
+        "reported_by": _to_object_id(current_user_id, "reported_by"),
+        "reporter_role": current_role,
         "reviewed_by": None,
         "reviewed_at": None,
         "approved_at": None,
@@ -868,15 +892,13 @@ def create_fault(payload: dict, current_user_id: str, current_role: str) -> dict
     vehicle_document = _get_vehicle_document(vehicle_object_id)
     vehicle_registration = vehicle_document.get("registration_number") or "vehicle"
 
-    create_notification(
-        recipient_user_id=driver_object_id,
-        title="Fault Report Submitted",
-        message=f"Your fault report for vehicle {vehicle_registration} was submitted for review.",
-        category="maintenance",
-        priority="medium",
-        reference_type="fault",
-        reference_id=document["_id"],
-    )
+    if driver_object_id:
+        create_notification(
+            recipient_user_id=driver_object_id,
+            title="Fault Report Submitted",
+            message=f"A fault report for vehicle {vehicle_registration} was submitted for review.",
+            category="maintenance", priority="medium", reference_type="fault", reference_id=document["_id"],
+        )
     permanent_driver_id = vehicle_document.get("assigned_driver_id")
     if permanent_driver_id and permanent_driver_id != driver_object_id:
         create_notification(
@@ -889,7 +911,7 @@ def create_fault(payload: dict, current_user_id: str, current_role: str) -> dict
             reference_id=document["_id"],
         )
 
-    if current_role == "driver":
+    if current_role in {"driver", "fleet_owner"}:
         notify_roles(
             ["admin", "owner"],
             title="New Fault Report Submitted",
@@ -904,6 +926,14 @@ def create_fault(payload: dict, current_user_id: str, current_role: str) -> dict
         )
 
     if severity == "critical":
+        notify_linked_owner(
+            vehicle_object_id,
+            "critical_fault",
+            title="Critical fault on linked vehicle",
+            message=f"A critical fault was reported for vehicle {vehicle_registration}.",
+            priority="critical",
+            reference_id=document["_id"],
+        )
         notify_roles(
             ["admin", "owner"],
             title="Critical Vehicle Fault",
@@ -985,6 +1015,8 @@ def update_fault(fault_id: str, payload: dict, current_user_id: str, current_rol
     document.update(update_fields)
     if update_fields.get("status") == "resolved":
         _restore_vehicle_if_fault_block_cleared(document)
+        from services.maintenance_override_service import close_overrides_for_issue
+        close_overrides_for_issue("fault", document["_id"], current_user_id)
     if current_role == "driver":
         _set_vehicle_to_maintenance_if_unsafe(document)
     if is_driver_clarification:

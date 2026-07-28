@@ -183,6 +183,7 @@ export default function DispatchReturns() {
   const [inspectionForm, setInspectionForm] = useState<InspectionFormState | null>(null);
   const [faultForm, setFaultForm] = useState<FaultCreateState | null>(null);
   const [closureNote, setClosureNote] = useState('');
+  const [legacyFuelExceptionReason, setLegacyFuelExceptionReason] = useState('');
   const [isSavingReturn, setIsSavingReturn] = useState(false);
   const [isSavingInspection, setIsSavingInspection] = useState(false);
   const [isSavingFault, setIsSavingFault] = useState(false);
@@ -295,7 +296,7 @@ export default function DispatchReturns() {
       confirmForm.closing_odometer !== ''
       && (!Number.isFinite(Number(confirmForm.closing_odometer)) || Number(confirmForm.closing_odometer) < 0)
     ) {
-      nextErrors.closing_odometer = 'Closing odometer must be a non-negative number.';
+      nextErrors.closing_odometer = 'Closing odometer must be a non-negative number when recorded.';
     }
     const closingFuelLevel = normalizeFuelLevelEighths(confirmForm.closing_fuel_level);
     if (confirmForm.closing_fuel_level === '') {
@@ -413,7 +414,10 @@ export default function DispatchReturns() {
     }
     setIsClosingDispatch(true);
     try {
-      const response = await closeDispatchReturn(detail.job.id, { closure_note: closureNote || undefined });
+      const response = await closeDispatchReturn(detail.job.id, {
+        closure_note: closureNote || undefined,
+        legacy_fuel_exception_reason: legacyFuelExceptionReason || undefined,
+      });
       replaceDetail(response.detail);
       toast.success('Dispatch closed successfully.');
       await loadReturns({ refresh: true });
@@ -612,6 +616,16 @@ export default function DispatchReturns() {
                 </DetailSection>
 
                 <DetailSection title="Confirm Vehicle Returned">
+                  <div className="mb-4 grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 sm:grid-cols-3">
+                    <DetailRow label="Opening Fuel" value={detail.fuel_accountability.opening_fuel_level != null ? `${detail.fuel_accountability.opening_fuel_level}/8` : 'Not recorded'} />
+                    <DetailRow label="Opening Odometer" value={detail.fuel_accountability.opening_odometer != null ? detail.fuel_accountability.opening_odometer.toLocaleString() : 'Not recorded'} />
+                    <DetailRow label="Fuel Added During Dispatch" value={`${detail.fuel_accountability.total_fuel_litres_added.toLocaleString()} L`} />
+                  </div>
+                  {detail.fuel_accountability.legacy_opening_missing ? (
+                    <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                      Opening fuel was not recorded for this legacy dispatch.
+                    </div>
+                  ) : null}
                   <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                     <InputField
                       label="Return Date"
@@ -636,7 +650,7 @@ export default function DispatchReturns() {
                       }}
                     />
                     <InputField
-                      label="Closing Odometer"
+                      label="Closing Odometer (Optional)"
                       type="number"
                       value={confirmForm.closing_odometer}
                       error={confirmErrors.closing_odometer}
@@ -733,7 +747,7 @@ export default function DispatchReturns() {
                   </div>
                 </DetailSection>
 
-                <DetailSection title="Fuel Comparison">
+                <DetailSection title="Fuel Usage Summary">
                   <FuelGaugeSelector
                     label="Opening Fuel"
                     value={detail.movement?.opening_fuel_level ?? null}
@@ -752,6 +766,14 @@ export default function DispatchReturns() {
                       showEstimatedLitres
                       tankCapacityLitres={detail.vehicle?.tank_capacity_litres}
                     />
+                  </div>
+                  <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                    <DetailRow label="Fuel Added" value={`${detail.fuel_accountability.total_fuel_litres_added.toLocaleString()} L`} />
+                    <DetailRow label="Fuel Cost" value={detail.fuel_accountability.total_fuel_cost.toLocaleString(undefined, { style: 'currency', currency: 'GHS' })} />
+                    <DetailRow label="Distance Travelled" value={detail.fuel_accountability.distance_travelled != null ? `${detail.fuel_accountability.distance_travelled.toLocaleString()} km` : 'Distance unavailable — odometer not recorded'} />
+                    <DetailRow label="Estimated Fuel Consumed" value={detail.fuel_accountability.estimated_fuel_consumed != null ? `${detail.fuel_accountability.estimated_fuel_consumed.toLocaleString()} L (estimate)` : 'Tank capacity unavailable'} />
+                    <DetailRow label="Estimated Efficiency" value={detail.fuel_accountability.estimated_fuel_efficiency != null ? `${detail.fuel_accountability.estimated_fuel_efficiency.toLocaleString()} km/L (estimate)` : 'Not available'} />
+                    <DetailRow label="Summary Status" value={detail.fuel_accountability.fuel_summary_status.replaceAll('_', ' ')} />
                   </div>
                 </DetailSection>
 
@@ -809,6 +831,16 @@ export default function DispatchReturns() {
 
                 <DetailSection title="Close Dispatch">
                   <TextAreaField label="Closure Note" value={closureNote} onChange={setClosureNote} placeholder="Optional note for dispatch closure and handover completion." />
+                  {detail.fuel_accountability.legacy_opening_missing ? (
+                    <div className="mt-4">
+                      <TextAreaField
+                        label="Authorized Legacy Fuel Exception Reason"
+                        value={legacyFuelExceptionReason}
+                        onChange={setLegacyFuelExceptionReason}
+                        placeholder="Required to close a legacy dispatch without an opening fuel record."
+                      />
+                    </div>
+                  ) : null}
                   <div className="mt-4 flex justify-end">
                     <button type="button" onClick={() => void handleCloseDispatch()} disabled={isClosingDispatch || detail.return_status !== 'inspection_completed'} className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-60">
                       {isClosingDispatch ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wrench className="h-4 w-4" />}

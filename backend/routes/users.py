@@ -8,6 +8,8 @@ from services.auth_service import (
     list_users_for_role,
     update_user_role_as,
     update_user_status_as,
+    update_user_account_as,
+    reset_user_password_as,
 )
 from services.user_service import update_driver_profile_as
 from utils.decorators import role_required
@@ -50,7 +52,7 @@ def get_user(user_id: str):
 def create_user():
     payload = request.get_json(silent=True) or {}
     current_role = get_jwt().get("role")
-    user = create_user_as(current_role=current_role, payload=payload)
+    user = create_user_as(current_role=current_role, payload=payload, current_user_id=get_jwt_identity())
     return success_response(
         data={"user": user},
         message="User account created successfully.",
@@ -67,11 +69,24 @@ def update_user_status(user_id: str):
         current_role=current_role,
         target_user_id=user_id,
         status=payload.get("status"),
+        current_user_id=get_jwt_identity(),
     )
-    return success_response(
-        data={"user": user},
-        message="User status updated successfully.",
-    )
+    return success_response(data={"user": user}, message="User status updated successfully.")
+
+
+@users_bp.patch("/<user_id>")
+@role_required("owner", "admin")
+def update_user_account(user_id: str):
+    user = update_user_account_as(get_jwt_identity(), get_jwt().get("role"), user_id, request.get_json(silent=True) or {})
+    return success_response(data={"user": user}, message="User account updated successfully.")
+
+
+@users_bp.post("/<user_id>/reset-password")
+@role_required("owner", "admin")
+def reset_user_password(user_id: str):
+    payload = request.get_json(silent=True) or {}
+    user = reset_user_password_as(get_jwt_identity(), get_jwt().get("role"), user_id, payload.get("temporary_password"))
+    return success_response(data={"user": user}, message="Temporary password issued. The user must change it at next login.")
 
 
 @users_bp.patch("/<user_id>/role")

@@ -146,6 +146,10 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def fuel_logs_collection():
+    return get_collection("fuel_logs")
+
+
 def dispatch_financials_collection():
     return get_collection("dispatch_financial_records")
 
@@ -517,18 +521,38 @@ def _sync_financial_record(document: dict, *, job_document: dict | None = None, 
     )
     expenses = list(dispatch_financial_expenses_collection().find({"dispatch_financial_id": document["_id"]}))
     incidents = list(dispatch_financial_incidents_collection().find({"dispatch_financial_id": document["_id"]}))
-    approved_expenses = round(
-        sum(float(item.get("amount") or 0) for item in expenses if _expense_status_included_for_approved_totals(item.get("status"))),
-        2,
+    dispatch_fuel_logs = list(
+        fuel_logs_collection().find({"dispatch_job_id": job["_id"], "status": "approved"})
     )
-    actual_fuel_cost = round(
+    approved_dispatch_fuel_cost = sum(float(item.get("amount") or 0) for item in dispatch_fuel_logs)
+    approved_legacy_fuel_expenses = round(
         sum(
             float(item.get("amount") or 0)
             for item in expenses
-            if item.get("expense_type") == "fuel" and _expense_status_included_for_approved_totals(item.get("status"))
+            if item.get("expense_type") == "fuel"
+            and _expense_status_included_for_approved_totals(item.get("status"))
         ),
         2,
     )
+    approved_non_fuel_expenses = round(
+        sum(
+            float(item.get("amount") or 0)
+            for item in expenses
+            if item.get("expense_type") != "fuel"
+            and _expense_status_included_for_approved_totals(item.get("status"))
+        ),
+        2,
+    )
+    authoritative_fuel_cost = (
+        round(approved_dispatch_fuel_cost, 2)
+        if dispatch_fuel_logs
+        else approved_legacy_fuel_expenses
+    )
+    approved_expenses = round(
+        approved_non_fuel_expenses + authoritative_fuel_cost,
+        2,
+    )
+    actual_fuel_cost = authoritative_fuel_cost
     company_incident_costs = round(sum(_incident_company_share(item) for item in incidents), 2)
     driver_liability_total = round(sum(_incident_driver_share(item) for item in incidents), 2)
     amount_submitted_by_driver = round(float(document.get("amount_submitted_by_driver") or 0), 2)

@@ -20,11 +20,56 @@ from services.dispatch_return_service import (
     list_dispatch_returns,
     save_dispatch_return_inspection,
 )
+from services.dispatch_fuel_service import (
+    correct_dispatch_fuel_reading,
+    get_dispatch_fuel_accountability,
+    record_dispatch_opening_fuel,
+)
 from utils.decorators import role_required
 from utils.responses import success_response
 
 
 dispatch_bp = Blueprint("dispatch", __name__)
+
+
+@dispatch_bp.get("/fuel/<job_id>")
+@role_required("owner", "admin", "dispatcher")
+def get_dispatch_fuel_route(job_id: str):
+    return success_response(
+        data=get_dispatch_fuel_accountability(
+            job_id,
+            current_user_id=get_jwt_identity(),
+            current_role=get_jwt().get("role"),
+        )
+    )
+
+
+@dispatch_bp.patch("/fuel/<job_id>/opening")
+@role_required("owner", "admin", "dispatcher")
+def record_dispatch_opening_fuel_route(job_id: str):
+    return success_response(
+        data=record_dispatch_opening_fuel(
+            job_id,
+            request.get_json(silent=True) or {},
+            current_user_id=get_jwt_identity(),
+            current_role=get_jwt().get("role"),
+        ),
+        message="Opening fuel and odometer confirmed successfully.",
+    )
+
+
+@dispatch_bp.patch("/fuel/<job_id>/correction")
+@role_required("owner", "admin")
+def correct_dispatch_fuel_route(job_id: str):
+    return success_response(
+        data=correct_dispatch_fuel_reading(
+            job_id,
+            request.get_json(silent=True) or {},
+            current_user_id=get_jwt_identity(),
+            current_role=get_jwt().get("role"),
+        ),
+        message="Dispatch fuel reading corrected with an audit record.",
+    )
 
 
 @dispatch_bp.get("/schedule")

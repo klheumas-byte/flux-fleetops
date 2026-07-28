@@ -20,6 +20,10 @@ def serialize_maintenance_job(maintenance_document: dict) -> dict:
         "preventive_schedule_id": _serialize_reference_id(maintenance_document.get("preventive_schedule_id")),
         "vehicle_id": _serialize_reference_id(maintenance_document.get("vehicle_id")),
         "driver_id": _serialize_reference_id(maintenance_document.get("driver_id")),
+        "participant_comments": [
+            {**item, "id": _serialize_reference_id(item.get("id")), "created_by": _serialize_reference_id(item.get("created_by")), "created_at": item.get("created_at").isoformat() if hasattr(item.get("created_at"), "isoformat") else item.get("created_at")}
+            for item in maintenance_document.get("participant_comments") or []
+        ],
         "fault_report_id": _serialize_reference_id(maintenance_document.get("fault_report_id")),
         "maintenance_type": maintenance_document.get("maintenance_type"),
         "title": maintenance_document.get("title"),
@@ -27,6 +31,22 @@ def serialize_maintenance_job(maintenance_document: dict) -> dict:
         "priority": maintenance_document.get("priority"),
         "vendor_name": maintenance_document.get("vendor_name"),
         "vendor_contact": maintenance_document.get("vendor_contact"),
+        "transport_required": bool(maintenance_document.get("transport_required")),
+        "transport_mode": maintenance_document.get("transport_mode"),
+        "workshop_location": maintenance_document.get("workshop_location"),
+        "linked_outbound_movement_id": _serialize_reference_id(
+            maintenance_document.get("linked_outbound_movement_id")
+        ),
+        "linked_return_movement_id": _serialize_reference_id(
+            maintenance_document.get("linked_return_movement_id")
+        ),
+        "physical_return_status": maintenance_document.get("physical_return_status")
+        or (
+            "transport_not_recorded"
+            if maintenance_document.get("status") == "completed"
+            and "transport_required" not in maintenance_document
+            else None
+        ),
         "estimated_cost": maintenance_document.get("estimated_cost"),
         "actual_cost": maintenance_document.get("actual_cost"),
         "expense_id": _serialize_reference_id(maintenance_document.get("expense_id")),

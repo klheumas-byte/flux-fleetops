@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ChangeEvent, type ReactNode } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -17,6 +17,7 @@ import { toast } from 'sonner';
 import {
   acceptDriverDispatchJob,
   clarifyDriverDispatchJob,
+  confirmDriverDispatchOpeningFuel,
   fetchDriverDispatchJob,
   fetchDriverDispatchWorkspace,
   rejectDriverDispatchJob,
@@ -26,6 +27,7 @@ import {
   type DriverDispatchWorkspacePage,
   type DriverDispatchWorkspaceSummary,
 } from '../../lib/driver-api';
+import { FuelGaugeSelector } from '../shared/FuelGaugeSelector';
 import {
   getDriverDispatchActionState,
   matchesDriverDispatchSection,
@@ -93,6 +95,15 @@ function stopOptions(stops: DriverDispatchStop[] | undefined, type: 'complete' |
   });
 }
 
+function readImageAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Unable to read the selected fuel photo.'));
+    reader.readAsDataURL(file);
+  });
+}
+
 export default function MyDispatches() {
   const [sections, setSections] = useState<Record<DispatchSectionKey, DriverDispatchWorkspacePage | null>>({
     upcoming: null,
@@ -121,6 +132,11 @@ export default function MyDispatches() {
   const [actionJobId, setActionJobId] = useState('');
   const [notesByJob, setNotesByJob] = useState<Record<string, string>>({});
   const [selectedStopByJob, setSelectedStopByJob] = useState<Record<string, string>>({});
+  const [openingFuelByJob, setOpeningFuelByJob] = useState<Record<string, number | null>>({});
+  const [openingOdometerByJob, setOpeningOdometerByJob] = useState<Record<string, string>>({});
+  const [openingNoteByJob, setOpeningNoteByJob] = useState<Record<string, string>>({});
+  const [openingPhotoByJob, setOpeningPhotoByJob] = useState<Record<string, string>>({});
+  const [openingErrorsByJob, setOpeningErrorsByJob] = useState<Record<string, { fuel?: string; odometer?: string }>>({});
 
   const loadSection = async (section: DispatchSectionKey, page = 1, includeSummary = section === 'upcoming') => {
     setLoading((current) => ({ ...current, [section]: true }));
@@ -320,6 +336,43 @@ export default function MyDispatches() {
     }
   };
 
+  const handleOpeningFuel = async (job: DriverDispatchJob) => {
+    const openingFuel = openingFuelByJob[job.id];
+    const openingOdometer = openingOdometerByJob[job.id] || '';
+    const nextErrors: { fuel?: string; odometer?: string } = {};
+    if (openingFuel == null) {
+      nextErrors.fuel = 'Opening fuel level is required.';
+    }
+    if (openingOdometer !== '' && (!Number.isFinite(Number(openingOdometer)) || Number(openingOdometer) < 0)) {
+      nextErrors.odometer = 'Opening odometer must be a non-negative number when recorded.';
+    }
+    if (Object.keys(nextErrors).length) {
+      setOpeningErrorsByJob((current) => ({ ...current, [job.id]: nextErrors }));
+      return;
+    }
+    setActionJobId(job.id);
+    try {
+      await confirmDriverDispatchOpeningFuel(job.id, {
+        opening_fuel_level: openingFuel as number,
+        opening_odometer: openingOdometer === '' ? undefined : Number(openingOdometer),
+        inspection_note: openingNoteByJob[job.id] || undefined,
+        opening_fuel_photo: openingPhotoByJob[job.id] || undefined,
+      });
+      setOpeningErrorsByJob((current) => ({ ...current, [job.id]: {} }));
+      toast.success('Opening fuel and odometer confirmed.');
+      await refreshAfterAction(['upcoming']);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to confirm opening fuel right now.';
+      setOpeningErrorsByJob((current) => ({
+        ...current,
+        [job.id]: /odometer/i.test(message) ? { odometer: message } : { fuel: message },
+      }));
+      toast.error(message);
+    } finally {
+      setActionJobId('');
+    }
+  };
+
   const summaryCards = useMemo(
     () => [
       { label: "Today's Dispatches", value: summary?.todays_dispatches || 0, accent: 'bg-blue-50 text-blue-700' },
@@ -431,6 +484,87 @@ export default function MyDispatches() {
                       <MiniInfo icon={Package} label="Goods" value={job.goods_description || 'Not provided'} />
                       <MiniInfo icon={Phone} label="Customer Contact" value={job.customer_contact || 'Not provided'} />
                     </div>
+
+                    {job.status === 'accepted' ? (
+                      job.fuel_accountability?.opening_fuel_recorded_at ? (
+                        <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+                          Opening fuel {job.fuel_accountability.opening_fuel_level}/8 confirmed. {job.fuel_accountability.opening_odometer != null ? `Odometer ${job.fuel_accountability.opening_odometer.toLocaleString()} recorded.` : 'Distance unavailable — odometer not recorded.'} This vehicle is ready to start.
+                        </div>
+                      ) : (
+                        <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4">
+                          <div className="font-semibold text-amber-900">Opening Fuel &amp; Odometer</div>
+                          <p className="mt-1 text-sm text-amber-800">Record the opening fuel level before starting this dispatch. Odometer is optional.</p>
+                          <div className="mt-4 grid gap-4 lg:grid-cols-2">
+                            <FuelGaugeSelector
+                              label="Opening Fuel Level"
+                              value={openingFuelByJob[job.id] ?? null}
+                              onChange={(value) => {
+                                setOpeningFuelByJob((current) => ({ ...current, [job.id]: value }));
+                                setOpeningErrorsByJob((current) => ({ ...current, [job.id]: { ...current[job.id], fuel: undefined } }));
+                              }}
+                              required
+                              compact
+                              error={openingErrorsByJob[job.id]?.fuel}
+                              showEstimatedLitres
+                              tankCapacityLitres={job.vehicle?.tank_capacity_litres}
+                            />
+                            <div className="space-y-3">
+                              <label className="block text-sm font-medium text-slate-700">
+                                Opening Odometer (Optional)
+                                <input
+                                  type="number"
+                                  min="0"
+                                  value={openingOdometerByJob[job.id] || ''}
+                                  onChange={(event) => {
+                                    setOpeningOdometerByJob((current) => ({ ...current, [job.id]: event.target.value }));
+                                    setOpeningErrorsByJob((current) => ({ ...current, [job.id]: { ...current[job.id], odometer: undefined } }));
+                                  }}
+                                  className={`mt-1 w-full rounded-lg border bg-white px-3 py-2.5 text-sm ${openingErrorsByJob[job.id]?.odometer ? 'border-rose-300' : 'border-slate-200'}`}
+                                />
+                              </label>
+                              {openingErrorsByJob[job.id]?.odometer ? <p className="text-sm text-rose-600">{openingErrorsByJob[job.id]?.odometer}</p> : null}
+                              <label className="block text-sm font-medium text-slate-700">
+                                Inspection Note
+                                <textarea
+                                  rows={2}
+                                  value={openingNoteByJob[job.id] || ''}
+                                  onChange={(event) => setOpeningNoteByJob((current) => ({ ...current, [job.id]: event.target.value }))}
+                                  className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm"
+                                  placeholder="Optional pre-dispatch inspection note"
+                                />
+                              </label>
+                              <label className="block text-sm font-medium text-slate-700">
+                                Fuel-level Photo
+                                <input
+                                  type="file"
+                                  accept="image/jpeg,image/png,image/webp"
+                                  onChange={(event: ChangeEvent<HTMLInputElement>) => {
+                                    const file = event.target.files?.[0];
+                                    if (!file) {
+                                      setOpeningPhotoByJob((current) => ({ ...current, [job.id]: '' }));
+                                      return;
+                                    }
+                                    void readImageAsDataUrl(file)
+                                      .then((value) => setOpeningPhotoByJob((current) => ({ ...current, [job.id]: value })))
+                                      .catch((error) => toast.error(error instanceof Error ? error.message : 'Unable to read fuel photo.'));
+                                  }}
+                                  className="mt-1 block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+                                />
+                              </label>
+                              <button
+                                type="button"
+                                disabled={actionJobId === job.id}
+                                onClick={() => void handleOpeningFuel(job)}
+                                className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-amber-600 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-60"
+                              >
+                                {actionJobId === job.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                                Confirm Opening Reading
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      )
+                    ) : null}
 
                     <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_auto]">
                       <div className="space-y-3">

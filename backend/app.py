@@ -4,6 +4,7 @@ from time import perf_counter
 from datetime import datetime, timezone
 
 from flask import Flask, g, request
+from flask_jwt_extended import get_jwt, verify_jwt_in_request
 
 from config import get_config
 from extensions import get_database_connection_status, get_mongo_client, init_extensions
@@ -19,15 +20,21 @@ from services.dispatch_request_service import ensure_dispatch_request_indexes
 from services.dispatch_financial_service import ensure_dispatch_financial_indexes
 from services.dispatch_opportunity_service import ensure_dispatch_opportunity_indexes
 from services.dispatch_return_service import ensure_dispatch_return_indexes
+from services.driver_private_finance_service import ensure_driver_private_finance_indexes
 from services.dispatch_planner_service import ensure_dispatch_planner_indexes
 from services.expense_service import ensure_expense_indexes
 from services.fault_service import ensure_fault_indexes, seed_default_fault_catalog
 from services.finance_account_service import ensure_finance_account_indexes
 from services.fuel_service import ensure_fuel_indexes, seed_default_fuel_stations
+from services.fleet_owner_service import ensure_fleet_owner_indexes
 from services.incident_service import ensure_incident_indexes
 from services.maintenance_service import ensure_maintenance_indexes
+from services.maintenance_override_service import ensure_maintenance_override_indexes
 from services.master_data_service import ensure_master_data_indexes
 from services.notification_service import ensure_notification_indexes, reconcile_legacy_actionable_notifications
+from services.personal_vehicle_service import ensure_personal_vehicle_indexes
+from services.stock_transfer_service import ensure_stock_transfer_indexes
+from services.vehicle_operation_request_service import ensure_vehicle_operation_request_indexes
 from services.preventive_maintenance_service import (
     ensure_preventive_maintenance_indexes,
     seed_default_compliance_item_types,
@@ -38,9 +45,12 @@ from services.ride_service import ensure_ride_indexes
 from services.system_settings_service import ensure_system_settings_indexes
 from services.vehicle_service import ensure_vehicle_indexes
 from services.vehicle_movement_service import ensure_vehicle_movement_indexes
+from services.waybill_service import ensure_waybill_indexes
 from services.wallet_service import ensure_wallet_indexes
 from utils.errors import register_error_handlers
 from utils.logging_setup import configure_backend_logging
+from utils.mongo_indexes import run_index_initializers
+from utils.decorators import driver_mode_required, request_driver_capability
 
 
 def create_app(config_name: str | None = None) -> Flask:
@@ -73,40 +83,51 @@ def create_app(config_name: str | None = None) -> Flask:
                 app.logger.exception("[Flux Startup] Database connection check failed during startup.")
 
             index_started_at = perf_counter()
-            try:
-                ensure_indexes()
-                ensure_assignment_indexes()
-                ensure_booking_indexes()
-                ensure_collection_indexes()
-                ensure_customer_indexes()
-                ensure_dashboard_indexes()
-                ensure_deposit_indexes()
-                ensure_dispatch_request_indexes()
-                ensure_dispatch_financial_indexes()
-                ensure_dispatch_opportunity_indexes()
-                ensure_dispatch_return_indexes()
-                ensure_dispatch_planner_indexes()
-                ensure_expense_indexes()
-                ensure_fault_indexes()
-                ensure_finance_account_indexes()
-                ensure_fuel_indexes()
-                ensure_incident_indexes()
-                ensure_maintenance_indexes()
-                ensure_master_data_indexes()
-                ensure_notification_indexes()
-                ensure_preventive_maintenance_indexes()
-                ensure_report_indexes()
-                ensure_ride_indexes()
-                ensure_system_settings_indexes()
-                ensure_vehicle_indexes()
-                ensure_vehicle_movement_indexes()
-                ensure_wallet_indexes()
-                app.logger.info(
-                    "[Flux Startup] Index checks completed in %.2fms",
-                    (perf_counter() - index_started_at) * 1000,
-                )
-            except Exception:
-                app.logger.exception("[Flux Startup] Index checks failed.")
+            index_summary = run_index_initializers(
+                [
+                    ("auth", ensure_indexes),
+                    ("assignments", ensure_assignment_indexes),
+                    ("bookings", ensure_booking_indexes),
+                    ("collections", ensure_collection_indexes),
+                    ("customers", ensure_customer_indexes),
+                    ("dashboard", ensure_dashboard_indexes),
+                    ("deposits", ensure_deposit_indexes),
+                    ("dispatch_requests", ensure_dispatch_request_indexes),
+                    ("dispatch_financials", ensure_dispatch_financial_indexes),
+                    ("dispatch_opportunities", ensure_dispatch_opportunity_indexes),
+                    ("dispatch_returns", ensure_dispatch_return_indexes),
+                    ("driver_private_finance", ensure_driver_private_finance_indexes),
+                    ("dispatch_planner", ensure_dispatch_planner_indexes),
+                    ("expenses", ensure_expense_indexes),
+                    ("faults", ensure_fault_indexes),
+                    ("finance_accounts", ensure_finance_account_indexes),
+                    ("fuel", ensure_fuel_indexes),
+                    ("fleet_owners", ensure_fleet_owner_indexes),
+                    ("incidents", ensure_incident_indexes),
+                    ("maintenance", ensure_maintenance_indexes),
+                    ("maintenance_overrides", ensure_maintenance_override_indexes),
+                    ("master_data", ensure_master_data_indexes),
+                    ("notifications", ensure_notification_indexes),
+                    ("personal_vehicles", ensure_personal_vehicle_indexes),
+                    ("stock_transfers", ensure_stock_transfer_indexes),
+                    ("preventive_maintenance", ensure_preventive_maintenance_indexes),
+                    ("reports", ensure_report_indexes),
+                    ("rides", ensure_ride_indexes),
+                    ("system_settings", ensure_system_settings_indexes),
+                    ("vehicles", ensure_vehicle_indexes),
+                    ("vehicle_movements", ensure_vehicle_movement_indexes),
+                    ("vehicle_operation_requests", ensure_vehicle_operation_request_indexes),
+                    ("waybills", ensure_waybill_indexes),
+                    ("wallets", ensure_wallet_indexes),
+                ],
+                logger=app.logger,
+            )
+            app.logger.info(
+                "[Flux Startup] Index checks completed in %.2fms successful=%s failed=%s",
+                (perf_counter() - index_started_at) * 1000,
+                index_summary["completed_count"],
+                index_summary["failed_count"],
+            )
 
             try:
                 reconcile_legacy_actionable_notifications()
@@ -169,6 +190,23 @@ def create_app(config_name: str | None = None) -> Flask:
     def _handle_api_preflight():
         if request.method == "OPTIONS" and request.path.startswith("/api/"):
             return "", 200
+
+    @app.before_request
+    def _enforce_driver_operating_mode():
+        if request.method == "OPTIONS" or not request.path.startswith("/api/"):
+            return None
+        capability = request_driver_capability(request.path)
+        if not capability or not request.headers.get("Authorization"):
+            return None
+        verify_jwt_in_request(optional=True)
+        if str(get_jwt().get("role") or "").strip().lower() != "driver":
+            return None
+        # Reuse the same tested guard used by route-level driver endpoints.
+        @driver_mode_required(capability)
+        def guarded_request():
+            return None
+
+        return guarded_request()
 
     @app.after_request
     def _log_request_timing(response):

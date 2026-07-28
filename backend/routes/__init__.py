@@ -23,17 +23,23 @@ from .faults import faults_bp
 from .finance_accounts import finance_accounts_bp
 from .fuel_logs import fuel_logs_bp
 from .fuel_stations import fuel_stations_bp
+from .fleet_owner_portal import fleet_owner_portal_bp
 from .incidents import incidents_bp
 from .maintenance import maintenance_bp
+from .maintenance_overrides import maintenance_overrides_bp
 from .master_data import master_data_bp
 from .notifications import notifications_bp
+from .operational_requests import operational_requests_bp
+from .personal_vehicles import personal_vehicles_bp
 from .preventive_maintenance import preventive_maintenance_bp
 from .reports import reports_bp
 from .rides import rides_bp
 from .system_settings import system_settings_bp
+from .stock_transfers import stock_transfers_bp
 from .users import users_bp
 from .vehicles import vehicles_bp
 from .vehicle_movements import vehicle_movements_bp
+from .waybills import waybills_bp
 from .wallets import wallets_bp
 
 
@@ -64,16 +70,22 @@ def register_blueprints(app: Flask) -> None:
     app.register_blueprint(finance_accounts_bp, url_prefix="/api/finance")
     app.register_blueprint(fuel_logs_bp, url_prefix="/api/fuel-logs")
     app.register_blueprint(fuel_stations_bp, url_prefix="/api/fuel-stations")
+    app.register_blueprint(fleet_owner_portal_bp, url_prefix="/api/fleet-owner")
     app.register_blueprint(incidents_bp, url_prefix="/api/incidents")
     app.register_blueprint(maintenance_bp, url_prefix="/api/maintenance")
+    app.register_blueprint(maintenance_overrides_bp, url_prefix="/api/maintenance-overrides")
     app.register_blueprint(master_data_bp, url_prefix="/api/master-data")
     app.register_blueprint(notifications_bp, url_prefix="/api/notifications")
+    app.register_blueprint(operational_requests_bp, url_prefix="/api/operational-requests")
+    app.register_blueprint(personal_vehicles_bp, url_prefix="/api/personal-vehicles")
     app.register_blueprint(preventive_maintenance_bp, url_prefix="/api/preventive-maintenance")
     app.register_blueprint(reports_bp, url_prefix="/api/reports")
     app.register_blueprint(rides_bp, url_prefix="/api/rides")
     app.register_blueprint(system_settings_bp, url_prefix="/api/system-settings")
+    app.register_blueprint(stock_transfers_bp, url_prefix="/api/stock-transfers")
     app.register_blueprint(users_bp, url_prefix="/api/users")
     app.register_blueprint(vehicles_bp, url_prefix="/api/vehicles")
     app.register_blueprint(vehicle_movements_bp, url_prefix="/api/vehicle-movements")
+    app.register_blueprint(waybills_bp, url_prefix="/api/waybills")
     app.register_blueprint(wallets_bp, url_prefix="/api/wallets")
     app.extensions["flux_blueprints_registered"] = True

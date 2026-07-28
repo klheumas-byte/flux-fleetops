@@ -17,7 +17,7 @@ from models.vehicle_movement import serialize_vehicle_movement
 from services.fault_service import create_fault, list_fault_options
 from services.notification_service import resolve_action_notifications
 from utils.api_error import ApiError
-from utils.fuel_levels import normalize_fuel_level_eighths
+from utils.fuel_levels import is_valid_dispatch_fuel_level, normalize_fuel_level_eighths
 from utils.mongo_indexes import ensure_indexes_for_collection
 from utils.performance import log_db_duration
 
@@ -231,8 +231,10 @@ def _validate_return_after_departure(*, actual_return_at: datetime, actual_depar
         )
 
 
-def _validate_non_negative_number(value, field_name: str):
+def _validate_non_negative_number(value, field_name: str, *, required: bool = False):
     if value in (None, ""):
+        if required:
+            raise ApiError(f"{field_name} is required.", status_code=400)
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ApiError(f"{field_name} must be numeric.", status_code=400)
@@ -242,6 +244,11 @@ def _validate_non_negative_number(value, field_name: str):
 
 
 def _validate_fuel_level(value, field_name: str):
+    if value not in (None, "") and not is_valid_dispatch_fuel_level(value):
+        raise ApiError(
+            f"{field_name} must be E, 1/8 through 7/8, or F.",
+            status_code=400,
+        )
     normalized, error_message = normalize_fuel_level_eighths(value)
     if normalized is None and value not in (None, ""):
         raise ApiError(
@@ -393,73 +400,15 @@ def _release_job_reservations(job_document: dict, *, reason: str):
 
 
 def _ensure_linked_vehicle_movement(job_document: dict, *, current_user_id: str) -> dict:
-    linked_movement_id = job_document.get("linked_vehicle_movement_id")
-    if isinstance(linked_movement_id, ObjectId):
-        movement = vehicle_movements_collection().find_one({"_id": linked_movement_id})
-        if movement:
-            return movement
-    movement = vehicle_movements_collection().find_one({"dispatch_job_id": job_document["_id"]})
-    if movement:
-        if not isinstance(linked_movement_id, ObjectId):
-            dispatch_jobs_collection().update_one(
-                {"_id": job_document["_id"]},
-                {"$set": {"linked_vehicle_movement_id": movement["_id"], "updated_at": now_utc()}},
-            )
-            job_document["linked_vehicle_movement_id"] = movement["_id"]
-        return movement
-    if not isinstance(job_document.get("vehicle_id"), ObjectId):
-        raise ApiError("This dispatch job does not have an assigned vehicle.", status_code=400)
-    timestamp = now_utc()
-    movement_document = {
-        "movement_id": f"VM-{timestamp.strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:6].upper()}",
-        "vehicle_id": job_document.get("vehicle_id"),
-        "driver_id": job_document.get("driver_id"),
-        "assignment_id": job_document.get("primary_assignment_id"),
-        "primary_assignment_id": job_document.get("primary_assignment_id"),
-        "dispatch_job_id": job_document["_id"],
-        "dispatch_request_id": job_document.get("dispatch_request_id"),
-        "reservation_id": job_document.get("vehicle_reservation_id"),
-        "movement_type": "customer_dispatch",
-        "status": "in_progress",
-        "requested_departure_time": job_document.get("scheduled_start_time"),
-        "actual_departure_at": job_document.get("actual_departure_at") or job_document.get("started_at"),
-        "departure_time": job_document.get("actual_departure_at") or job_document.get("started_at"),
-        "expected_return_time": job_document.get("expected_return_time"),
-        "actual_return_at": None,
-        "actual_return_time": None,
-        "origin": job_document.get("pickup"),
-        "destination": job_document.get("destination"),
-        "purpose": job_document.get("dispatch_job_id"),
-        "opening_odometer": None,
-        "closing_odometer": None,
-        "opening_fuel_level": None,
-        "closing_fuel_level": None,
-        "delivery_status": "delivered" if job_document.get("driver_workflow_status") == "delivered" else "pending",
-        "delivered_at": None,
-        "delivery_note": None,
-        "delivered_by": None,
-        "notes": job_document.get("dispatch_instructions"),
-        "cancellation_reason": None,
-        "approved_by": _to_object_id(current_user_id, "current_user_id"),
-        "approved_at": timestamp,
-        "checked_out_by": _to_object_id(current_user_id, "current_user_id"),
-        "checked_out_at": job_document.get("started_at") or timestamp,
-        "returned_by": None,
-        "returned_at": None,
-        "closed_by": None,
-        "closed_at": None,
-        "return_checklist": None,
-        "created_by": _to_object_id(current_user_id, "current_user_id"),
-        "created_at": timestamp,
-        "updated_at": timestamp,
-    }
-    movement_document["_id"] = vehicle_movements_collection().insert_one(movement_document).inserted_id
-    dispatch_jobs_collection().update_one(
-        {"_id": job_document["_id"]},
-        {"$set": {"linked_vehicle_movement_id": movement_document["_id"], "updated_at": timestamp}},
+    from services.movement_source_service import ensure_dispatch_movement
+
+    result = ensure_dispatch_movement(
+        job_document,
+        current_user_id=current_user_id,
+        initial_status="in_progress",
+        departure_at=job_document.get("actual_departure_at") or job_document.get("started_at"),
     )
-    job_document["linked_vehicle_movement_id"] = movement_document["_id"]
-    return movement_document
+    return result["movement"]
 
 
 def _load_lookup_map(collection, ids: set[ObjectId], projection: dict) -> dict[ObjectId, dict]:
@@ -536,6 +485,14 @@ def _build_return_detail(job_document: dict) -> dict:
     vehicle_document = vehicles_collection().find_one({"_id": job_document.get("vehicle_id")}) if isinstance(job_document.get("vehicle_id"), ObjectId) else None
     driver_document = users_collection().find_one({"_id": job_document.get("driver_id")}) if isinstance(job_document.get("driver_id"), ObjectId) else None
     linked_fault_document = _get_fault_document(job_document.get("linked_fault_id")) if job_document.get("linked_fault_id") else None
+    from services.dispatch_fuel_service import build_dispatch_fuel_summary, list_dispatch_fuel_logs
+
+    fuel_logs = list_dispatch_fuel_logs(job_document["_id"])
+    fuel_accountability = build_dispatch_fuel_summary(
+        movement_document,
+        vehicle=vehicle_document,
+        fuel_logs=fuel_logs,
+    )
     return {
         "job": serialize_dispatch_job(job_document),
         "movement": _enrich_vehicle_movement_detail(movement_document) if movement_document else None,
@@ -551,6 +508,7 @@ def _build_return_detail(job_document: dict) -> dict:
         "fault_options": list_fault_options("admin"),
         "existing_faults": _list_fault_candidates_for_vehicle(job_document.get("vehicle_id")) if isinstance(job_document.get("vehicle_id"), ObjectId) else [],
         "linked_fault": serialize_fault(linked_fault_document) if linked_fault_document else None,
+        "fuel_accountability": fuel_accountability,
     }
 
 
@@ -708,6 +666,10 @@ def confirm_dispatch_return(job_id: str, payload: dict, *, current_user_id: str,
         "actual_return_time": actual_return_at,
         "closing_odometer": recorded_closing_odometer,
         "closing_fuel_level": closing_fuel_level,
+        "closing_fuel_recorded_at": timestamp,
+        "closing_fuel_recorded_by": _to_object_id(current_user_id, "current_user_id"),
+        "return_note": notes,
+        "fuel_summary_status": "closing_confirmed",
         "return_checklist": return_checklist,
         "notes": notes,
         "returned_by": _to_object_id(current_user_id, "current_user_id"),
@@ -746,6 +708,33 @@ def confirm_dispatch_return(job_id: str, payload: dict, *, current_user_id: str,
     dispatch_jobs_collection().update_one({"_id": job_document["_id"]}, {"$set": job_update_fields})
     job_document.update(job_update_fields)
     movement_document.update(movement_update_fields)
+    from services.movement_custody_service import return_movement_custody
+
+    return_movement_custody(
+        movement_document["_id"],
+        {
+            "event_type": "received_by_company",
+            "to_location": "Company custody",
+            "fuel_level": closing_fuel_level,
+            "odometer": recorded_closing_odometer,
+            "odometer_available": recorded_closing_odometer is not None,
+            "odometer_unavailable_reason": (
+                "Odometer was not recorded during dispatch return."
+                if recorded_closing_odometer is None
+                else None
+            ),
+            "condition_summary": notes,
+            "source_type": "dispatch_job",
+            "source_id": job_document["_id"],
+            "audit_reason": "Dispatch return received by an authorized administrator.",
+        },
+        current_user_id=current_user_id,
+        current_role=current_role,
+        source_event_key=f"dispatch:{job_document['_id']}:returned-to-company",
+    )
+    from services.dispatch_fuel_service import refresh_dispatch_fuel_summary
+
+    refresh_dispatch_fuel_summary(job_document["_id"])
     resolve_action_notifications("dispatch_job", job_document["_id"], action_type="confirm_vehicle_return", completed_by=current_user_id)
     from services.dispatch_financial_service import ensure_dispatch_financial_record
 
@@ -891,12 +880,46 @@ def close_dispatch_return(job_id: str, payload: dict | None = None, *, current_u
         raise ApiError("Dispatch cannot be closed until the return inspection is complete.", status_code=400)
     movement_document = _ensure_linked_vehicle_movement(job_document, current_user_id=current_user_id)
     timestamp = now_utc()
+    legacy_exception_reason = _normalize_text((payload or {}).get("legacy_fuel_exception_reason"))
+    closing_confirmed = (
+        movement_document.get("closing_fuel_recorded_at") is not None
+        and movement_document.get("closing_fuel_level") is not None
+    )
+    opening_confirmed = (
+        movement_document.get("opening_fuel_recorded_at") is not None
+        and movement_document.get("opening_fuel_level") is not None
+    )
+    if not closing_confirmed and not (not opening_confirmed and legacy_exception_reason):
+        raise ApiError(
+            "Record closing fuel level before closing this dispatch.",
+            status_code=400,
+        )
+    fuel_summary_status = "complete"
+    fuel_exception_audit = None
+    if not opening_confirmed:
+        if not legacy_exception_reason:
+            raise ApiError(
+                "Opening fuel was not recorded for this legacy dispatch. Provide an authorized fuel exception reason to close it.",
+                status_code=400,
+            )
+        fuel_summary_status = "legacy_exception"
+        fuel_exception_audit = {
+            "changed_by": _to_object_id(current_user_id, "current_user_id"),
+            "changed_at": timestamp,
+            "previous_value": "opening_fuel_missing",
+            "new_value": "authorized_legacy_completion",
+            "reason": legacy_exception_reason,
+        }
     movement_update_fields = {
         "status": "closed",
+        "fuel_summary_status": fuel_summary_status,
         "closed_by": _to_object_id(current_user_id, "current_user_id"),
         "closed_at": timestamp,
         "updated_at": timestamp,
     }
+    movement_update = {"$set": movement_update_fields}
+    if fuel_exception_audit:
+        movement_update["$push"] = {"fuel_correction_audit": fuel_exception_audit}
     job_update_fields = {
         "return_status": "dispatch_closed",
         "dispatch_closed_at": timestamp,
@@ -914,7 +937,7 @@ def close_dispatch_return(job_id: str, payload: dict | None = None, *, current_u
         "updated_at": timestamp,
         "updated_by": _to_object_id(current_user_id, "current_user_id"),
     }
-    vehicle_movements_collection().update_one({"_id": movement_document["_id"]}, {"$set": movement_update_fields})
+    vehicle_movements_collection().update_one({"_id": movement_document["_id"]}, movement_update)
     dispatch_jobs_collection().update_one({"_id": job_document["_id"]}, {"$set": job_update_fields})
     movement_document.update(movement_update_fields)
     job_document.update(job_update_fields)

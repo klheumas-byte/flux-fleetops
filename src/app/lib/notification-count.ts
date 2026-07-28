@@ -31,6 +31,9 @@ export const SIDEBAR_COUNT_KEY_BY_MODULE: Partial<Record<AppModule, string>> = {
   notifications: 'notifications',
   'my-dispatches': 'dispatch_planner',
   'my-vehicle': 'maintenance_jobs',
+  'operational-requests': 'operational_requests',
+  'stock-transfers': 'stock_transfers',
+  'my-operational-tasks': 'operational_tasks',
 };
 
 const EMPTY_COUNTS: ActionableNotificationCounts = {

@@ -16,6 +16,29 @@ FUEL_LEVEL_LABELS = {
     8: "Full Tank",
 }
 
+
+def is_valid_dispatch_fuel_level(value: Any) -> bool:
+    if isinstance(value, bool) or value in (None, ""):
+        return False
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        return numeric.is_integer() and 0 <= numeric <= FUEL_LEVEL_MAX_EIGHTHS
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"e", "f"}:
+            return True
+        if normalized.isdigit():
+            return 0 <= int(normalized) <= FUEL_LEVEL_MAX_EIGHTHS
+        if "/" in normalized:
+            numerator, separator, denominator = normalized.partition("/")
+            return (
+                separator == "/"
+                and numerator.strip().isdigit()
+                and denominator.strip() == "8"
+                and 0 <= int(numerator.strip()) <= FUEL_LEVEL_MAX_EIGHTHS
+            )
+    return False
+
 _TEXT_MAPPINGS = {
     "e": 0,
     "empty": 0,
@@ -74,13 +97,14 @@ def normalize_fuel_level_eighths(value: Any) -> tuple[int | None, str | None]:
         return None, "Boolean values are not valid fuel levels."
     if isinstance(value, (int, float)):
         numeric_value = float(value)
-        if 0 <= numeric_value <= 1:
-            return _round_to_eighths(numeric_value * FUEL_LEVEL_MAX_EIGHTHS), None
-        if 0 <= numeric_value <= FUEL_LEVEL_MAX_EIGHTHS:
-            return _round_to_eighths(numeric_value), None
-        if 0 <= numeric_value <= 100:
-            return _round_to_eighths((numeric_value / 100) * FUEL_LEVEL_MAX_EIGHTHS), None
-        return None, "Fuel level must map to a value between 0 and 8."
+        if numeric_value.is_integer() and 0 <= numeric_value <= FUEL_LEVEL_MAX_EIGHTHS:
+            return int(numeric_value), None
+        if 0 < numeric_value < 1:
+            eighths = numeric_value * FUEL_LEVEL_MAX_EIGHTHS
+            if eighths.is_integer():
+                return int(eighths), None
+            return None, "Fractional fuel levels must map exactly to eighths."
+        return None, "Numeric fuel levels must be whole eighths from 0 to 8."
     if isinstance(value, str):
         normalized = value.strip().lower()
         if not normalized:
@@ -92,7 +116,12 @@ def normalize_fuel_level_eighths(value: Any) -> tuple[int | None, str | None]:
                 percentage_value = float(normalized[:-1].strip())
             except ValueError:
                 return None, f"Unsupported fuel level value: {value}."
-            return normalize_fuel_level_eighths(percentage_value)
+            if not 0 <= percentage_value <= 100:
+                return None, "Fuel percentage must be between 0% and 100%."
+            eighths = (percentage_value / 100) * FUEL_LEVEL_MAX_EIGHTHS
+            if not eighths.is_integer():
+                return None, "Fuel percentage must map exactly to eighths."
+            return int(eighths), None
         if "/" in normalized:
             left, _, right = normalized.partition("/")
             try:
@@ -102,7 +131,10 @@ def normalize_fuel_level_eighths(value: Any) -> tuple[int | None, str | None]:
                 return None, f"Unsupported fuel level value: {value}."
             if denominator <= 0:
                 return None, "Fuel level denominator must be greater than zero."
-            return normalize_fuel_level_eighths((numerator / denominator) * FUEL_LEVEL_MAX_EIGHTHS)
+            eighths = (numerator / denominator) * FUEL_LEVEL_MAX_EIGHTHS
+            if not eighths.is_integer() or not 0 <= eighths <= FUEL_LEVEL_MAX_EIGHTHS:
+                return None, "Fuel fraction must map exactly to a value from 0/8 to 8/8."
+            return int(eighths), None
         try:
             return normalize_fuel_level_eighths(float(normalized))
         except ValueError:

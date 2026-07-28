@@ -88,6 +88,8 @@ def serialize_incident(incident_document: dict) -> dict:
         "driver_id": _serialize_reference_id(incident_document.get("driver_id")),
         "replacement_vehicle_id": _serialize_reference_id(incident_document.get("replacement_vehicle_id")),
         "maintenance_job_id": _serialize_reference_id(incident_document.get("maintenance_job_id")),
+        "reported_by": _serialize_reference_id(incident_document.get("reported_by") or incident_document.get("created_by")),
+        "reporter_role": incident_document.get("reporter_role") or "driver",
         "incident_type": incident_document.get("incident_type"),
         "status": incident_document.get("status"),
         "incident_at": _serialize_datetime(incident_document.get("incident_at")),

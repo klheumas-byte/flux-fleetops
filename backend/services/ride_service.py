@@ -99,6 +99,46 @@ def bookings_collection():
     return get_collection("bookings")
 
 
+def assignments_collection():
+    return get_collection("assignments")
+
+
+def vehicle_movements_collection():
+    return get_collection("vehicle_movements")
+
+
+def _driver_vehicle_ids(current_user_id: str) -> set[ObjectId]:
+    driver_id = _to_object_id(current_user_id, "current_user_id")
+    vehicle_ids = {
+        item["vehicle_id"]
+        for item in assignments_collection().find(
+            {"driver_id": driver_id, "status": "active"},
+            {"vehicle_id": 1},
+        )
+        if isinstance(item.get("vehicle_id"), ObjectId)
+    }
+    vehicle_ids.update(
+        item["vehicle_id"]
+        for item in vehicle_movements_collection().find(
+            {
+                "status": {"$in": ["approved", "checked_out", "in_progress"]},
+                "$or": [{"driver_id": driver_id}, {"movement_custodian_id": driver_id}],
+            },
+            {"vehicle_id": 1},
+        )
+        if isinstance(item.get("vehicle_id"), ObjectId)
+    )
+    return vehicle_ids
+
+
+def _assert_driver_vehicle_access(current_user_id: str, vehicle_id: ObjectId):
+    if vehicle_id not in _driver_vehicle_ids(current_user_id):
+        raise ApiError(
+            "Drivers can only log trips for an assigned or active movement-linked vehicle.",
+            status_code=403,
+        )
+
+
 def _index_keys_match(existing_index: dict, keys: list[tuple[str, int]]) -> bool:
     return list(existing_index.get("key", {}).items()) == keys
 
@@ -745,9 +785,12 @@ def list_ride_options(current_user_id: str, current_role: str) -> dict:
     })
 
     vehicles_started_at = perf_counter()
+    vehicle_query = {}
+    if current_role == "driver":
+        vehicle_query["_id"] = {"$in": list(_driver_vehicle_ids(current_user_id))}
     vehicles = list(
         vehicles_collection().find(
-            {},
+            vehicle_query,
             {"registration_number": 1, "make": 1, "model": 1, "vehicle_type": 1, "status": 1},
         ).sort("registration_number", ASCENDING)
     )
@@ -911,6 +954,7 @@ def create_ride(payload: dict, current_user_id: str, current_role: str) -> dict:
         normalized["driver_id"] = normalized.get("driver_id") or current_driver_id
         if normalized["driver_id"] != current_driver_id:
             raise ApiError("Drivers can only assign trip logs to themselves.", status_code=403)
+        _assert_driver_vehicle_access(current_user_id, normalized["vehicle_id"])
 
     if normalized.get("end_time"):
         normalized["status"] = "Completed"
@@ -1022,6 +1066,8 @@ def update_ride(ride_id: str, payload: dict, current_user_id: str, current_role:
         current_driver_id = _to_object_id(current_user_id, "current_user_id")
         if normalized.get("driver_id") and normalized["driver_id"] != current_driver_id:
             raise ApiError("Drivers can only assign trip logs to themselves.", status_code=403)
+    if current_role == "driver" and "vehicle_id" in normalized:
+        _assert_driver_vehicle_access(current_user_id, normalized["vehicle_id"])
 
     odometer_start = normalized.get("odometer_start", ride_document.get("odometer_start"))
     odometer_end = normalized.get("odometer_end", ride_document.get("odometer_end"))

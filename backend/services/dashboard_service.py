@@ -159,7 +159,7 @@ def _load_vehicle_lookup() -> dict[str, str]:
     started_at = perf_counter()
     vehicles = list(
         vehicles_collection().find(
-            {},
+            {"usage_type": {"$ne": "personal"}},
             {"registration_number": 1, "make": 1, "model": 1},
         )
     )
@@ -201,6 +201,7 @@ def _dashboard_vehicle_summary_rows():
     rows = list(
         vehicles_collection().aggregate(
             [
+                {"$match": {"usage_type": {"$ne": "personal"}}},
                 {
                     "$project": {
                         "status": 1,
@@ -365,6 +366,7 @@ def _dashboard_fuel_summary_rows(week_window: dict):
     rows = list(
         fuel_logs_collection().aggregate(
             [
+                {"$match": {"record_scope": {"$ne": "personal"}}},
                 {
                     "$facet": {
                         "weekly_totals": [
@@ -427,6 +429,7 @@ def _dashboard_expense_summary_rows(week_window: dict):
             [
                 {
                     "$match": {
+                        "record_scope": {"$ne": "personal"},
                         "status": {"$in": ["approved", "paid"]},
                         "expense_date": {"$gte": week_window["week_start"], "$lte": week_window["week_end"]},
                         "expense_category": {"$in": ["repairs", "servicing", "insurance", "roadworthy", "tyres", "battery", "other"]},
@@ -461,6 +464,7 @@ def _dashboard_incident_summary_rows():
     rows = list(
         incidents_collection().aggregate(
             [
+                {"$match": {"record_scope": {"$ne": "personal"}}},
                 {
                     "$facet": {
                         "open_incidents": [
@@ -493,6 +497,7 @@ def _dashboard_compliance_summary_rows(today_iso: str):
     rows = list(
         compliance_records_collection().aggregate(
             [
+                {"$match": {"record_scope": {"$ne": "personal"}}},
                 {
                     "$facet": {
                         "expired": [
@@ -537,6 +542,7 @@ def _dashboard_maintenance_summary_rows(week_window: dict):
     rows = list(
         maintenance_jobs_collection().aggregate(
             [
+                {"$match": {"record_scope": {"$ne": "personal"}}},
                 {
                     "$facet": {
                         "recent": [
@@ -770,17 +776,17 @@ def _build_owner_fleet_summaries(*, vehicles_due_service: int, net_revenue: floa
 
     incidents_started_at = perf_counter()
     open_incidents = incidents_collection().count_documents(
-        {"status": {"$nin": ["resolved", "rejected", "closed"]}}
+        {"record_scope": {"$ne": "personal"}, "status": {"$nin": ["resolved", "rejected", "closed"]}}
     )
     open_claims = incidents_collection().count_documents(
-        {"claim_status": {"$in": ["under_review", "submitted", "assessment_scheduled", "approved", "partially_paid"]}}
+        {"record_scope": {"$ne": "personal"}, "claim_status": {"$in": ["under_review", "submitted", "assessment_scheduled", "approved", "partially_paid"]}}
     )
     log_db_duration("dashboard.owner_fleet_incidents", incidents_started_at)
 
     compliance_started_at = perf_counter()
     expired_compliance_count = compliance_records_collection().count_documents(
         {
-            "status": {"$ne": "inactive"},
+            "record_scope": {"$ne": "personal"}, "status": {"$ne": "inactive"},
             "$or": [
                 {"status": "expired"},
                 {"expiry_date": {"$lt": today.isoformat()}},
@@ -818,8 +824,8 @@ def get_dashboard_summary(*, current_role: str) -> dict:
     driver_lookup = _load_driver_lookup()
 
     vehicles_started_at = perf_counter()
-    total_vehicles = vehicles_collection().count_documents({})
-    active_vehicles = vehicles_collection().count_documents({"status": {"$in": list(ACTIVE_VEHICLE_STATUSES)}})
+    total_vehicles = vehicles_collection().count_documents({"usage_type": {"$ne": "personal"}})
+    active_vehicles = vehicles_collection().count_documents({"usage_type": {"$ne": "personal"}, "status": {"$in": list(ACTIVE_VEHICLE_STATUSES)}})
     log_db_duration("dashboard.vehicle_counts", vehicles_started_at)
 
     drivers_started_at = perf_counter()
@@ -901,6 +907,7 @@ def get_dashboard_summary(*, current_role: str) -> dict:
     approved_fuel_logs = list(
         fuel_logs_collection().find(
             {
+                "record_scope": {"$ne": "personal"},
                 "status": "approved",
                 "fuel_date": {
                     "$gte": week_window["week_start"],
@@ -918,7 +925,7 @@ def get_dashboard_summary(*, current_role: str) -> dict:
     )
     recent_fuel_logs = list(
         fuel_logs_collection().find(
-            {},
+            {"record_scope": {"$ne": "personal"}},
             {
                 "vehicle_id": 1,
                 "driver_id": 1,
@@ -935,6 +942,7 @@ def get_dashboard_summary(*, current_role: str) -> dict:
     approved_expenses = list(
         expenses_collection().find(
             {
+                "record_scope": {"$ne": "personal"},
                 "status": {"$in": ["approved", "paid"]},
                 "expense_date": {
                     "$gte": week_window["week_start"],
@@ -960,7 +968,7 @@ def get_dashboard_summary(*, current_role: str) -> dict:
     maintenance_started_at = perf_counter()
     maintenance_jobs = list(
         maintenance_jobs_collection().find(
-            {},
+            {"record_scope": {"$ne": "personal"}},
             {
                 "vehicle_id": 1,
                 "title": 1,
@@ -996,7 +1004,7 @@ def get_dashboard_summary(*, current_role: str) -> dict:
     compliance_started_at = perf_counter()
     compliance_records = list(
         compliance_records_collection().find(
-            {"expiry_date": {"$ne": None}},
+            {"record_scope": {"$ne": "personal"}, "expiry_date": {"$ne": None}},
             {
                 "vehicle_id": 1,
                 "compliance_item_name": 1,
@@ -1050,14 +1058,14 @@ def get_dashboard_summary(*, current_role: str) -> dict:
         try:
             incidents_started_at = perf_counter()
             fleet_risk_summary["open_incidents"] = incidents_collection().count_documents(
-                {"status": {"$nin": ["resolved", "rejected", "closed"]}}
+                {"record_scope": {"$ne": "personal"}, "status": {"$nin": ["resolved", "rejected", "closed"]}}
             )
             fleet_risk_summary["open_claims"] = incidents_collection().count_documents(
-                {"claim_status": {"$in": ["under_review", "submitted", "assessment_scheduled", "approved", "partially_paid"]}}
+                {"record_scope": {"$ne": "personal"}, "claim_status": {"$in": ["under_review", "submitted", "assessment_scheduled", "approved", "partially_paid"]}}
             )
             fleet_risk_summary["expired_compliance_count"] = compliance_records_collection().count_documents(
                 {
-                    "status": {"$ne": "inactive"},
+                    "record_scope": {"$ne": "personal"}, "status": {"$ne": "inactive"},
                     "$or": [
                         {"status": "expired"},
                         {"expiry_date": {"$lt": today.isoformat()}},

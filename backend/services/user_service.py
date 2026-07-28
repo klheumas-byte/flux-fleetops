@@ -4,6 +4,7 @@ from bson import ObjectId
 
 from extensions import get_collection
 from models.user import serialize_user
+from services.notification_service import create_notification
 from utils.api_error import ApiError
 from utils.validators import normalize_phone
 
@@ -11,6 +12,8 @@ from utils.validators import normalize_phone
 ALLOWED_DRIVER_APPROVAL_STATUSES = {"pending", "approved", "rejected"}
 ALLOWED_GUARANTOR_VERIFICATION_STATUSES = {"pending", "verified", "rejected"}
 ALLOWED_DRIVER_ACCOUNT_STATUSES = {"active", "inactive", "suspended"}
+ALLOWED_DRIVER_OPERATING_MODES = {"operations_only", "target_only", "hybrid"}
+ALLOWED_TARGET_FREQUENCIES = {"daily", "weekly"}
 DRIVER_SELF_EDITABLE_FIELDS = {
     "ghana_card_number",
     "license_number",
@@ -101,6 +104,47 @@ def normalize_driver_profile_payload(
             if field_value is not None and not isinstance(field_value, bool):
                 raise ApiError(f"{field_name} must be a boolean value.", status_code=400)
             normalized_data[field_name] = field_value
+
+    if "operating_mode" in driver_profile:
+        operating_mode = str(driver_profile.get("operating_mode") or "").strip().lower()
+        if operating_mode not in ALLOWED_DRIVER_OPERATING_MODES:
+            raise ApiError(
+                "operating_mode must be one of: operations_only, target_only, hybrid.",
+                status_code=400,
+            )
+        normalized_data["operating_mode"] = operating_mode
+
+    if "target_enabled" in driver_profile:
+        target_enabled = driver_profile.get("target_enabled")
+        if not isinstance(target_enabled, bool):
+            raise ApiError("target_enabled must be a boolean value.", status_code=400)
+        normalized_data["target_enabled"] = target_enabled
+
+    if "private_finance_enabled" in driver_profile:
+        private_finance_enabled = driver_profile.get("private_finance_enabled")
+        if not isinstance(private_finance_enabled, bool):
+            raise ApiError("private_finance_enabled must be a boolean value.", status_code=400)
+        normalized_data["private_finance_enabled"] = private_finance_enabled
+
+    if "target_amount" in driver_profile:
+        normalized_data["target_amount"] = validate_non_negative_number(
+            driver_profile.get("target_amount"),
+            "target_amount",
+        )
+
+    if "target_frequency" in driver_profile:
+        target_frequency = str(driver_profile.get("target_frequency") or "").strip().lower()
+        if target_frequency not in ALLOWED_TARGET_FREQUENCIES:
+            raise ApiError("target_frequency must be daily or weekly.", status_code=400)
+        normalized_data["target_frequency"] = target_frequency
+
+    if "settings_effective_date" in driver_profile:
+        effective_date = str(driver_profile.get("settings_effective_date") or "").strip()
+        try:
+            datetime.fromisoformat(effective_date)
+        except ValueError as error:
+            raise ApiError("settings_effective_date must be an ISO date.", status_code=400) from error
+        normalized_data["settings_effective_date"] = effective_date
 
     if "deposit_balance" in driver_profile:
         normalized_data["deposit_balance"] = validate_non_negative_number(
@@ -201,12 +245,20 @@ def update_driver_profile_as(
     payload: dict,
 ) -> dict:
     target_user = get_driver_user_document(target_user_id)
+    change_reason = str(payload.get("change_reason") or "Administrative driver settings update").strip()
+    if len(change_reason) > 500:
+        raise ApiError("change_reason cannot exceed 500 characters.", status_code=400)
 
     is_self_update = current_role == "driver" and current_user_id == target_user_id
     if current_role == "driver" and not is_self_update:
         raise ApiError("You do not have permission to update this driver profile.", status_code=403)
     if current_role not in {"owner", "admin", "driver"}:
         raise ApiError("You do not have permission to update this driver profile.", status_code=403)
+
+    requested_profile = payload.get("driver_profile") if isinstance(payload.get("driver_profile"), dict) else payload
+    protected_settings = {"operating_mode", "target_enabled", "target_amount", "target_frequency", "private_finance_enabled", "settings_effective_date"}
+    if is_self_update and protected_settings.intersection(requested_profile):
+        raise ApiError("Only an owner or admin can change driver operating settings.", status_code=403)
 
     normalized_updates = normalize_driver_profile_payload(
         payload,
@@ -217,8 +269,11 @@ def update_driver_profile_as(
         raise ApiError("No driver profile fields provided for update.", status_code=400)
 
     existing_profile = dict(target_user.get("driver_profile") or {})
-    previous_vehicle_id = existing_profile.get("assigned_vehicle_id")
-    new_vehicle_id = normalized_updates.get("assigned_vehicle_id", previous_vehicle_id)
+    if "assigned_vehicle_id" in normalized_updates:
+        raise ApiError(
+            "Vehicle allocation must be changed from Vehicle Assignments.",
+            status_code=409,
+        )
 
     merged_profile = {**existing_profile, **normalized_updates}
     if "guarantor" in normalized_updates and existing_profile.get("guarantor") and normalized_updates["guarantor"]:
@@ -227,13 +282,51 @@ def update_driver_profile_as(
             **normalized_updates["guarantor"],
         }
 
-    sync_user_vehicle_assignment(
-        user_id=target_user["_id"],
-        previous_vehicle_id=previous_vehicle_id,
-        new_vehicle_id=new_vehicle_id,
-    )
+    setting_fields = {
+        "operating_mode", "target_enabled", "target_amount",
+        "target_frequency", "private_finance_enabled", "settings_effective_date",
+    }
+    if setting_fields.intersection(normalized_updates):
+        effective_mode = merged_profile.get("operating_mode") or "hybrid"
+        effective_target_enabled = merged_profile.get("target_enabled", True)
+        if effective_mode == "operations_only" and effective_target_enabled:
+            raise ApiError(
+                "Targets must be disabled when the driver is operations_only.",
+                status_code=400,
+            )
+        if effective_target_enabled and not merged_profile.get("target_amount"):
+            raise ApiError("target_amount is required when targets are enabled.", status_code=400)
+        if merged_profile.get("private_finance_enabled") and (
+            effective_mode not in {"target_only", "hybrid"} or not effective_target_enabled
+        ):
+            raise ApiError(
+                "Private finance requires a target-enabled target_only or hybrid driver.",
+                status_code=400,
+            )
 
     timestamp = now_utc()
+    changed_settings = {
+        key: {"before": existing_profile.get(key), "after": merged_profile.get(key)}
+        for key in setting_fields
+        if key in normalized_updates and existing_profile.get(key) != merged_profile.get(key)
+    }
+    if changed_settings:
+        actor_document = users_collection().find_one({"_id": ObjectId(current_user_id)}, {"full_name": 1})
+        history_entry = {
+            "changed_by": ObjectId(current_user_id),
+            "changed_by_name": (actor_document or {}).get("full_name") or "Unknown user",
+            "changed_by_role": current_role,
+            "changed_at": timestamp,
+            "reason": change_reason,
+            "changes": changed_settings,
+            "effective_date": merged_profile.get("settings_effective_date"),
+        }
+        merged_profile["settings_history"] = [
+            *(existing_profile.get("settings_history") or []),
+            history_entry,
+        ][-100:]
+    if merged_profile == existing_profile:
+        return serialize_user(target_user)
     users_collection().update_one(
         {"_id": target_user["_id"]},
         {
@@ -245,6 +338,32 @@ def update_driver_profile_as(
     )
     target_user["driver_profile"] = merged_profile
     target_user["updated_at"] = timestamp
+    if changed_settings:
+        get_collection("fleet_owner_audit").insert_one(
+            {
+                "actor_id": ObjectId(current_user_id),
+                "action": "driver_settings_changed",
+                "entity_type": "driver",
+                "entity_id": target_user["_id"],
+                "before": {key: value["before"] for key, value in changed_settings.items()},
+                "after": {key: value["after"] for key, value in changed_settings.items()},
+                "reason": change_reason,
+                "actor_role": current_role,
+                "created_at": timestamp,
+                "immutable": True,
+            }
+        )
+        create_notification(
+            target_user["_id"],
+            "Driver access settings changed",
+            "Your operating mode or target configuration has been updated.",
+            category="driver_settings",
+            priority="medium",
+            reference_type="driver_settings",
+            reference_id=target_user["_id"],
+            dedupe_key=f"driver-settings:{target_user['_id']}:{timestamp.isoformat()}",
+            metadata={"changes": list(changed_settings)},
+        )
     return serialize_user(target_user)
 
 

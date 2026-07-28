@@ -42,6 +42,22 @@ def serialize_driver_profile(user_document: dict) -> dict | None:
         "deposit_balance": driver_profile.get("deposit_balance"),
         "approval_status": driver_profile.get("approval_status"),
         "assigned_vehicle_id": _serialize_reference_id(driver_profile.get("assigned_vehicle_id")),
+        "operating_mode": driver_profile.get("operating_mode") or "hybrid",
+        "target_enabled": driver_profile.get("target_enabled", True),
+        "target_amount": driver_profile.get("target_amount"),
+        "target_frequency": driver_profile.get("target_frequency") or "weekly",
+        "private_finance_enabled": driver_profile.get("private_finance_enabled", False),
+        "settings_effective_date": driver_profile.get("settings_effective_date"),
+        "settings_history": [
+            {
+                **entry,
+                "changed_by": _serialize_reference_id(entry.get("changed_by")),
+                "changed_at": entry.get("changed_at").isoformat()
+                if hasattr(entry.get("changed_at"), "isoformat")
+                else entry.get("changed_at"),
+            }
+            for entry in driver_profile.get("settings_history", [])
+        ],
         "guarantor": guarantor,
     }
 
@@ -57,5 +73,7 @@ def serialize_user(user_document: dict) -> dict:
         "last_login": user_document.get("last_login").isoformat() if user_document.get("last_login") else None,
         "created_at": user_document.get("created_at").isoformat() if user_document.get("created_at") else None,
         "updated_at": user_document.get("updated_at").isoformat() if user_document.get("updated_at") else None,
+        "must_change_password": bool(user_document.get("must_change_password", False)),
+        "password_changed_at": user_document.get("password_changed_at").isoformat() if user_document.get("password_changed_at") else None,
         "driver_profile": serialize_driver_profile(user_document),
     }

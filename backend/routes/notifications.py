@@ -19,19 +19,19 @@ notifications_bp = Blueprint("notifications", __name__)
 
 
 @notifications_bp.get("/actionable-count")
-@role_required("owner", "admin", "dispatcher", "customer_service", "driver")
+@role_required("owner", "admin", "dispatcher", "customer_service", "driver", "fleet_owner", "personal_vehicle_owner")
 def get_actionable_notification_count_route():
     return success_response(data=actionable_notification_counts(get_jwt_identity()))
 
 
 @notifications_bp.get("/work-queue-counts")
-@role_required("owner", "admin", "dispatcher", "customer_service", "driver")
+@role_required("owner", "admin", "dispatcher", "customer_service", "driver", "fleet_owner", "personal_vehicle_owner")
 def get_sidebar_work_queue_counts_route():
     return success_response(data=sidebar_work_queue_counts(get_jwt_identity(), get_jwt().get("role")))
 
 
 @notifications_bp.get("")
-@role_required("owner", "admin", "dispatcher", "customer_service", "driver")
+@role_required("owner", "admin", "dispatcher", "customer_service", "driver", "fleet_owner", "personal_vehicle_owner")
 def get_notifications_route():
     try:
         page = int(request.args.get("page", 1) or 1)
@@ -52,7 +52,7 @@ def get_notifications_route():
 
 
 @notifications_bp.patch("/read-all")
-@role_required("owner", "admin", "dispatcher", "customer_service", "driver")
+@role_required("owner", "admin", "dispatcher", "customer_service", "driver", "fleet_owner", "personal_vehicle_owner")
 def mark_all_notifications_as_read_route():
     count = mark_all_notifications_as_read(get_jwt_identity())
     return success_response(
@@ -62,7 +62,7 @@ def mark_all_notifications_as_read_route():
 
 
 @notifications_bp.patch("/<notification_id>/read")
-@role_required("owner", "admin", "dispatcher", "customer_service", "driver")
+@role_required("owner", "admin", "dispatcher", "customer_service", "driver", "fleet_owner", "personal_vehicle_owner")
 def mark_notification_as_read_route(notification_id: str):
     notification = mark_notification_as_read(notification_id, get_jwt_identity())
     return success_response(
@@ -72,7 +72,7 @@ def mark_notification_as_read_route(notification_id: str):
 
 
 @notifications_bp.patch("/<notification_id>/state")
-@role_required("owner", "admin", "dispatcher", "customer_service", "driver")
+@role_required("owner", "admin", "dispatcher", "customer_service", "driver", "fleet_owner", "personal_vehicle_owner")
 def update_notification_state_route(notification_id: str):
     payload = request.get_json(silent=True) or {}
     notification = update_notification_state(
@@ -92,7 +92,7 @@ def administratively_resolve_notification_route(notification_id: str):
 
 
 @notifications_bp.delete("/<notification_id>")
-@role_required("owner", "admin", "dispatcher", "customer_service", "driver")
+@role_required("owner", "admin", "dispatcher", "customer_service", "driver", "fleet_owner", "personal_vehicle_owner")
 def delete_notification_route(notification_id: str):
     delete_notification(notification_id, get_jwt_identity())
     return success_response(message="Notification deleted successfully.")

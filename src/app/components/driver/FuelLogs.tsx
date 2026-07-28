@@ -34,7 +34,7 @@ interface FuelLog {
   id: string;
   fuel_date: string;
   fuel_type: string;
-  litres: number;
+  litres: number | null;
   amount: number;
   price_per_litre: number;
   odometer_reading: number | null;
@@ -83,6 +83,7 @@ interface FuelFormState {
   fuel_type: string;
   litres: string;
   amount: string;
+  payment_method: string;
   odometer_reading: string;
   fuel_level: number | null;
   notes: string;
@@ -96,6 +97,7 @@ const initialFuelForm: FuelFormState = {
   fuel_type: 'petrol',
   litres: '',
   amount: '',
+  payment_method: 'other',
   odometer_reading: '',
   fuel_level: null,
   notes: '',
@@ -228,7 +230,7 @@ export default function FuelLogs() {
 
   const approvedLogs = logs.filter((log) => log.status === 'approved');
   const averageLitres = approvedLogs.length
-    ? approvedLogs.reduce((sum, log) => sum + log.litres, 0) / approvedLogs.length
+    ? approvedLogs.reduce((sum, log) => sum + (log.litres || 0), 0) / approvedLogs.length
     : 0;
 
   const pricePerLitrePreview = useMemo(() => {
@@ -274,8 +276,10 @@ export default function FuelLogs() {
           fuel_station_id: formState.fuel_station_id,
           fuel_date: formState.fuel_date,
           fuel_type: formState.fuel_type,
-          litres: Number(formState.litres),
+          litres: formState.litres ? Number(formState.litres) : undefined,
           amount: Number(formState.amount),
+          payment_method: formState.payment_method,
+          fuel_recorded_at: new Date().toISOString(),
           odometer_reading: formState.odometer_reading ? Number(formState.odometer_reading) : null,
           fuel_level: formState.fuel_level,
           receipt_image: formState.receipt_image,
@@ -400,7 +404,7 @@ export default function FuelLogs() {
                           ) : null}
                         </div>
                         <p className="mt-1 text-sm text-gray-600">
-                          {formatDate(log.fuel_date)} • {log.fuel_type} • {log.litres.toLocaleString()} L
+                          {formatDate(log.fuel_date)} • {log.fuel_type} • {log.litres != null ? `${log.litres.toLocaleString()} L` : 'Litres not recorded'}
                         </p>
                       </div>
                       <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${statusClassName(log.status)}`}>
@@ -523,8 +527,16 @@ export default function FuelLogs() {
                   <option value="hybrid">Hybrid</option>
                   <option value="electric">Electric</option>
                 </SelectField>
-                <InputField label="Litres" type="number" step="0.01" value={formState.litres} onChange={(value) => setFormState((current) => ({ ...current, litres: value }))} />
+                <InputField label="Litres (Optional for active dispatch)" type="number" step="0.01" value={formState.litres} onChange={(value) => setFormState((current) => ({ ...current, litres: value }))} />
                 <InputField label="Amount" type="number" step="0.01" value={formState.amount} onChange={(value) => setFormState((current) => ({ ...current, amount: value }))} />
+                <SelectField label="Payment Method" value={formState.payment_method} onChange={(value) => setFormState((current) => ({ ...current, payment_method: value }))}>
+                  <option value="cash">Cash</option>
+                  <option value="card">Card</option>
+                  <option value="company_card">Company Card</option>
+                  <option value="mobile_money">Mobile Money</option>
+                  <option value="fuel_card">Fuel Card</option>
+                  <option value="other">Other</option>
+                </SelectField>
                 <InputField label="Odometer Reading" type="number" step="0.01" value={formState.odometer_reading} onChange={(value) => setFormState((current) => ({ ...current, odometer_reading: value }))} />
                 <FuelGaugeSelector
                   label="Fuel Level"

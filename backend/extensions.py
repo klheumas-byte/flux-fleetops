@@ -14,12 +14,11 @@ _mongo_client = None
 
 
 def init_extensions(app):
-    cors_origins = "*" if app.config.get("ENV_NAME") == "development" else app.config["CORS_ORIGINS"]
     cors.init_app(
         app,
         resources={
             r"/api/.*": {
-                "origins": cors_origins,
+                "origins": app.config["CORS_ORIGINS"],
                 "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
                 "allow_headers": ["Content-Type", "Authorization"],
             }

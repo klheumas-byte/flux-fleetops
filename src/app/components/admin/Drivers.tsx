@@ -22,11 +22,12 @@ import {
 } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
 import { useDebouncedValue } from '../../lib/use-debounced-value';
+import PersonalUserAccounts from './PersonalUserAccounts';
 
 type ApprovalStatus = 'pending' | 'approved' | 'rejected';
 type AccountStatus = 'active' | 'inactive' | 'suspended';
 type DriverTab = 'personal' | 'license' | 'deposit' | 'guarantor' | 'vehicle' | 'history';
-type ManagedRole = 'admin' | 'driver';
+type ManagedRole = 'admin' | 'driver' | 'personal_vehicle_owner';
 
 interface DriverProfile {
   ghana_card_number: string | null;
@@ -43,6 +44,21 @@ interface DriverProfile {
   deposit_balance: number | null;
   approval_status: ApprovalStatus | null;
   assigned_vehicle_id: string | null;
+  operating_mode: 'operations_only' | 'target_only' | 'hybrid';
+  target_enabled: boolean;
+  target_amount: number | null;
+  target_frequency: 'daily' | 'weekly';
+  private_finance_enabled: boolean;
+  settings_effective_date: string | null;
+  settings_history: Array<{
+    changed_by?: string;
+    changed_by_name?: string;
+    changed_by_role?: string;
+    changed_at?: string;
+    reason?: string;
+    effective_date?: string | null;
+    changes?: Record<string, { before: unknown; after: unknown }>;
+  }>;
   guarantor: {
     full_name: string | null;
     phone: string | null;
@@ -122,6 +138,13 @@ interface DriverCreateForm {
   deposit_balance: string;
   approval_status: ApprovalStatus;
   assigned_vehicle_id: string;
+  operating_mode: 'operations_only' | 'target_only' | 'hybrid';
+  target_enabled: boolean;
+  target_amount: string;
+  target_frequency: 'daily' | 'weekly';
+  private_finance_enabled: boolean;
+  settings_effective_date: string;
+  change_reason: string;
   guarantor_full_name: string;
   guarantor_phone: string;
   guarantor_relationship: string;
@@ -152,6 +175,13 @@ const initialDriverForm: DriverCreateForm = {
   deposit_balance: '',
   approval_status: 'pending',
   assigned_vehicle_id: '',
+  operating_mode: 'hybrid',
+  target_enabled: true,
+  target_amount: '',
+  target_frequency: 'weekly',
+  private_finance_enabled: false,
+  settings_effective_date: '',
+  change_reason: '',
   guarantor_full_name: '',
   guarantor_phone: '',
   guarantor_relationship: '',
@@ -195,7 +225,12 @@ function buildDriverProfilePayload(form: DriverCreateForm) {
     deposit_paid: form.deposit_paid,
     deposit_balance: parseOptionalNumber(form.deposit_balance),
     approval_status: form.approval_status,
-    assigned_vehicle_id: parseOptionalString(form.assigned_vehicle_id),
+    operating_mode: form.operating_mode,
+    target_enabled: form.target_enabled,
+    target_amount: parseOptionalNumber(form.target_amount),
+    target_frequency: form.target_frequency,
+    private_finance_enabled: form.private_finance_enabled,
+    settings_effective_date: form.settings_effective_date || undefined,
     guarantor: {
       full_name: parseOptionalString(form.guarantor_full_name),
       phone: parseOptionalString(form.guarantor_phone),
@@ -239,6 +274,13 @@ function formFromDriver(driver: Driver): DriverCreateForm {
         : '',
     approval_status: profile?.approval_status || 'pending',
     assigned_vehicle_id: profile?.assigned_vehicle_id || '',
+    operating_mode: profile?.operating_mode || 'hybrid',
+    target_enabled: profile?.target_enabled ?? true,
+    target_amount: profile?.target_amount != null ? String(profile.target_amount) : '',
+    target_frequency: profile?.target_frequency || 'weekly',
+    private_finance_enabled: profile?.private_finance_enabled ?? false,
+    settings_effective_date: profile?.settings_effective_date?.slice(0, 10) || '',
+    change_reason: '',
     guarantor_full_name: guarantor?.full_name || '',
     guarantor_phone: guarantor?.phone || '',
     guarantor_relationship: guarantor?.relationship || '',
@@ -435,7 +477,7 @@ export default function Drivers() {
           email: driverForm.email.trim(),
           phone: driverForm.phone.trim(),
           password: driverForm.password,
-          role: currentRole === 'owner' ? driverForm.role : 'driver',
+          role: driverForm.role,
           status: driverForm.status,
         };
 
@@ -452,6 +494,7 @@ export default function Drivers() {
           method: 'PATCH',
           body: JSON.stringify({
             driver_profile: buildDriverProfilePayload(driverForm),
+            change_reason: driverForm.change_reason || 'Driver settings updated from Driver Management',
           }),
         });
       }
@@ -529,6 +572,7 @@ export default function Drivers() {
 
   return (
     <div className="p-6 space-y-6">
+      <PersonalUserAccounts />
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-gray-900">
@@ -550,7 +594,7 @@ export default function Drivers() {
             className="px-4 py-2.5 bg-[#2563EB] text-white rounded-lg hover:bg-[#1d4ed8] flex items-center gap-2 font-medium"
           >
             <Plus className="w-5 h-5" />
-            {currentRole === 'owner' ? 'Add User' : 'Add Driver'}
+            Add User
           </button>
         </div>
       </div>
@@ -918,6 +962,7 @@ export default function Drivers() {
                           >
                             {currentRole === 'owner' && <option value="admin">Admin</option>}
                             <option value="driver">Driver</option>
+                            <option value="personal_vehicle_owner">Personal Vehicle Owner</option>
                           </select>
                         </div>
                         <div>
@@ -1204,25 +1249,93 @@ export default function Drivers() {
                       <label className="block text-sm font-medium text-gray-700 mb-2">Assigned Vehicle ID</label>
                       <input
                         value={driverForm.assigned_vehicle_id}
-                        onChange={(event) => updateFormField('assigned_vehicle_id', event.target.value)}
-                        readOnly={profileMode === 'view'}
-                        className="w-full px-3 py-2.5 border border-gray-300 rounded-lg bg-white"
+                        readOnly
+                        className="w-full px-3 py-2.5 border border-gray-300 rounded-lg bg-gray-100"
                       />
                       <p className="text-xs text-gray-500 mt-2">
-                        Vehicle assignment is stored here, but full assignment workflows are still out of scope.
+                        Use Vehicle Allocations to assign, unassign, or transfer vehicles.
                       </p>
                     </div>
-                    <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-                      <div className="flex items-start gap-3">
-                        <Shield className="w-5 h-5 text-blue-600 mt-0.5" />
-                        <div>
-                          <h4 className="text-sm font-semibold text-gray-900">Vehicle Tab</h4>
-                          <p className="text-sm text-gray-600 mt-1">
-                            This section is ready for display and record maintenance only. Full assignment flows will come later.
-                          </p>
-                        </div>
-                      </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Operating Mode</label>
+                      <select
+                        value={driverForm.operating_mode}
+                        onChange={(event) => {
+                          const mode = event.target.value as DriverCreateForm['operating_mode'];
+                          setDriverForm((current) => ({
+                            ...current,
+                            operating_mode: mode,
+                            target_enabled: mode === 'operations_only' ? false : current.target_enabled,
+                            private_finance_enabled: mode === 'operations_only' ? false : current.private_finance_enabled,
+                          }));
+                        }}
+                        disabled={profileMode === 'view'}
+                        className="w-full px-3 py-2.5 border border-gray-300 rounded-lg bg-white"
+                      >
+                        <option value="operations_only">Operations only</option>
+                        <option value="target_only">Target only</option>
+                        <option value="hybrid">Hybrid</option>
+                      </select>
                     </div>
+                    <label className="flex items-center gap-2 text-sm text-gray-700">
+                      <input
+                        type="checkbox"
+                        checked={driverForm.target_enabled}
+                        disabled={profileMode === 'view' || driverForm.operating_mode === 'operations_only'}
+                        onChange={(event) => updateFormField('target_enabled', event.target.checked)}
+                      />
+                      Target enabled
+                    </label>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Target Frequency</label>
+                      <select
+                        value={driverForm.target_frequency}
+                        disabled={profileMode === 'view' || !driverForm.target_enabled}
+                        onChange={(event) => updateFormField('target_frequency', event.target.value as DriverCreateForm['target_frequency'])}
+                        className="w-full px-3 py-2.5 border border-gray-300 rounded-lg bg-white"
+                      >
+                        <option value="daily">Daily</option>
+                        <option value="weekly">Weekly</option>
+                      </select>
+                    </div>
+                    <label className="flex items-center gap-2 text-sm text-gray-700">
+                      <input
+                        type="checkbox"
+                        checked={driverForm.private_finance_enabled}
+                        disabled={profileMode === 'view' || !driverForm.target_enabled || driverForm.operating_mode === 'operations_only'}
+                        onChange={(event) => updateFormField('private_finance_enabled', event.target.checked)}
+                      />
+                      Enable private My Earnings ledger
+                    </label>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Target Amount</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={driverForm.target_amount}
+                        disabled={profileMode === 'view' || !driverForm.target_enabled}
+                        onChange={(event) => updateFormField('target_amount', event.target.value)}
+                        className="w-full px-3 py-2.5 border border-gray-300 rounded-lg bg-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Settings Effective Date</label>
+                      <input
+                        type="date"
+                        value={driverForm.settings_effective_date}
+                        disabled={profileMode === 'view'}
+                        onChange={(event) => updateFormField('settings_effective_date', event.target.value)}
+                        className="w-full px-3 py-2.5 border border-gray-300 rounded-lg bg-white"
+                      />
+                    </div>
+                    {profileMode === 'edit' && <div className="md:col-span-2">
+                      <label className="mb-2 block text-sm font-medium text-gray-700">Change reason</label>
+                      <textarea value={driverForm.change_reason} maxLength={500}
+                        onChange={(event) => updateFormField('change_reason', event.target.value)}
+                        placeholder="Why are these access or target settings changing?"
+                        className="w-full rounded-lg border border-gray-300 px-3 py-2.5" />
+                    </div>}
                   </div>
                 )}
 
@@ -1245,6 +1358,27 @@ export default function Drivers() {
                         </div>
                       </div>
                     </div>
+                    {(selectedDriver?.driver_profile?.settings_history || []).length > 0 && (
+                      <div className="rounded-xl border border-gray-200 bg-white p-4">
+                        <h4 className="mb-3 text-sm font-semibold text-gray-900">Driver settings audit</h4>
+                        <div className="space-y-3">
+                          {[...(selectedDriver?.driver_profile?.settings_history || [])].reverse().map((entry, index) => (
+                            <div key={`${entry.changed_at || 'change'}-${index}`} className="rounded-lg bg-gray-50 p-3 text-sm">
+                              <div className="font-medium text-gray-900">{formatDate(entry.changed_at || null)}</div>
+                              <div className="text-gray-500">Effective {entry.effective_date || 'immediately'} · Changed by {entry.changed_by_name || 'Unknown user'} ({entry.changed_by_role || 'system'})</div>
+                              {entry.reason && <div className="mt-1 text-gray-600">Reason: {entry.reason}</div>}
+                              <div className="mt-1 text-gray-700">
+                                {Object.entries(entry.changes || {}).map(([field, change]) => (
+                                  <span key={field} className="mr-3">
+                                    {field.replaceAll('_', ' ')}: {String(change.before ?? '—')} → {String(change.after ?? '—')}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

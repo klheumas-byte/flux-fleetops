@@ -35,11 +35,14 @@ import type { DriverActiveAssignment, DriverDashboardSummary } from '../../lib/d
 import {
   acceptDriverDispatchJob,
   clarifyDriverDispatchJob,
+  fetchDriverOperationsSummary,
   fetchDriverDispatchWorkspace,
   rejectDriverDispatchJob,
   updateDriverDispatchWorkflow,
   type DriverDispatchJob,
   type DriverDispatchWorkspaceSummary,
+  type DriverOperationalTask,
+  type DriverOperationsSummary,
 } from '../../lib/driver-api';
 import { getDriverDispatchActionState, matchesDriverDispatchSection } from '../../lib/driver-dispatch-ui';
 import { apiRequestSafe } from '../../lib/api';
@@ -179,6 +182,9 @@ export default function DriverDashboard({
   const [dispatchJobsError, setDispatchJobsError] = useState('');
   const [dispatchActionJobId, setDispatchActionJobId] = useState('');
   const [dispatchReasonDrafts, setDispatchReasonDrafts] = useState<Record<string, string>>({});
+  const [operationsSummary, setOperationsSummary] = useState<DriverOperationsSummary | null>(null);
+  const [operationsError, setOperationsError] = useState('');
+  const [isLoadingOperations, setIsLoadingOperations] = useState(true);
   const [startTripForm, setStartTripForm] = useState({
     booking_id: '',
     customer_id: '',
@@ -273,8 +279,23 @@ export default function DriverDashboard({
     void loadBookingSummary();
   }, [bookingSummary, bookingSummaryError, bookingSummaryNotice, shouldLoadBookingSummary]);
 
+  const loadOperationsSummary = async () => {
+    setIsLoadingOperations(true);
+    setOperationsError('');
+    try {
+      setOperationsSummary(await fetchDriverOperationsSummary());
+    } catch (error) {
+      setOperationsError(error instanceof Error ? error.message : 'Unable to load your operations summary right now.');
+    } finally {
+      setIsLoadingOperations(false);
+    }
+  };
+
   useEffect(() => {
-    void loadDispatchJobs();
+    void loadOperationsSummary();
+    const refresh = () => { if (document.visibilityState === 'visible') void loadOperationsSummary(); };
+    window.addEventListener('flux-notifications-changed', refresh);
+    return () => window.removeEventListener('flux-notifications-changed', refresh);
   }, []);
 
   const selectedBooking = useMemo(
@@ -773,6 +794,20 @@ export default function DriverDashboard({
     },
   ];
 
+  const openOperationsFilter = (filter: 'today' | 'upcoming' | 'pending') => {
+    sessionStorage.setItem('flux_operational_task_intent', JSON.stringify({ filter }));
+    onNavigate('my-operational-tasks');
+  };
+
+  const openOperationTask = (task: DriverOperationalTask) => {
+    if (task.operation_type === 'dispatch') {
+      onNavigate('my-dispatches');
+      return;
+    }
+    sessionStorage.setItem('flux_operational_task_intent', JSON.stringify({ taskKey: task.task_key }));
+    onNavigate('my-operational-tasks');
+  };
+
   return (
     <div className="space-y-6 p-4 sm:p-6">
       <div className="rounded-lg bg-gradient-to-r from-blue-600 to-purple-600 p-6 text-white">
@@ -840,6 +875,16 @@ export default function DriverDashboard({
         </div>
       </div>
 
+      <OperationsDashboardSection
+        summary={operationsSummary}
+        loading={isLoadingOperations}
+        error={operationsError}
+        onRefresh={() => void loadOperationsSummary()}
+        onOpenFilter={openOperationsFilter}
+        onOpenTask={openOperationTask}
+      />
+
+      {false && <>
       <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
         <DashboardDispatchWidget label="Today's Dispatches" value={dispatchSummary?.todays_dispatches || 0} accent="bg-blue-50 text-blue-700" onClick={() => onNavigate('my-dispatches')} />
         <DashboardDispatchWidget label="Upcoming Dispatches" value={dispatchSummary?.upcoming_dispatches || 0} accent="bg-amber-50 text-amber-700" onClick={() => onNavigate('my-dispatches')} />
@@ -981,6 +1026,7 @@ export default function DriverDashboard({
           )}
         </div>
       </div>
+      </>}
 
       <div ref={bookingInsightsRef} className="space-y-4">
         {bookingSummaryError && (
@@ -1433,6 +1479,81 @@ export default function DriverDashboard({
       )}
     </div>
   );
+}
+
+function OperationsDashboardSection({
+  summary,
+  loading,
+  error,
+  onRefresh,
+  onOpenFilter,
+  onOpenTask,
+}: {
+  summary: DriverOperationsSummary | null;
+  loading: boolean;
+  error: string;
+  onRefresh: () => void;
+  onOpenFilter: (filter: 'today' | 'upcoming' | 'pending') => void;
+  onOpenTask: (task: DriverOperationalTask) => void;
+}) {
+  const cards = [
+    { label: 'Current Task', value: summary?.counts.current_task || 0, onClick: summary?.current_task ? () => onOpenTask(summary.current_task!) : undefined },
+    { label: "Today's Tasks", value: summary?.counts.today || 0, onClick: () => onOpenFilter('today') },
+    { label: 'Upcoming Tasks', value: summary?.counts.upcoming || 0, onClick: () => onOpenFilter('upcoming') },
+    { label: 'Pending Acceptance', value: summary?.counts.pending_acceptance || 0, onClick: () => onOpenFilter('pending') },
+    { label: 'Completed Today', value: summary?.counts.completed_today || 0 },
+  ];
+  return <section className="rounded-lg border border-gray-200 bg-white p-6" aria-labelledby="operations-dashboard-title">
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <div>
+        <h2 id="operations-dashboard-title" className="text-lg font-semibold text-gray-900">Operations</h2>
+        <p className="mt-1 text-sm text-gray-500">Dispatch and internal assignments, separate from targets and bookings.</p>
+      </div>
+      <button type="button" disabled={loading} onClick={onRefresh} className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 disabled:opacity-60">
+        {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Route className="h-4 w-4" />}Refresh
+      </button>
+    </div>
+
+    {error && <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
+
+    <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+      {cards.map((card) => <button
+        key={card.label}
+        type="button"
+        disabled={!card.onClick}
+        onClick={card.onClick}
+        className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-left disabled:cursor-default"
+      >
+        <span className="text-2xl font-semibold text-gray-900">{loading && !summary ? '—' : card.value}</span>
+        <span className="mt-1 block text-xs font-medium text-gray-500">{card.label}</span>
+      </button>)}
+    </div>
+
+    {summary?.current_task && <button type="button" onClick={() => onOpenTask(summary.current_task!)} className="mt-5 flex w-full flex-col gap-3 rounded-xl border border-blue-200 bg-blue-50 p-4 text-left sm:flex-row sm:items-center sm:justify-between">
+      <div>
+        <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">Current · {summary.current_task.operation_label}</p>
+        <p className="mt-1 font-semibold text-gray-900">{summary.current_task.reference} · {summary.current_task.title}</p>
+        <p className="mt-1 text-sm text-gray-600">{summary.current_task.origin || 'Origin pending'} → {summary.current_task.destination || 'Destination pending'}</p>
+      </div>
+      <span className="shrink-0 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white">{summary.current_task.current_action.label}</span>
+    </button>}
+
+    {summary?.upcoming_tasks?.length ? <div className="mt-5">
+      <div className="mb-2 flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-gray-900">Next upcoming tasks</h3>
+        <button type="button" onClick={() => onOpenFilter('upcoming')} className="text-xs font-medium text-blue-700">View all</button>
+      </div>
+      <div className="divide-y divide-gray-100 rounded-lg border border-gray-200">
+        {summary.upcoming_tasks.map((task) => <button key={task.task_key} type="button" onClick={() => onOpenTask(task)} className="flex w-full items-center justify-between gap-3 p-3 text-left hover:bg-gray-50">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium text-gray-900">{task.reference} · {task.operation_label}</p>
+            <p className="mt-0.5 truncate text-xs text-gray-500">{formatDateTime(task.schedule)} · {task.origin || 'Origin pending'} → {task.destination || 'Destination pending'}</p>
+          </div>
+          <span className="shrink-0 text-xs font-medium text-blue-700">{task.current_action.label}</span>
+        </button>)}
+      </div>
+    </div> : null}
+  </section>;
 }
 
 function InfoMini({

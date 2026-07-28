@@ -213,7 +213,7 @@ def _get_vehicle_document(vehicle_id: str | ObjectId) -> dict:
 
 def _get_incident_document(incident_id: str | ObjectId) -> dict:
     incident_object_id = _to_object_id(incident_id, "incident_id")
-    document = incidents_collection().find_one({"_id": incident_object_id})
+    document = incidents_collection().find_one({"_id": incident_object_id, "record_scope": {"$ne": "personal"}})
     if not document:
         raise ApiError("Incident not found.", status_code=404)
     return document
@@ -680,9 +680,12 @@ def _build_dashboard(documents: list[dict], *, vehicle_map: dict[str, dict], use
 def list_incidents(*, current_user_id: str, current_role: str) -> dict:
     started_at = perf_counter()
     role = (current_role or "").strip().lower()
-    query = {}
+    query = {"record_scope": {"$ne": "personal"}}
     if role == "driver":
         query["driver_id"] = _to_object_id(current_user_id, "current_user_id")
+    elif role == "fleet_owner":
+        from services.fleet_owner_service import _owner_vehicle_ids
+        query["vehicle_id"] = {"$in": _owner_vehicle_ids(current_user_id)}
     read_collection = incidents_collection().with_options(read_preference=ReadPreference.SECONDARY_PREFERRED)
     query_started_at = perf_counter()
     documents = list(
@@ -745,11 +748,14 @@ def get_incident_by_id(incident_id: str, *, current_user_id: str, current_role: 
     incident_object_id = _to_object_id(incident_id, "incident_id")
     document = incidents_collection().with_options(
         read_preference=ReadPreference.SECONDARY_PREFERRED
-    ).find_one({"_id": incident_object_id}, {"attachments.data_url": 0})
+    ).find_one({"_id": incident_object_id, "record_scope": {"$ne": "personal"}}, {"attachments.data_url": 0})
     if not document:
         raise ApiError("Incident not found.", status_code=404)
     if (current_role or "").strip().lower() == "driver" and str(document.get("driver_id")) != current_user_id:
         raise ApiError("You can only view incidents you reported.", status_code=403)
+    if (current_role or "").strip().lower() == "fleet_owner":
+        from services.fleet_owner_service import require_owned_vehicle
+        require_owned_vehicle(current_user_id, document.get("vehicle_id"))
     return _enrich_incident(document)
 
 
@@ -758,18 +764,24 @@ def get_incident_attachment(incident_id: str, attachment_id: str, *, current_use
     # Evidence payloads are larger than list metadata; use the primary so a lagging/slow
     # secondary cannot make the attachment appear missing or time out independently.
     document = incidents_collection().find_one(
-        {"_id": incident_object_id, "attachments.id": attachment_id},
-        {"driver_id": 1, "attachments.$": 1},
+        {"_id": incident_object_id, "record_scope": {"$ne": "personal"}, "attachments.id": attachment_id},
+        {"driver_id": 1, "vehicle_id": 1, "attachments.$": 1},
     )
     if not document:
-        incident_scope = incidents_collection().find_one({"_id": incident_object_id}, {"driver_id": 1})
+        incident_scope = incidents_collection().find_one({"_id": incident_object_id, "record_scope": {"$ne": "personal"}}, {"driver_id": 1, "vehicle_id": 1})
         if not incident_scope:
             raise ApiError("Incident not found.", status_code=404)
         if (current_role or "").strip().lower() == "driver" and str(incident_scope.get("driver_id")) != current_user_id:
             raise ApiError("You can only view evidence for incidents you reported.", status_code=403)
+        if (current_role or "").strip().lower() == "fleet_owner":
+            from services.fleet_owner_service import require_owned_vehicle
+            require_owned_vehicle(current_user_id, incident_scope.get("vehicle_id"))
         raise ApiError("Evidence file unavailable.", status_code=404)
     if (current_role or "").strip().lower() == "driver" and str(document.get("driver_id")) != current_user_id:
         raise ApiError("You can only view evidence for incidents you reported.", status_code=403)
+    if (current_role or "").strip().lower() == "fleet_owner":
+        from services.fleet_owner_service import require_owned_vehicle
+        require_owned_vehicle(current_user_id, document.get("vehicle_id"))
     attachment = next((item for item in document.get("attachments") or [] if str(item.get("id")) == str(attachment_id)), None)
     if not attachment or (not attachment.get("data_url") and not attachment.get("provider_asset_id")):
         raise ApiError("Evidence file unavailable.", status_code=404)
@@ -807,7 +819,7 @@ def delete_incident_attachment(incident_id: str, attachment_id: str, *, current_
 
 
 def create_incident(payload: dict, *, current_user_id: str, current_role: str) -> dict:
-    if current_role not in {"owner", "admin", "driver"}:
+    if current_role not in {"owner", "admin", "driver", "fleet_owner"}:
         raise ApiError("You do not have permission to report incidents.", status_code=403)
 
     incident_type = _validate_incident_type(payload.get("incident_type"))
@@ -825,6 +837,11 @@ def create_incident(payload: dict, *, current_user_id: str, current_role: str) -
             vehicle_id=payload.get("vehicle_id"),
             driver_id=payload.get("driver_id"),
         )
+    elif current_role == "fleet_owner":
+        from services.fleet_owner_service import require_owned_vehicle
+        vehicle_document = require_owned_vehicle(current_user_id, payload.get("vehicle_id"))
+        vehicle_object_id = vehicle_document["_id"]
+        driver_object_id = vehicle_document.get("assigned_driver_id")
     else:
         driver_object_id = _to_object_id(payload.get("driver_id"), "driver_id")
         vehicle_object_id = _to_object_id(payload.get("vehicle_id"), "vehicle_id")
@@ -869,6 +886,8 @@ def create_incident(payload: dict, *, current_user_id: str, current_role: str) -
         "insurance_claim": _build_vehicle_insurance_snapshot(vehicle_document, incident_type=incident_type),
         "emergency_checklist": EMERGENCY_CHECKLIST,
         "created_by": _to_object_id(current_user_id, "created_by"),
+        "reported_by": _to_object_id(current_user_id, "reported_by"),
+        "reporter_role": current_role,
         "updated_by": _to_object_id(current_user_id, "updated_by"),
         "created_at": timestamp,
         "updated_at": timestamp,

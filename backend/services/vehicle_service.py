@@ -21,7 +21,16 @@ from utils.mongo_indexes import ensure_indexes_for_collection
 from utils.performance import build_cache_key, get_ttl_cached, set_ttl_cached
 
 
-ALLOWED_VEHICLE_TYPES = {"saloon", "suv", "pickup", "van", "truck", "motorcycle"}
+ALLOWED_VEHICLE_TYPES = {
+    "saloon",
+    "suv",
+    "pickup",
+    "van",
+    "truck",
+    "tricycle",
+    "motor",
+    "motorcycle",
+}
 ALLOWED_TRANSMISSIONS = {"manual", "automatic"}
 ALLOWED_FUEL_TYPES = {"petrol", "diesel", "hybrid", "electric"}
 ALLOWED_INSURANCE_TYPES = {"Third Party", "Comprehensive"}
@@ -48,6 +57,7 @@ ALLOWED_VEHICLE_STATUSES = {
     "suspended",
     "retired",
 }
+ALLOWED_OWNERSHIP_TYPES = {"company_owned", "third_party_owned"}
 SENSITIVE_ADMIN_PERMISSION_FIELDS = {
     "purchase_cost": "view_vehicle_investment",
     "shipping_cost": "view_vehicle_investment",
@@ -110,6 +120,10 @@ def vehicle_cost_items_collection():
     return get_collection("vehicle_cost_items")
 
 
+def fleet_owners_collection():
+    return get_collection("fleet_owners")
+
+
 def ownership_history_collection():
     return get_collection("vehicle_ownership_history")
 
@@ -153,6 +167,8 @@ def ensure_vehicle_indexes():
             {"keys": [("assigned_driver_id", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("asset_owner_name", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("asset_owner_type", ASCENDING)], "options": {"sparse": True}},
+            {"keys": [("ownership_type", ASCENDING)]},
+            {"keys": [("fleet_owner_id", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("created_at", DESCENDING)]},
             {"keys": [("updated_at", DESCENDING)]},
             {"keys": [("assigned_driver_id", ASCENDING), ("created_at", DESCENDING)]},
@@ -163,6 +179,15 @@ def ensure_vehicle_indexes():
             {"keys": [("asset_owner_type", ASCENDING), ("status", ASCENDING)], "options": {"sparse": True}},
         ],
         collection_name="vehicles",
+    )
+    ensure_indexes_for_collection(
+        fleet_owners_collection(),
+        [
+            {"keys": [("name", ASCENDING)], "options": {"unique": True}},
+            {"keys": [("account_id", ASCENDING)], "options": {"unique": True, "sparse": True}},
+            {"keys": [("status", ASCENDING)]},
+        ],
+        collection_name="fleet_owners",
     )
     ensure_indexes_for_collection(
         vehicle_cost_items_collection(),
@@ -370,6 +395,8 @@ def _serialize_vehicle_list_item(vehicle_document: dict, assigned_driver_details
         "operating_fleet_name": vehicle_document.get("operating_fleet_name"),
         "asset_owner_type": vehicle_document.get("asset_owner_type"),
         "asset_owner_name": vehicle_document.get("asset_owner_name"),
+        "ownership_type": vehicle_document.get("ownership_type") or "company_owned",
+        "fleet_owner_id": str(vehicle_document.get("fleet_owner_id")) if vehicle_document.get("fleet_owner_id") else None,
         "status": vehicle_document.get("status"),
         "lifecycle_status": availability.get("lifecycle_status"),
         "operational_state": availability.get("operational_state"),
@@ -408,6 +435,8 @@ def _vehicle_detail_projection() -> dict:
         "asset_owner_type": 1,
         "asset_owner_name": 1,
         "asset_owner_contact": 1,
+        "ownership_type": 1,
+        "fleet_owner_id": 1,
         "ownership_notes": 1,
         "ownership_start_date": 1,
         "recovery_basis_type": 1,
@@ -1258,6 +1287,7 @@ def normalize_vehicle_payload(
         "ownership_start_date": normalize_string,
         "recovery_basis_type": normalize_string,
         "original_purchase_date": normalize_string,
+        "ownership_type": normalize_string,
     }
 
     for field_name, normalizer in string_fields.items():
@@ -1324,11 +1354,18 @@ def normalize_vehicle_payload(
         )
 
     if "assigned_driver_id" in payload:
-        assigned_driver_id = validate_reference_id(payload.get("assigned_driver_id"), "assigned_driver_id")
-        normalized_data["assigned_driver_id"] = validate_assigned_driver(
-            assigned_driver_id,
-            vehicle_id=vehicle_id,
+        raise ApiError(
+            "Vehicle allocation must be changed from Vehicle Assignments.",
+            status_code=409,
         )
+
+    if "fleet_owner_id" in payload:
+        fleet_owner_id = validate_reference_id(payload.get("fleet_owner_id"), "fleet_owner_id")
+        if fleet_owner_id and not fleet_owners_collection().find_one(
+            {"_id": fleet_owner_id, "status": {"$ne": "inactive"}}
+        ):
+            raise ApiError("Fleet Owner not found or inactive.", status_code=404)
+        normalized_data["fleet_owner_id"] = fleet_owner_id
 
     required_fields = {
         "registration_number",
@@ -1366,6 +1403,22 @@ def normalize_vehicle_payload(
     if asset_owner_type is not None and asset_owner_type not in ALLOWED_ASSET_OWNER_TYPES:
         raise ApiError("Please choose a valid asset owner type.", status_code=400)
 
+    ownership_type = normalized_data.get("ownership_type")
+    if ownership_type is not None and ownership_type not in ALLOWED_OWNERSHIP_TYPES:
+        raise ApiError(
+            "ownership_type must be company_owned or third_party_owned.",
+            status_code=400,
+        )
+    effective_ownership_type = ownership_type
+    if effective_ownership_type is None and not partial:
+        effective_ownership_type = "company_owned"
+        normalized_data["ownership_type"] = effective_ownership_type
+    effective_fleet_owner_id = normalized_data.get("fleet_owner_id")
+    if effective_ownership_type == "third_party_owned" and not effective_fleet_owner_id:
+        raise ApiError("fleet_owner_id is required for third-party vehicles.", status_code=400)
+    if effective_ownership_type == "company_owned":
+        normalized_data["fleet_owner_id"] = None
+
     recovery_basis_type = normalized_data.get("recovery_basis_type")
     if recovery_basis_type is not None and recovery_basis_type not in ALLOWED_RECOVERY_BASIS_TYPES:
         raise ApiError("Please choose a valid recovery basis type.", status_code=400)
@@ -1401,6 +1454,59 @@ def normalize_vehicle_payload(
         normalized_data["status"] = "available"
 
     return normalized_data
+
+
+def _serialize_fleet_owner(document: dict) -> dict:
+    return {
+        "id": str(document.get("_id")),
+        "name": document.get("name"),
+        "account_id": str(document.get("account_id")) if document.get("account_id") else None,
+        "contact_name": document.get("contact_name"),
+        "phone": document.get("phone"),
+        "email": document.get("email"),
+        "status": document.get("status") or "active",
+        "vehicle_count": vehicles_collection().count_documents({"fleet_owner_id": document.get("_id")}),
+        "created_at": document.get("created_at").isoformat() if document.get("created_at") else None,
+        "updated_at": document.get("updated_at").isoformat() if document.get("updated_at") else None,
+    }
+
+
+def list_fleet_owners(*, current_role: str, current_user_id: str | None = None) -> list[dict]:
+    if current_role in {"owner", "admin"}:
+        query = {}
+    elif current_role == "fleet_owner" and current_user_id and ObjectId.is_valid(current_user_id):
+        query = {"account_id": ObjectId(current_user_id)}
+    else:
+        raise ApiError("You do not have permission to view Fleet Owners.", status_code=403)
+    return [
+        _serialize_fleet_owner(document)
+        for document in fleet_owners_collection().find(query).sort("name", ASCENDING)
+    ]
+
+
+def create_fleet_owner(payload: dict, *, current_user_id: str) -> dict:
+    name = normalize_string(payload.get("name"))
+    if not name:
+        raise ApiError("Fleet Owner name is required.", status_code=400)
+    account_id = validate_reference_id(payload.get("account_id"), "account_id")
+    timestamp = now_utc()
+    document = {
+        "name": name,
+        "account_id": account_id,
+        "contact_name": normalize_string(payload.get("contact_name")),
+        "phone": normalize_string(payload.get("phone")),
+        "email": normalize_string(payload.get("email")),
+        "status": "active",
+        "created_by": ObjectId(current_user_id),
+        "created_at": timestamp,
+        "updated_at": timestamp,
+    }
+    try:
+        result = fleet_owners_collection().insert_one(document)
+    except DuplicateKeyError:
+        raise ApiError("A Fleet Owner with this name or account already exists.", status_code=409) from None
+    document["_id"] = result.inserted_id
+    return _serialize_fleet_owner(document)
 
 
 def ensure_unique_vehicle_fields(data: dict, *, exclude_vehicle_id: ObjectId | None = None):
@@ -1451,7 +1557,7 @@ def list_vehicles(*, current_role: str) -> list[dict]:
     vehicle_documents = list(
         vehicles_collection()
         .find(
-            {},
+            {"usage_type": {"$ne": "personal"}},
             {
                 "registration_number": 1,
                 "vehicle_type": 1,
@@ -1466,6 +1572,11 @@ def list_vehicles(*, current_role: str) -> list[dict]:
                 "roadworthy_expiry": 1,
                 "default_weekly_target": 1,
                 "default_daily_target": 1,
+                "operating_fleet_name": 1,
+                "asset_owner_type": 1,
+                "asset_owner_name": 1,
+                "ownership_type": 1,
+                "fleet_owner_id": 1,
                 "status": 1,
                 "assigned_driver_id": 1,
                 "created_by": 1,
@@ -1502,6 +1613,8 @@ def get_vehicle_by_id(vehicle_id: str, *, current_role: str, include_economics: 
         f"include_economics={include_economics}"
     )
     vehicle = get_vehicle_document_by_id_with_projection(vehicle_id, _vehicle_detail_projection())
+    if vehicle.get("usage_type") == "personal":
+        raise ApiError("Vehicle not found.", status_code=404)
     _apply_vehicle_ownership_defaults(vehicle)
     if vehicle.get("current_odometer") is None:
         vehicle["current_odometer"] = _extract_vehicle_current_odometer(vehicle["_id"])
@@ -1665,6 +1778,16 @@ def update_vehicle_status(vehicle_id: str, status: str, *, current_role: str) ->
         {"_id": vehicle["_id"]},
         {"$set": {"status": status, "updated_at": timestamp}},
     )
+    if vehicle.get("status") != status:
+        from services.fleet_owner_service import notify_linked_owner
+        notify_linked_owner(
+            vehicle["_id"],
+            "availability_change",
+            title="Linked vehicle availability changed",
+            message=f"{vehicle.get('registration_number') or 'A linked vehicle'} changed from {vehicle.get('status') or 'unknown'} to {status}.",
+            priority="medium",
+            reference_id=vehicle["_id"],
+        )
     vehicle["status"] = status
     vehicle["updated_at"] = timestamp
     vehicle["economics"] = _calculate_vehicle_economics(vehicle)

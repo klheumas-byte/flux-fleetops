@@ -23,6 +23,7 @@ ALLOWED_FUEL_STATION_STATUS = {"active", "inactive"}
 ALLOWED_FUEL_LOG_STATUS = {"submitted", "approved", "rejected"}
 ALLOWED_FUEL_TYPES = {"petrol", "diesel", "hybrid", "electric"}
 ALLOWED_ODOMETER_SOURCES = {"manual", "tracker", "gps_trip", "map_estimate", "estimated", "unavailable"}
+ALLOWED_FUEL_PAYMENT_METHODS = {"cash", "card", "company_card", "mobile_money", "fuel_card", "other"}
 
 DEFAULT_FUEL_STATIONS = [
     {"station_name": "Shell", "brand_name": "Shell"},
@@ -63,6 +64,14 @@ def assignments_collection():
     return get_collection("assignments")
 
 
+def dispatch_jobs_collection():
+    return get_collection("dispatch_jobs")
+
+
+def vehicle_movements_collection():
+    return get_collection("vehicle_movements")
+
+
 def ensure_fuel_indexes():
     ensure_indexes_for_collection(
         fuel_stations_collection(),
@@ -80,6 +89,8 @@ def ensure_fuel_indexes():
             {"keys": [("vehicle_id", ASCENDING)]},
             {"keys": [("driver_id", ASCENDING)]},
             {"keys": [("assignment_id", ASCENDING)], "options": {"sparse": True}},
+            {"keys": [("dispatch_job_id", ASCENDING)], "options": {"sparse": True}},
+            {"keys": [("movement_id", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("fuel_station_id", ASCENDING)]},
             {"keys": [("status", ASCENDING)]},
             {"keys": [("fuel_date", DESCENDING)]},
@@ -218,7 +229,7 @@ def _get_assignment_document(assignment_id: str | ObjectId):
 
 
 def _get_fuel_log_document(log_id: str | ObjectId):
-    document = fuel_logs_collection().find_one({"_id": _to_object_id(log_id, "fuel_log_id")})
+    document = fuel_logs_collection().find_one({"_id": _to_object_id(log_id, "fuel_log_id"), "record_scope": {"$ne": "personal"}})
     if not document:
         raise ApiError("Fuel log not found.", status_code=404)
     return document
@@ -280,8 +291,8 @@ def _calculate_abnormal_spending(vehicle_id: ObjectId, station_id: ObjectId, pri
     approved_logs = list(fuel_logs_collection().find({"status": "approved"}))
     avg_price_per_litre = (
         round(
-            sum(log.get("amount", 0) for log in approved_logs)
-            / max(sum(log.get("litres", 0) for log in approved_logs), 1),
+            sum(log.get("amount", 0) or 0 for log in approved_logs)
+            / max(sum(log.get("litres", 0) or 0 for log in approved_logs), 1),
             4,
         )
         if approved_logs
@@ -300,7 +311,7 @@ def _calculate_abnormal_spending(vehicle_id: ObjectId, station_id: ObjectId, pri
 
     if litres > 120 or amount > 2500:
         return True
-    if avg_price_per_litre and price_per_litre > avg_price_per_litre * 1.2:
+    if avg_price_per_litre and price_per_litre is not None and price_per_litre > avg_price_per_litre * 1.2:
         return True
     if avg_vehicle_cost_per_km and cost_per_km is not None and cost_per_km > avg_vehicle_cost_per_km * 1.5:
         return True
@@ -388,7 +399,7 @@ def _enrich_fuel_logs(documents: list[dict]):
 
 
 def list_fuel_stations(current_role: str):
-    query = {}
+    query = {"record_scope": {"$ne": "personal"}}
     if current_role == "driver":
         query["status"] = "active"
     stations = fuel_stations_collection().find(query).sort([("station_name", ASCENDING)])
@@ -469,15 +480,93 @@ def update_fuel_station_status(station_id: str, status: str, current_role: str):
 
 
 def _build_fuel_log_payload(payload: dict, current_user_id: str, current_role: str):
-    if current_role == "driver":
-        assignment = _resolve_driver_submission_context(current_user_id)
-        vehicle_id = _to_object_id(assignment["vehicle_id"], "vehicle_id")
-        driver_id = _to_object_id(assignment["driver_id"], "driver_id")
-        assignment_id = _to_object_id(assignment["assignment_id"], "assignment_id")
+    dispatch_job = None
+    movement_id = None
+    requested_dispatch_job_id = payload.get("dispatch_job_id")
+    if requested_dispatch_job_id:
+        dispatch_object_id = _to_object_id(requested_dispatch_job_id, "dispatch_job_id")
+        dispatch_job = dispatch_jobs_collection().find_one({"_id": dispatch_object_id})
+        if not dispatch_job:
+            raise ApiError("Dispatch job not found.", status_code=404)
+    elif current_role == "driver":
+        driver_object_id = _to_object_id(current_user_id, "current_user_id")
+        dispatch_job = dispatch_jobs_collection().find_one(
+            {"driver_id": driver_object_id, "status": "in_progress"},
+            sort=[("started_at", DESCENDING), ("updated_at", DESCENDING)],
+        )
+
+    if dispatch_job:
+        if dispatch_job.get("status") != "in_progress":
+            raise ApiError("Fuel purchases can only be linked to an active dispatch.", status_code=400)
+        if current_role == "driver" and str(dispatch_job.get("driver_id")) != str(current_user_id):
+            raise ApiError("You do not have permission to add fuel to this dispatch.", status_code=403)
+        vehicle_id = _to_object_id(dispatch_job.get("vehicle_id"), "vehicle_id")
+        driver_id = _to_object_id(dispatch_job.get("driver_id"), "driver_id", required=False)
+        assignment_id = _to_object_id(
+            dispatch_job.get("primary_assignment_id"),
+            "assignment_id",
+            required=False,
+        )
+        linked_movement_id = dispatch_job.get("linked_vehicle_movement_id")
+        movement = None
+        if isinstance(linked_movement_id, ObjectId):
+            movement = vehicle_movements_collection().find_one(
+                {"_id": linked_movement_id},
+                {"_id": 1, "vehicle_id": 1, "driver_id": 1, "dispatch_job_id": 1},
+            )
+        if movement is None:
+            movement = vehicle_movements_collection().find_one(
+                {"dispatch_job_id": dispatch_job["_id"]},
+                {"_id": 1, "vehicle_id": 1, "driver_id": 1, "dispatch_job_id": 1},
+            )
+        if movement:
+            if movement.get("vehicle_id") != vehicle_id or movement.get("dispatch_job_id") != dispatch_job["_id"]:
+                raise ApiError("Dispatch movement does not belong to this fuel log context.", status_code=409)
+            if current_role == "driver" and movement.get("driver_id") != driver_id:
+                raise ApiError("You do not have permission to add fuel to this movement.", status_code=403)
+            movement_id = movement["_id"]
+    elif current_role == "driver":
+        driver_object_id = _to_object_id(current_user_id, "current_user_id")
+        active_movement = vehicle_movements_collection().find_one(
+            {
+                "status": {"$in": ["checked_out", "in_progress"]},
+                "$or": [
+                    {"driver_id": driver_object_id},
+                    {"movement_custodian_id": driver_object_id},
+                ],
+            },
+            {"_id": 1, "vehicle_id": 1, "driver_id": 1, "movement_custodian_id": 1, "assignment_id": 1},
+            sort=[("updated_at", DESCENDING)],
+        )
+        if active_movement:
+            vehicle_id = _to_object_id(active_movement.get("vehicle_id"), "vehicle_id")
+            driver_id = driver_object_id
+            assignment_id = _to_object_id(active_movement.get("assignment_id"), "assignment_id", required=False)
+            movement_id = active_movement["_id"]
+        else:
+            assignment = _resolve_driver_submission_context(current_user_id)
+            vehicle_id = _to_object_id(assignment["vehicle_id"], "vehicle_id")
+            driver_id = _to_object_id(assignment["driver_id"], "driver_id")
+            assignment_id = _to_object_id(assignment["assignment_id"], "assignment_id")
     else:
         vehicle_id = _to_object_id(payload.get("vehicle_id"), "vehicle_id")
         driver_id = _to_object_id(payload.get("driver_id"), "driver_id", required=False)
         assignment_id = _to_object_id(payload.get("assignment_id"), "assignment_id", required=False)
+
+    # Fuel purchased during an active physical journey belongs to that journey.
+    # Dispatch-specific behavior above remains intact, while operational and
+    # maintenance travel no longer produce an unlinked or competing movement.
+    if movement_id is None:
+        active_movement = vehicle_movements_collection().find_one(
+            {"vehicle_id": vehicle_id, "status": {"$in": ["checked_out", "in_progress"]}},
+            {"_id": 1, "driver_id": 1, "movement_custodian_id": 1},
+            sort=[("updated_at", DESCENDING)],
+        )
+        if active_movement:
+            custodian_id = active_movement.get("movement_custodian_id") or active_movement.get("driver_id")
+            if current_role == "driver" and custodian_id not in {None, driver_id}:
+                raise ApiError("You do not have permission to add fuel to this active movement.", status_code=403)
+            movement_id = active_movement["_id"]
 
     vehicle = _get_vehicle_document(vehicle_id)
     if driver_id is not None:
@@ -494,8 +583,14 @@ def _build_fuel_log_payload(payload: dict, current_user_id: str, current_role: s
         raise ApiError("Selected fuel station is inactive.", status_code=400)
 
     fuel_type = _validate_fuel_type(payload.get("fuel_type") or vehicle.get("fuel_type"))
-    litres = _validate_positive_number(payload.get("litres"), "litres")
-    amount = _validate_positive_number(payload.get("amount"), "amount")
+    litres = _validate_positive_number(
+        payload.get("litres"),
+        "litres",
+        required=dispatch_job is None,
+    )
+    amount = _validate_non_negative_number(payload.get("amount"), "amount")
+    if amount is None:
+        raise ApiError("amount is required.", status_code=400)
     odometer_reading = _validate_positive_number(
         payload.get("odometer_reading"), "odometer_reading", required=False
     )
@@ -506,7 +601,7 @@ def _build_fuel_log_payload(payload: dict, current_user_id: str, current_role: s
     if odometer_source not in ALLOWED_ODOMETER_SOURCES:
         raise ApiError("odometer_source is invalid.", status_code=400)
     fuel_date = _normalize_date(payload.get("fuel_date"), "fuel_date")
-    price_per_litre = round(amount / litres, 4)
+    price_per_litre = round(amount / litres, 4) if litres else None
     previous_odometer, distance_since_last_fill, cost_per_km = _calculate_log_metrics(
         vehicle["_id"],
         fuel_date,
@@ -518,23 +613,51 @@ def _build_fuel_log_payload(payload: dict, current_user_id: str, current_role: s
         station["_id"],
         price_per_litre,
         amount,
-        litres,
+        litres or 0,
         cost_per_km,
     )
+
+    payment_method = str(payload.get("payment_method") or "other").strip().lower()
+    if payment_method not in ALLOWED_FUEL_PAYMENT_METHODS:
+        raise ApiError(
+            "payment_method must be one of: cash, card, company_card, mobile_money, fuel_card, other.",
+            status_code=400,
+        )
+    payment_responsibility = str(
+        payload.get("payment_responsibility")
+        or ("company_paid" if payment_method in {"company_card", "fuel_card"} else "driver_paid_reimbursable")
+    ).strip().lower()
+    if payment_responsibility not in {"company_paid", "driver_paid_reimbursable", "driver_paid_personal"}:
+        raise ApiError("payment_responsibility is invalid.", status_code=400)
+    fuel_recorded_at = now_utc()
+    if payload.get("fuel_recorded_at"):
+        try:
+            fuel_recorded_at = datetime.fromisoformat(str(payload["fuel_recorded_at"]).replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ApiError("fuel_recorded_at must be a valid date and time.", status_code=400) from exc
+
+    normalized_fuel_level, fuel_level_warning = normalize_fuel_level_eighths(payload.get("fuel_level"))
+    if payload.get("fuel_level") not in (None, "") and normalized_fuel_level is None:
+        raise ApiError(fuel_level_warning or "fuel_level is invalid.", status_code=400)
 
     return {
         "vehicle_id": vehicle["_id"],
         "driver_id": driver_id,
         "assignment_id": assignment_id,
+        "dispatch_job_id": dispatch_job.get("_id") if dispatch_job else None,
+        "movement_id": movement_id,
         "fuel_station_id": station["_id"],
         "fuel_date": fuel_date,
         "fuel_type": fuel_type,
         "litres": litres,
         "amount": amount,
         "price_per_litre": price_per_litre,
+        "payment_method": payment_method,
+        "payment_responsibility": payment_responsibility,
+        "fuel_recorded_at": fuel_recorded_at,
         "odometer_reading": odometer_reading,
         "odometer_source": odometer_source,
-        "fuel_level": normalize_fuel_level_eighths(payload.get("fuel_level"))[0],
+        "fuel_level": normalized_fuel_level,
         "receipt_image": _normalize_receipt(payload.get("receipt_image")),
         "notes": (payload.get("notes") or "").strip() or None,
         "status": "submitted",
@@ -560,6 +683,10 @@ def create_fuel_log(payload: dict, current_user_id: str, current_role: str):
 
     result = fuel_logs_collection().insert_one(document)
     document["_id"] = result.inserted_id
+    if document.get("dispatch_job_id"):
+        from services.dispatch_fuel_service import refresh_dispatch_fuel_summary
+
+        refresh_dispatch_fuel_summary(document["dispatch_job_id"])
 
     notify_roles(
         ["owner", "admin"],
@@ -586,8 +713,8 @@ def _can_view_fuel_log(document: dict, current_user_id: str, current_role: str):
 
 def _build_fuel_log_analytics(documents: list[dict]):
     approved_logs = [log for log in documents if log.get("status") == "approved"]
-    total_fuel_spend = round(sum(log.get("amount", 0) for log in approved_logs), 2)
-    total_litres = round(sum(log.get("litres", 0) for log in approved_logs), 2)
+    total_fuel_spend = round(sum(log.get("amount", 0) or 0 for log in approved_logs), 2)
+    total_litres = round(sum(log.get("litres", 0) or 0 for log in approved_logs), 2)
     average_price_per_litre = round(total_fuel_spend / total_litres, 4) if total_litres else 0
 
     station_totals = {}
@@ -683,6 +810,10 @@ def approve_fuel_log(log_id: str, current_user_id: str, current_role: str):
     }
     fuel_logs_collection().update_one({"_id": document["_id"]}, {"$set": update_fields})
     document.update(update_fields)
+    if document.get("dispatch_job_id"):
+        from services.dispatch_fuel_service import refresh_dispatch_fuel_summary
+
+        refresh_dispatch_fuel_summary(document["dispatch_job_id"])
     resolve_action_notifications("fuel_log", document["_id"], action_type="review_fuel_log", completed_by=current_user_id)
 
     vehicles_collection().update_one(
@@ -741,6 +872,10 @@ def reject_fuel_log(log_id: str, rejection_reason: str, current_user_id: str, cu
     }
     fuel_logs_collection().update_one({"_id": document["_id"]}, {"$set": update_fields})
     document.update(update_fields)
+    if document.get("dispatch_job_id"):
+        from services.dispatch_fuel_service import refresh_dispatch_fuel_summary
+
+        refresh_dispatch_fuel_summary(document["dispatch_job_id"])
     resolve_action_notifications("fuel_log", document["_id"], action_type="review_fuel_log", resolution="cancelled", completed_by=current_user_id)
 
     submitted_by = document.get("submitted_by")

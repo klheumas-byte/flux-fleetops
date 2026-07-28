@@ -9,6 +9,7 @@ from services.auth_service import (
     create_user,
     get_user_by_id,
     revoke_token,
+    change_own_password,
 )
 from utils.decorators import login_required
 from utils.api_error import ApiError
@@ -84,6 +85,16 @@ def me():
             status_code=503,
             public_message="Authentication is temporarily unavailable. Please try again.",
         )
+
+
+@auth_bp.post("/change-password")
+@login_required
+def change_password():
+    payload = request.get_json(silent=True) or {}
+    if payload.get("new_password") != payload.get("confirm_password"):
+        return error_response("Password confirmation does not match.", status_code=400)
+    user = change_own_password(get_jwt_identity(), payload.get("current_password"), payload.get("new_password"))
+    return success_response(data={"user": user}, message="Password changed successfully.")
 
 
 @auth_bp.post("/logout")

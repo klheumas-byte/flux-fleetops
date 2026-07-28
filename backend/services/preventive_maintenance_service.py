@@ -1920,9 +1920,12 @@ def _validate_compliance_record_payload(payload: dict, partial: bool = False, ex
 
 
 def create_compliance_record(payload: dict, current_user_id: str, current_role: str):
-    if current_role not in {"owner", "admin"}:
+    if current_role not in {"owner", "admin", "fleet_owner"}:
         raise ApiError("You do not have permission to create compliance records.", status_code=403)
     vehicle_document, update_fields = _validate_compliance_record_payload(payload, partial=False)
+    if current_role == "fleet_owner":
+        from services.fleet_owner_service import require_owned_vehicle
+        require_owned_vehicle(current_user_id, vehicle_document["_id"])
     del vehicle_document
     timestamp = now_utc()
     document = {
@@ -1942,12 +1945,18 @@ def create_compliance_record(payload: dict, current_user_id: str, current_role: 
 
 
 def list_compliance_records(current_user_id: str, current_role: str, vehicle_id: str | None = None):
-    query = {}
+    query = {"record_scope": {"$ne": "personal"}}
     if current_role == "driver":
         assigned_vehicle_id = _resolve_driver_vehicle_for_driver(current_user_id)
         if assigned_vehicle_id is None:
             return []
         query["vehicle_id"] = assigned_vehicle_id
+    elif current_role == "fleet_owner":
+        from services.fleet_owner_service import _owner_vehicle_ids, require_owned_vehicle
+        if vehicle_id:
+            query["vehicle_id"] = require_owned_vehicle(current_user_id, vehicle_id)["_id"]
+        else:
+            query["vehicle_id"] = {"$in": _owner_vehicle_ids(current_user_id)}
     elif vehicle_id:
         query["vehicle_id"] = _to_object_id(vehicle_id, "vehicle_id")
     documents = list(
@@ -2051,13 +2060,15 @@ def get_driver_preventive_maintenance_snapshot(current_user_id: str) -> dict:
 
 
 def update_compliance_record(record_id: str, payload: dict, current_user_id: str, current_role: str):
-    if current_role not in {"owner", "admin"}:
+    if current_role not in {"owner", "admin", "fleet_owner"}:
         raise ApiError("You do not have permission to update compliance records.", status_code=403)
-    del current_user_id
     record_object_id = _to_object_id(record_id, "compliance_record_id")
-    document = compliance_records_collection().find_one({"_id": record_object_id})
+    document = compliance_records_collection().find_one({"_id": record_object_id, "record_scope": {"$ne": "personal"}})
     if not document:
         raise ApiError("Compliance record not found.", status_code=404)
+    if current_role == "fleet_owner":
+        from services.fleet_owner_service import require_owned_vehicle
+        require_owned_vehicle(current_user_id, document.get("vehicle_id"))
     vehicle_document, update_fields = _validate_compliance_record_payload(payload, partial=True, existing_document=document)
     del vehicle_document
     if not update_fields:
@@ -2071,12 +2082,15 @@ def update_compliance_record(record_id: str, payload: dict, current_user_id: str
 
 
 def renew_compliance_record(record_id: str, payload: dict, current_user_id: str, current_role: str):
-    if current_role not in {"owner", "admin"}:
+    if current_role not in {"owner", "admin", "fleet_owner"}:
         raise ApiError("You do not have permission to renew compliance records.", status_code=403)
     record_object_id = _to_object_id(record_id, "compliance_record_id")
-    document = compliance_records_collection().find_one({"_id": record_object_id})
+    document = compliance_records_collection().find_one({"_id": record_object_id, "record_scope": {"$ne": "personal"}})
     if not document:
         raise ApiError("Compliance record not found.", status_code=404)
+    if current_role == "fleet_owner":
+        from services.fleet_owner_service import require_owned_vehicle
+        require_owned_vehicle(current_user_id, document.get("vehicle_id"))
 
     issue_date = _parse_date(payload.get("issue_date"), "issue_date", required=True)
     expiry_date = _parse_date(payload.get("expiry_date"), "expiry_date", required=True)

@@ -190,7 +190,7 @@ def _enrich_expense(expense_document: dict) -> dict:
 
 
 def list_expenses(current_user_id: str, current_role: str) -> list[dict]:
-    query = {}
+    query = {"record_scope": {"$ne": "personal"}}
     if current_role == "driver":
         query["requested_by"] = _to_object_id(current_user_id, "current_user_id")
 
@@ -200,7 +200,7 @@ def list_expenses(current_user_id: str, current_role: str) -> list[dict]:
 
 def get_expense_by_id(expense_id: str, current_user_id: str, current_role: str) -> dict:
     expense_object_id = _to_object_id(expense_id, "expense_id")
-    document = expenses_collection().find_one({"_id": expense_object_id})
+    document = expenses_collection().find_one({"_id": expense_object_id, "record_scope": {"$ne": "personal"}})
     if not document:
         raise ApiError("Expense not found.", status_code=404)
 
@@ -292,7 +292,7 @@ def create_expense(payload: dict, current_user_id: str, current_role: str) -> di
 
 def approve_expense(expense_id: str, current_user_id: str) -> dict:
     expense_object_id = _to_object_id(expense_id, "expense_id")
-    document = expenses_collection().find_one({"_id": expense_object_id})
+    document = expenses_collection().find_one({"_id": expense_object_id, "record_scope": {"$ne": "personal"}})
     if not document:
         raise ApiError("Expense not found.", status_code=404)
     if document.get("status") == "approved":
@@ -319,7 +319,7 @@ def approve_expense(expense_id: str, current_user_id: str) -> dict:
 
 def reject_expense(expense_id: str, current_user_id: str, rejection_reason: str | None) -> dict:
     expense_object_id = _to_object_id(expense_id, "expense_id")
-    document = expenses_collection().find_one({"_id": expense_object_id})
+    document = expenses_collection().find_one({"_id": expense_object_id, "record_scope": {"$ne": "personal"}})
     if not document:
         raise ApiError("Expense not found.", status_code=404)
     if document.get("status") == "paid":
@@ -348,7 +348,7 @@ def reject_expense(expense_id: str, current_user_id: str, rejection_reason: str 
 
 def mark_expense_paid(expense_id: str, current_user_id: str) -> dict:
     expense_object_id = _to_object_id(expense_id, "expense_id")
-    document = expenses_collection().find_one({"_id": expense_object_id})
+    document = expenses_collection().find_one({"_id": expense_object_id, "record_scope": {"$ne": "personal"}})
     if not document:
         raise ApiError("Expense not found.", status_code=404)
     if document.get("status") == "paid":

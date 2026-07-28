@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from bson import ObjectId
 from pymongo import ASCENDING, DESCENDING
+from pymongo.errors import DuplicateKeyError
 
 from extensions import get_collection
 from models.assignment import serialize_assignment
@@ -25,6 +26,12 @@ from utils.performance import build_cache_key, get_ttl_cached, log_db_duration, 
 
 PLANNER_ROLES = {"owner", "admin", "dispatcher", "customer_service"}
 OWNER_ADMIN_ROLES = {"owner", "admin"}
+PLANNER_OPERATION_TYPES = {
+    "dispatch",
+    "supplier_pickup",
+    "stock_transfer",
+    "operational_request",
+}
 JOB_STATUSES = {
     "draft",
     "reserved",
@@ -99,6 +106,7 @@ LIST_JOB_PROJECTION = {
     "dispatcher_id": 1,
     "primary_assignment_id": 1,
     "linked_vehicle_movement_id": 1,
+    "linked_waybill_id": 1,
     "pickup": 1,
     "destination": 1,
     "stops": 1,
@@ -120,7 +128,14 @@ LIST_JOB_PROJECTION = {
 }
 DETAIL_JOB_PROJECTION = None
 USER_SUMMARY_PROJECTION = {"full_name": 1, "email": 1, "phone": 1, "role": 1, "status": 1, "driver_profile": 1}
-VEHICLE_SUMMARY_PROJECTION = {"registration_number": 1, "vehicle_type": 1, "make": 1, "model": 1, "status": 1}
+VEHICLE_SUMMARY_PROJECTION = {
+    "registration_number": 1,
+    "vehicle_type": 1,
+    "make": 1,
+    "model": 1,
+    "status": 1,
+    "tank_capacity_litres": 1,
+}
 ASSIGNMENT_SUMMARY_PROJECTION = {
     "driver_id": 1,
     "vehicle_id": 1,
@@ -173,6 +188,14 @@ def notifications_collection():
 
 def maintenance_jobs_collection():
     return get_collection("maintenance_jobs")
+
+
+def stock_transfers_collection():
+    return get_collection("stock_transfers")
+
+
+def operational_requests_collection():
+    return get_collection("vehicle_operation_requests")
 
 
 def ensure_dispatch_planner_indexes():
@@ -427,7 +450,7 @@ def _batch_enrich_dispatch_jobs(documents: list[dict]) -> list[dict]:
     user_lookup = _build_user_lookup(documents)
     vehicle_lookup = _build_vehicle_lookup(documents)
     assignment_lookup = _build_assignment_lookup(documents)
-    return [
+    payloads = [
         _enrich_dispatch_job(
             document,
             user_lookup=user_lookup,
@@ -436,12 +459,100 @@ def _batch_enrich_dispatch_jobs(documents: list[dict]) -> list[dict]:
         )
         for document in documents
     ]
+    movement_ids = {
+        document.get("linked_vehicle_movement_id")
+        for document in documents
+        if isinstance(document.get("linked_vehicle_movement_id"), ObjectId)
+    }
+    job_ids = {document["_id"] for document in documents}
+    movement_documents = list(
+        vehicle_movements_collection().find(
+            {
+                "$or": [
+                    {"_id": {"$in": list(movement_ids)}},
+                    {"dispatch_job_id": {"$in": list(job_ids)}},
+                ]
+            },
+            {"opening_fuel_photo": 0},
+        )
+    )
+    movement_by_job = {
+        movement.get("dispatch_job_id"): movement
+        for movement in movement_documents
+        if isinstance(movement.get("dispatch_job_id"), ObjectId)
+    }
+    from services.dispatch_fuel_service import build_dispatch_fuel_summary
+
+    for document, payload in zip(documents, payloads):
+        movement = movement_by_job.get(document["_id"])
+        vehicle = vehicle_lookup.get(document.get("vehicle_id"))
+        payload["fuel_accountability"] = build_dispatch_fuel_summary(movement, vehicle=vehicle)
+    return payloads
 
 
 def _serialize_request_list_item(document: dict) -> dict:
     payload = serialize_dispatch_request(document)
+    payload["planner_operation_type"] = "dispatch"
+    payload["planner_source_id"] = str(document["_id"])
     payload["stops_count"] = len(document.get("stops") or [])
     return payload
+
+
+def _serialize_operation_request_item(document: dict, operation_type: str) -> dict:
+    if operation_type in {"supplier_pickup", "stock_transfer"}:
+        supplier = document.get("supplier") if isinstance(document.get("supplier"), dict) else {}
+        origin = (
+            supplier.get("pickup_address") or document.get("sending_location")
+            if operation_type == "supplier_pickup"
+            else document.get("sending_location")
+        )
+        title = (
+            supplier.get("supplier_name") or "Supplier Pickup"
+            if operation_type == "supplier_pickup"
+            else "Stock Transfer"
+        )
+        return {
+            "id": str(document["_id"]),
+            "planner_source_id": str(document["_id"]),
+            "planner_operation_type": operation_type,
+            "request_id": document.get("transfer_id"),
+            "reference": document.get("transfer_id"),
+            "title": title,
+            "customer_name": title,
+            "pickup_location": origin,
+            "destination": document.get("receiving_location"),
+            "status": document.get("status"),
+            "planning_status": "unplanned" if document.get("status") == "approved" else document.get("status"),
+            "scheduled_start_time": document.get("scheduled_at"),
+            "expected_return_time": None,
+            "vehicle_id": str(document["vehicle_id"]) if document.get("vehicle_id") else None,
+            "driver_id": str(document["driver_id"]) if document.get("driver_id") else None,
+            "linked_vehicle_movement_id": str(document["linked_vehicle_movement_id"]) if document.get("linked_vehicle_movement_id") else None,
+            "urgency": document.get("priority") or "normal",
+            "created_at": document.get("created_at"),
+            "updated_at": document.get("updated_at"),
+        }
+    return {
+        "id": str(document["_id"]),
+        "planner_source_id": str(document["_id"]),
+        "planner_operation_type": "operational_request",
+        "request_id": document.get("request_id"),
+        "reference": document.get("request_id"),
+        "title": document.get("title") or document.get("purpose") or "Operational Request",
+        "customer_name": document.get("business_unit") or "Internal Operations",
+        "pickup_location": document.get("origin"),
+        "destination": document.get("destination"),
+        "status": document.get("status"),
+        "planning_status": "unplanned" if document.get("status") == "approved" else document.get("status"),
+        "scheduled_start_time": document.get("planned_departure_at"),
+        "expected_return_time": document.get("expected_return_at"),
+        "vehicle_id": str(document["vehicle_id"]) if document.get("vehicle_id") else None,
+        "driver_id": str(document["driver_id"]) if document.get("driver_id") else None,
+        "linked_vehicle_movement_id": str(document["linked_vehicle_movement_id"]) if document.get("linked_vehicle_movement_id") else None,
+        "urgency": document.get("priority") or "normal",
+        "created_at": document.get("created_at"),
+        "updated_at": document.get("updated_at"),
+    }
 
 
 def _generate_dispatch_job_id() -> str:
@@ -599,7 +710,7 @@ def _normalize_planning_payload(payload: dict, *, partial: bool = False) -> dict
         normalized["quantity"] = _normalize_text(payload.get("quantity"))
     if "weight_category" in payload or not partial:
         normalized["weight_category"] = _normalize_text(payload.get("weight_category"))
-    boolean_fields = ("fragile", "refrigerated", "hazardous")
+    boolean_fields = ("fragile", "refrigerated", "hazardous", "restriction_acknowledged")
     for field_name in boolean_fields:
         if field_name in payload or not partial:
             normalized[field_name] = bool(payload.get(field_name)) if payload.get(field_name) is not None else False
@@ -667,7 +778,7 @@ def _build_job_overlap_query(start_time: datetime, end_time: datetime) -> dict:
     }
 
 
-def _vehicle_conflicts(*, vehicle_id: ObjectId, start_time: datetime, end_time: datetime, exclude_job_id: ObjectId | None = None) -> list[str]:
+def _vehicle_conflicts(*, vehicle_id: ObjectId, start_time: datetime, end_time: datetime, exclude_job_id: ObjectId | None = None, exclude_movement_id: ObjectId | None = None) -> list[str]:
     conflicts: list[str] = []
     availability = resolve_vehicle_availability(vehicle_id)
     conflicts.extend(
@@ -689,26 +800,20 @@ def _vehicle_conflicts(*, vehicle_id: ObjectId, start_time: datetime, end_time: 
         "vehicle_id": vehicle_id,
         "status": {"$in": sorted(MOVEMENT_BLOCKING_STATUSES)},
     }
+    if exclude_movement_id:
+        movement_query["_id"] = {"$ne": exclude_movement_id}
     if vehicle_movements_collection().find_one(movement_query, {"_id": 1, "movement_type": 1}) and not any("active vehicle movement" in item.lower() for item in conflicts):
         conflicts.append("Vehicle already has an active movement and is not available for dispatch planning.")
-
-    maintenance_query = {
-        "vehicle_id": vehicle_id,
-        "status": {"$in": sorted(MAINTENANCE_BLOCKING_STATUSES)},
-    }
-    maintenance_job = maintenance_jobs_collection().find_one(maintenance_query, {"status": 1})
-    if maintenance_job and not any("active maintenance job" in item.lower() for item in conflicts):
-        conflicts.append("Vehicle is under maintenance or workshop handling and cannot be assigned.")
 
     vehicle = vehicles_collection().find_one({"_id": vehicle_id}, {"status": 1})
     if not vehicle:
         conflicts.append("Vehicle not found.")
-    elif (vehicle.get("status") or "").strip().lower() not in {"available"} and not conflicts:
+    elif (vehicle.get("status") or "").strip().lower() not in {"available", "assigned", "maintenance"} and not conflicts:
         conflicts.append(f"Vehicle is currently marked as {vehicle.get('status') or 'unavailable'}.")
     return conflicts
 
 
-def _driver_conflicts(*, driver_id: ObjectId, start_time: datetime, end_time: datetime, exclude_job_id: ObjectId | None = None) -> list[str]:
+def _driver_conflicts(*, driver_id: ObjectId, start_time: datetime, end_time: datetime, exclude_job_id: ObjectId | None = None, exclude_movement_id: ObjectId | None = None) -> list[str]:
     conflicts: list[str] = []
     reservation_query = {
         "reservation_type": "driver",
@@ -725,6 +830,8 @@ def _driver_conflicts(*, driver_id: ObjectId, start_time: datetime, end_time: da
         "driver_id": driver_id,
         "status": {"$in": sorted(MOVEMENT_BLOCKING_STATUSES)},
     }
+    if exclude_movement_id:
+        movement_query["_id"] = {"$ne": exclude_movement_id}
     if vehicle_movements_collection().find_one(movement_query, {"_id": 1}):
         conflicts.append("Driver is already on another vehicle movement and is not available.")
 
@@ -760,21 +867,27 @@ def detect_dispatch_conflicts(
     scheduled_start_time,
     expected_return_time,
     exclude_job_id: str | None = None,
+    exclude_movement_id: str | None = None,
 ) -> dict:
     start_time = _parse_datetime(scheduled_start_time, "scheduled_start_time", required=True)
     end_time = _parse_datetime(expected_return_time, "expected_return_time", required=True)
     if end_time <= start_time:
         raise ApiError("expected_return_time must be after scheduled_start_time.", status_code=400)
     exclude_job_object_id = _to_object_id(exclude_job_id, "exclude_job_id", required=False) if exclude_job_id else None
+    exclude_movement_object_id = _to_object_id(exclude_movement_id, "exclude_movement_id", required=False) if exclude_movement_id else None
 
     vehicle_conflicts = []
+    vehicle_restrictions = []
     driver_conflicts = []
     if vehicle_id:
+        selected_availability = resolve_vehicle_availability(_to_object_id(vehicle_id, "vehicle_id"))
+        vehicle_restrictions = selected_availability.get("active_restrictions", [])
         vehicle_conflicts = _vehicle_conflicts(
             vehicle_id=_to_object_id(vehicle_id, "vehicle_id"),
             start_time=start_time,
             end_time=end_time,
             exclude_job_id=exclude_job_object_id,
+            exclude_movement_id=exclude_movement_object_id,
         )
     if driver_id:
         driver_conflicts = _driver_conflicts(
@@ -782,11 +895,14 @@ def detect_dispatch_conflicts(
             start_time=start_time,
             end_time=end_time,
             exclude_job_id=exclude_job_object_id,
+            exclude_movement_id=exclude_movement_object_id,
         )
     return {
         "has_conflicts": bool(vehicle_conflicts or driver_conflicts),
         "vehicle_conflicts": vehicle_conflicts,
         "driver_conflicts": driver_conflicts,
+        "vehicle_restrictions": vehicle_restrictions,
+        "restriction_acknowledgement_required": bool(vehicle_restrictions),
     }
 
 
@@ -798,9 +914,22 @@ def list_planner_requests(
     search_query: str | None = None,
     planning_status: str | None = None,
     urgency: str | None = None,
+    operation_type: str | None = None,
 ) -> dict:
     normalized_role = _normalize_role(current_role) or current_role
     _assert_planner_role(normalized_role)
+    normalized_operation_type = (_normalize_text(operation_type) or "dispatch").lower()
+    if normalized_operation_type not in {*PLANNER_OPERATION_TYPES, "all"}:
+        raise ApiError("Invalid planner operation_type.", status_code=400)
+    if normalized_operation_type != "dispatch":
+        return _list_shared_operation_requests(
+            operation_type=normalized_operation_type,
+            page=page,
+            page_size=page_size,
+            search_query=search_query,
+            planning_status=planning_status,
+            urgency=urgency,
+        )
     query = {"status": "approved"}
     if planning_status:
         query["planning_status"] = planning_status
@@ -1079,112 +1208,173 @@ def _consume_reservations(job_document: dict):
 
 
 def _ensure_linked_vehicle_movement(job_document: dict, *, current_user_id: str) -> ObjectId:
-    linked_movement_id = job_document.get("linked_vehicle_movement_id")
+    from services.movement_source_service import ensure_dispatch_movement
+
     timestamp = now_utc()
-    if isinstance(linked_movement_id, ObjectId):
-        movement_document = vehicle_movements_collection().find_one({"_id": linked_movement_id})
-        if movement_document:
-            update_fields = {
-                "dispatch_job_id": job_document["_id"],
-                "dispatch_request_id": job_document.get("dispatch_request_id"),
-                "reservation_id": job_document.get("vehicle_reservation_id"),
-                "driver_id": job_document.get("driver_id"),
-                "assignment_id": job_document.get("primary_assignment_id"),
-                "primary_assignment_id": job_document.get("primary_assignment_id"),
-                "requested_departure_time": job_document.get("scheduled_start_time"),
-                "actual_departure_at": movement_document.get("actual_departure_at") or job_document.get("actual_departure_at") or job_document.get("started_at") or timestamp,
-                "departure_time": movement_document.get("actual_departure_at") or movement_document.get("departure_time") or job_document.get("actual_departure_at") or job_document.get("started_at") or timestamp,
-                "expected_return_time": job_document.get("expected_return_time"),
-                "origin": job_document.get("pickup"),
-                "destination": job_document.get("destination"),
-                "purpose": job_document.get("dispatch_job_id"),
-                "notes": job_document.get("dispatch_instructions"),
-                "status": "in_progress",
-                "checked_out_by": movement_document.get("checked_out_by") or _to_object_id(current_user_id, "current_user_id"),
-                "checked_out_at": movement_document.get("checked_out_at") or timestamp,
-                "updated_at": timestamp,
-            }
-            vehicle_movements_collection().update_one({"_id": movement_document["_id"]}, {"$set": update_fields})
-            return movement_document["_id"]
-
-    existing_movement = vehicle_movements_collection().find_one({"dispatch_job_id": job_document["_id"]})
-    if existing_movement:
-        update_fields = {
-            "dispatch_job_id": job_document["_id"],
-            "dispatch_request_id": job_document.get("dispatch_request_id"),
-            "reservation_id": job_document.get("vehicle_reservation_id"),
-            "driver_id": job_document.get("driver_id"),
-            "assignment_id": job_document.get("primary_assignment_id"),
-            "primary_assignment_id": job_document.get("primary_assignment_id"),
-            "requested_departure_time": job_document.get("scheduled_start_time"),
-            "actual_departure_at": existing_movement.get("actual_departure_at") or job_document.get("actual_departure_at") or job_document.get("started_at") or timestamp,
-            "departure_time": existing_movement.get("actual_departure_at") or existing_movement.get("departure_time") or job_document.get("actual_departure_at") or job_document.get("started_at") or timestamp,
-            "expected_return_time": job_document.get("expected_return_time"),
-            "origin": job_document.get("pickup"),
-            "destination": job_document.get("destination"),
-            "purpose": job_document.get("dispatch_job_id"),
-            "notes": job_document.get("dispatch_instructions"),
-            "status": "in_progress",
-            "checked_out_by": existing_movement.get("checked_out_by") or _to_object_id(current_user_id, "current_user_id"),
-            "checked_out_at": existing_movement.get("checked_out_at") or timestamp,
-            "updated_at": timestamp,
-        }
-        vehicle_movements_collection().update_one({"_id": existing_movement["_id"]}, {"$set": update_fields})
-        dispatch_jobs_collection().update_one(
-            {"_id": job_document["_id"]},
-            {"$set": {"linked_vehicle_movement_id": existing_movement["_id"], "updated_at": timestamp}},
-        )
-        return existing_movement["_id"]
-
-    movement_document = {
-        "movement_id": f"VM-{timestamp.strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:6].upper()}",
-        "vehicle_id": job_document.get("vehicle_id"),
-        "driver_id": job_document.get("driver_id"),
-        "assignment_id": job_document.get("primary_assignment_id"),
-        "primary_assignment_id": job_document.get("primary_assignment_id"),
+    result = ensure_dispatch_movement(
+        job_document,
+        current_user_id=current_user_id,
+        initial_status="in_progress",
+        departure_at=job_document.get("actual_departure_at") or job_document.get("started_at") or timestamp,
+    )
+    movement_document = result["movement"]
+    departure_at = (
+        movement_document.get("actual_departure_at")
+        or movement_document.get("departure_time")
+        or job_document.get("actual_departure_at")
+        or job_document.get("started_at")
+        or timestamp
+    )
+    update_fields = {
         "dispatch_job_id": job_document["_id"],
         "dispatch_request_id": job_document.get("dispatch_request_id"),
         "reservation_id": job_document.get("vehicle_reservation_id"),
-        "movement_type": "customer_dispatch",
-        "status": "in_progress",
+        "driver_id": job_document.get("driver_id"),
+        "assignment_id": job_document.get("primary_assignment_id"),
+        "primary_assignment_id": job_document.get("primary_assignment_id"),
         "requested_departure_time": job_document.get("scheduled_start_time"),
-        "actual_departure_at": job_document.get("actual_departure_at") or job_document.get("started_at") or timestamp,
-        "departure_time": job_document.get("actual_departure_at") or job_document.get("started_at") or timestamp,
+        "actual_departure_at": departure_at,
+        "departure_time": departure_at,
         "expected_return_time": job_document.get("expected_return_time"),
-        "actual_return_at": None,
-        "actual_return_time": None,
         "origin": job_document.get("pickup"),
         "destination": job_document.get("destination"),
         "purpose": job_document.get("dispatch_job_id"),
-        "opening_odometer": None,
-        "closing_odometer": None,
-        "opening_fuel_level": None,
-        "closing_fuel_level": None,
-        "delivery_status": "pending",
-        "delivered_at": None,
-        "delivery_note": None,
-        "delivered_by": None,
         "notes": job_document.get("dispatch_instructions"),
-        "cancellation_reason": None,
-        "approved_by": None,
-        "approved_at": None,
-        "checked_out_by": _to_object_id(current_user_id, "current_user_id"),
-        "checked_out_at": timestamp,
-        "returned_by": None,
-        "returned_at": None,
-        "closed_by": None,
-        "closed_at": None,
-        "return_checklist": None,
-        "created_by": _to_object_id(current_user_id, "current_user_id"),
-        "created_at": timestamp,
+        "status": "in_progress",
+        "checked_out_by": movement_document.get("checked_out_by") or _to_object_id(current_user_id, "current_user_id"),
+        "checked_out_at": movement_document.get("checked_out_at") or timestamp,
         "updated_at": timestamp,
     }
-    movement_id = vehicle_movements_collection().insert_one(movement_document).inserted_id
-    dispatch_jobs_collection().update_one(
-        {"_id": job_document["_id"]},
-        {"$set": {"linked_vehicle_movement_id": movement_id, "updated_at": timestamp}},
+    vehicle_movements_collection().update_one(
+        {"_id": movement_document["_id"]},
+        {"$set": update_fields},
     )
-    return movement_id
+    movement_document.update(update_fields)
+    return movement_document["_id"]
+
+
+def _list_shared_operation_requests(
+    *,
+    operation_type: str,
+    page: int,
+    page_size: int,
+    search_query: str | None,
+    planning_status: str | None,
+    urgency: str | None,
+) -> dict:
+    records: list[dict] = []
+    if operation_type in {"all", "supplier_pickup", "stock_transfer"}:
+        transfer_query: dict = {"status": {"$in": ["approved", "scheduled"]}}
+        if operation_type == "supplier_pickup":
+            transfer_query["operation_type"] = "supplier_pickup"
+        elif operation_type == "stock_transfer":
+            transfer_query["operation_type"] = {"$in": [None, "stock_transfer"]}
+        for document in stock_transfers_collection().find(transfer_query):
+            source_type = (
+                "supplier_pickup"
+                if document.get("operation_type") == "supplier_pickup"
+                else "stock_transfer"
+            )
+            records.append(_serialize_operation_request_item(document, source_type))
+    if operation_type in {"all", "operational_request"}:
+        records.extend(
+            _serialize_operation_request_item(document, "operational_request")
+            for document in operational_requests_collection().find({"status": {"$in": ["approved", "scheduled"]}})
+        )
+    if operation_type == "all":
+        records.extend(
+            _serialize_request_list_item(document)
+            for document in dispatch_requests_collection().find({"status": "approved"})
+        )
+    if planning_status:
+        records = [item for item in records if item.get("planning_status") == planning_status]
+    if urgency:
+        records = [item for item in records if item.get("urgency") == urgency]
+    search = (_normalize_text(search_query) or "").casefold()
+    if search:
+        records = [
+            item
+            for item in records
+            if any(
+                search in str(item.get(field) or "").casefold()
+                for field in ("request_id", "reference", "title", "customer_name", "pickup_location", "destination")
+            )
+        ]
+    def sort_value(item):
+        value = item.get("scheduled_start_time")
+        if isinstance(value, datetime):
+            normalized = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+            return (0, normalized.timestamp(), str(item.get("reference") or ""))
+        return (1, 0, str(item.get("reference") or ""))
+
+    records.sort(key=sort_value)
+    normalized_page = max(page or 1, 1)
+    normalized_page_size = min(max(page_size or 20, 1), 100)
+    start = (normalized_page - 1) * normalized_page_size
+    total = len(records)
+    return {
+        "requests": records[start:start + normalized_page_size],
+        "pagination": {
+            "page": normalized_page,
+            "page_size": normalized_page_size,
+            "total": total,
+            "total_pages": max(1, ceil(total / normalized_page_size)),
+        },
+    }
+def _record_dispatch_start_custody(job_document: dict, movement_id: ObjectId, *, current_user_id: str):
+    from services.movement_custody_service import append_custody_event
+
+    source_base = f"dispatch:{job_document['_id']}:start-custody"
+    common_payload = {
+        "from_location": job_document.get("pickup") or "Company custody",
+        "to_user_id": job_document.get("driver_id"),
+        "to_location": "Dispatch driver custody",
+        "source_type": "dispatch_job",
+        "source_id": job_document["_id"],
+    }
+    append_custody_event(
+        movement_id,
+        event_type="released_to_driver",
+        initiated_by=current_user_id,
+        current_role="driver",
+        payload=common_payload,
+        source_event_key=f"{source_base}:released",
+    )
+    result = append_custody_event(
+        movement_id,
+        event_type="accepted_by_driver",
+        initiated_by=current_user_id,
+        current_role="driver",
+        payload=common_payload,
+        source_event_key=f"{source_base}:accepted",
+        accepted_by=current_user_id,
+        accepted_at=now_utc(),
+    )
+    timestamp = now_utc()
+    vehicle_movements_collection().update_one(
+        {"_id": movement_id},
+        {
+            "$set": {
+                "movement_custodian_id": job_document.get("driver_id"),
+                "custody_state": "accepted",
+                "current_custody_location": "Dispatch driver custody",
+                "custody_accepted_by": _to_object_id(current_user_id, "current_user_id"),
+                "custody_accepted_at": timestamp,
+                "updated_at": timestamp,
+            }
+        },
+    )
+    vehicles_collection().update_one(
+        {"_id": job_document["vehicle_id"]},
+        {
+            "$set": {
+                "current_custodian_id": job_document.get("driver_id"),
+                "current_custody_location": "Dispatch driver custody",
+                "updated_at": timestamp,
+            }
+        },
+    )
+    return result
 
 
 def _create_reservation(*, reservation_type: str, resource_id: ObjectId, dispatch_job_id: ObjectId, dispatch_request_id: ObjectId, start_time: datetime, end_time: datetime, current_user_id: str) -> ObjectId:
@@ -1261,6 +1451,7 @@ def _build_job_document(*, request_document: dict, planning_payload: dict, curre
         "vehicle_reservation_id": base_document.get("vehicle_reservation_id"),
         "driver_reservation_id": base_document.get("driver_reservation_id"),
         "linked_vehicle_movement_id": base_document.get("linked_vehicle_movement_id"),
+        "linked_waybill_id": base_document.get("linked_waybill_id"),
         "pickup": planning_payload.get("pickup"),
         "destination": planning_payload.get("destination"),
         "stops": planning_payload.get("stops") or [],
@@ -1276,6 +1467,7 @@ def _build_job_document(*, request_document: dict, planning_payload: dict, curre
         "fragile": planning_payload.get("fragile", False),
         "refrigerated": planning_payload.get("refrigerated", False),
         "hazardous": planning_payload.get("hazardous", False),
+        "restriction_acknowledged": planning_payload.get("restriction_acknowledged", False),
         "loading_notes": planning_payload.get("loading_notes"),
         "customer_contact": planning_payload.get("customer_contact") or request_document.get("customer_phone"),
         "receiver_contact": planning_payload.get("receiver_contact"),
@@ -1345,6 +1537,9 @@ def reserve_dispatch_resources(job_id: str, *, current_user_id: str, current_rol
     )
     if conflict_summary["has_conflicts"]:
         raise ApiError("Resource conflict detected. Resolve conflicts before reserving resources.", status_code=409)
+    availability = resolve_vehicle_availability(job_document["vehicle_id"])
+    if availability.get("restriction_acknowledgement_required") and not job_document.get("restriction_acknowledged"):
+        raise ApiError("You must explicitly acknowledge the vehicle restriction before reserving it.", status_code=409)
     _release_reservations(job_document, reason="replaced during reservation refresh")
     vehicle_reservation_id = _create_reservation(
         reservation_type="vehicle",
@@ -1373,6 +1568,17 @@ def reserve_dispatch_resources(job_id: str, *, current_user_id: str, current_rol
         "updated_by": _to_object_id(current_user_id, "current_user_id"),
         "updated_at": timestamp,
     }
+    if isinstance(job_document.get("vehicle_id"), ObjectId):
+        from services.movement_source_service import ensure_dispatch_movement
+
+        movement_result = ensure_dispatch_movement(
+            {**job_document, **update_fields},
+            current_user_id=current_user_id,
+            initial_status="approved",
+        )
+        update_fields["linked_vehicle_movement_id"] = movement_result["movement"]["_id"]
+        if movement_result.get("waybill"):
+            update_fields["linked_waybill_id"] = movement_result["waybill"]["_id"]
     dispatch_jobs_collection().update_one({"_id": job_document["_id"]}, {"$set": update_fields})
     job_document.update(update_fields)
     request_document = _get_dispatch_request_document(str(job_document["dispatch_request_id"]))
@@ -1412,6 +1618,17 @@ def assign_dispatch_job(job_id: str, *, current_user_id: str, current_role: str)
         "updated_by": _to_object_id(current_user_id, "current_user_id"),
         "updated_at": timestamp,
     }
+    if isinstance(job_document.get("vehicle_id"), ObjectId):
+        from services.movement_source_service import ensure_dispatch_movement
+
+        movement_result = ensure_dispatch_movement(
+            {**job_document, **update_fields},
+            current_user_id=current_user_id,
+            initial_status="approved",
+        )
+        update_fields["linked_vehicle_movement_id"] = movement_result["movement"]["_id"]
+        if movement_result.get("waybill"):
+            update_fields["linked_waybill_id"] = movement_result["waybill"]["_id"]
     dispatch_jobs_collection().update_one({"_id": job_document["_id"]}, {"$set": update_fields})
     job_document.update(update_fields)
     request_document = _get_dispatch_request_document(str(job_document["dispatch_request_id"]))
@@ -1461,6 +1678,40 @@ def reassign_dispatch_job(job_id: str, payload: dict, *, current_user_id: str, c
         actor_id=current_user_id,
         note=_normalize_text((payload or {}).get("reassignment_reason")),
     )
+    linked_movement_id = job_document.get("linked_vehicle_movement_id")
+    if isinstance(linked_movement_id, ObjectId):
+        linked_movement = vehicle_movements_collection().find_one(
+            {"_id": linked_movement_id},
+            {"status": 1, "dispatch_job_id": 1},
+        )
+        if linked_movement:
+            if linked_movement.get("dispatch_job_id") not in (None, job_document["_id"]):
+                raise ApiError("Linked movement belongs to another dispatch job.", status_code=409)
+            if linked_movement.get("status") not in {"draft", "pending_approval", "approved"}:
+                raise ApiError("Dispatch movement cannot be reassigned after physical checkout.", status_code=400)
+            try:
+                vehicle_movements_collection().update_one(
+                    {"_id": linked_movement_id},
+                    {
+                        "$set": {
+                            "vehicle_id": next_document.get("vehicle_id"),
+                            "driver_id": next_document.get("driver_id"),
+                            "movement_custodian_id": None,
+                            "assignment_id": next_document.get("primary_assignment_id"),
+                            "primary_assignment_id": next_document.get("primary_assignment_id"),
+                            "requested_departure_time": next_document.get("scheduled_start_time"),
+                            "expected_return_time": next_document.get("expected_return_time"),
+                            "origin": next_document.get("pickup"),
+                            "destination": next_document.get("destination"),
+                            "updated_at": now_utc(),
+                        }
+                    },
+                )
+            except DuplicateKeyError:
+                raise ApiError(
+                    "The reassigned vehicle already has another active movement.",
+                    status_code=409,
+                ) from None
     dispatch_jobs_collection().update_one({"_id": job_document["_id"]}, {"$set": next_document})
     job_document.update(next_document)
     _release_reservations(job_document, reason="reassigned before dispatch start")
@@ -1482,6 +1733,198 @@ def reassign_dispatch_job(job_id: str, payload: dict, *, current_user_id: str, c
             job_document=job_document,
         )
     return _batch_enrich_dispatch_jobs([job_document])[0]
+
+
+def cancel_dispatch_job(job_id: str, payload: dict, *, current_user_id: str, current_role: str) -> dict:
+    normalized_role = _normalize_role(current_role) or current_role
+    _assert_planner_role(normalized_role)
+    job_document = _get_dispatch_job_document(job_id)
+    if job_document.get("status") == "cancelled":
+        return _batch_enrich_dispatch_jobs([job_document])[0]
+    if job_document.get("status") in {"in_progress", "completed"}:
+        raise ApiError("Dispatch jobs cannot be cancelled after they start.", status_code=400)
+    reason = _normalize_text((payload or {}).get("reason"))
+    if not reason:
+        raise ApiError("Cancellation reason is required.", status_code=400)
+    movement_id = job_document.get("linked_vehicle_movement_id")
+    if isinstance(movement_id, ObjectId):
+        movement = vehicle_movements_collection().find_one({"_id": movement_id}, {"status": 1})
+        if movement and movement.get("status") in {"draft", "pending_approval", "approved"}:
+            from services.vehicle_movement_service import cancel_vehicle_movement
+            cancel_vehicle_movement(
+                str(movement_id),
+                {"cancellation_reason": reason},
+                current_user_id=current_user_id,
+                current_role=current_role,
+            )
+    _release_reservations(job_document, reason=reason)
+    timestamp = now_utc()
+    update_fields = {
+        "status": "cancelled",
+        "cancelled_at": timestamp,
+        "cancellation_reason": reason,
+        "timeline": _append_timeline_entry(
+            job_document,
+            title="Dispatch planning cancelled",
+            status="cancelled",
+            event_type="dispatch_cancelled",
+            actor_id=current_user_id,
+            note=reason,
+            timestamp=timestamp,
+        ),
+        "updated_by": _to_object_id(current_user_id, "current_user_id"),
+        "updated_at": timestamp,
+    }
+    dispatch_jobs_collection().update_one(
+        {"_id": job_document["_id"], "status": {"$nin": ["in_progress", "completed", "cancelled"]}},
+        {"$set": update_fields},
+    )
+    job_document.update(update_fields)
+    request_document = _get_dispatch_request_document(str(job_document["dispatch_request_id"]))
+    _set_request_planning_state(
+        request_document,
+        planning_status="cancelled",
+        active_dispatch_job_id=None,
+    )
+    resolve_action_notifications(
+        "dispatch_job",
+        job_document["_id"],
+        resolution="cancelled",
+        completed_by=current_user_id,
+    )
+    return _batch_enrich_dispatch_jobs([job_document])[0]
+
+
+def _normalize_planner_operation_type(operation_type: str) -> str:
+    normalized = (_normalize_text(operation_type) or "").lower()
+    if normalized not in PLANNER_OPERATION_TYPES:
+        raise ApiError("Invalid planner operation type.", status_code=400)
+    return normalized
+
+
+def _operation_schedule_payload(operation_type: str, payload: dict) -> dict:
+    normalized = dict(payload or {})
+    start_time = normalized.get("scheduled_start_time")
+    end_time = normalized.get("expected_return_time")
+    if operation_type in {"supplier_pickup", "stock_transfer"}:
+        normalized["scheduled_at"] = normalized.get("scheduled_at") or start_time
+    elif operation_type == "operational_request":
+        normalized["planned_departure_at"] = normalized.get("planned_departure_at") or start_time
+        normalized["expected_return_at"] = normalized.get("expected_return_at") or end_time
+    return normalized
+
+
+def plan_operation(
+    operation_type: str,
+    source_id: str,
+    payload: dict,
+    *,
+    current_user_id: str,
+    current_role: str,
+) -> dict:
+    normalized_type = _normalize_planner_operation_type(operation_type)
+    normalized_role = _normalize_role(current_role) or current_role
+    _assert_planner_role(normalized_role)
+    if normalized_type == "dispatch":
+        job = save_dispatch_job_draft(
+            source_id,
+            payload or {},
+            current_user_id=current_user_id,
+            current_role=current_role,
+        )
+        if (payload or {}).get("save_as_draft"):
+            return {"operation_type": normalized_type, "record": job}
+        assigned = assign_dispatch_job(
+            job["id"],
+            current_user_id=current_user_id,
+            current_role=current_role,
+        )
+        return {"operation_type": normalized_type, "record": assigned}
+    if normalized_role not in OWNER_ADMIN_ROLES:
+        raise ApiError("Only an owner or admin can plan operational work.", status_code=403)
+    schedule_payload = _operation_schedule_payload(normalized_type, payload or {})
+    if normalized_type in {"supplier_pickup", "stock_transfer"}:
+        from services.stock_transfer_service import schedule_stock_transfer
+        record = schedule_stock_transfer(
+            source_id,
+            schedule_payload,
+            current_user_id=current_user_id,
+            current_role=current_role,
+        )
+    else:
+        from services.vehicle_operation_request_service import schedule_operational_request
+        record = schedule_operational_request(
+            source_id,
+            schedule_payload,
+            current_user_id=current_user_id,
+            current_role=current_role,
+        )
+    return {"operation_type": normalized_type, "record": record}
+
+
+def reassign_planned_operation(
+    operation_type: str,
+    source_id: str,
+    payload: dict,
+    *,
+    current_user_id: str,
+    current_role: str,
+) -> dict:
+    normalized_type = _normalize_planner_operation_type(operation_type)
+    if normalized_type == "dispatch":
+        return {
+            "operation_type": normalized_type,
+            "record": reassign_dispatch_job(
+                source_id,
+                payload or {},
+                current_user_id=current_user_id,
+                current_role=current_role,
+            ),
+        }
+    return plan_operation(
+        normalized_type,
+        source_id,
+        payload,
+        current_user_id=current_user_id,
+        current_role=current_role,
+    )
+
+
+def cancel_planned_operation(
+    operation_type: str,
+    source_id: str,
+    payload: dict,
+    *,
+    current_user_id: str,
+    current_role: str,
+) -> dict:
+    normalized_type = _normalize_planner_operation_type(operation_type)
+    normalized_role = _normalize_role(current_role) or current_role
+    _assert_planner_role(normalized_role)
+    if normalized_type == "dispatch":
+        record = cancel_dispatch_job(
+            source_id,
+            payload or {},
+            current_user_id=current_user_id,
+            current_role=current_role,
+        )
+    elif normalized_type in {"supplier_pickup", "stock_transfer"}:
+        from services.stock_transfer_service import cancel_stock_transfer
+        record = cancel_stock_transfer(
+            source_id,
+            payload or {},
+            current_user_id=current_user_id,
+            current_role=current_role,
+        )
+    else:
+        from services.vehicle_operation_request_service import cancel_operational_request
+        record = cancel_operational_request(
+            source_id,
+            payload or {},
+            current_user_id=current_user_id,
+            current_role=current_role,
+        )
+    return {"operation_type": normalized_type, "record": record}
 
 
 def _normalize_driver_list_section(section: str | None) -> str | None:
@@ -1714,6 +2157,9 @@ def update_driver_dispatch_job_workflow(job_id: str, payload: dict, *, current_u
     if action == "start":
         if job_document.get("status") != "accepted":
             raise ApiError("Only accepted dispatches can be started.", status_code=400)
+        from services.dispatch_fuel_service import assert_dispatch_opening_confirmed
+
+        assert_dispatch_opening_confirmed(job_document)
         update_fields.update(
             {
                 "status": "in_progress",
@@ -1922,6 +2368,11 @@ def update_driver_dispatch_job_workflow(job_id: str, payload: dict, *, current_u
         if isinstance(job_document.get("vehicle_id"), ObjectId):
             movement_id = _ensure_linked_vehicle_movement(job_document, current_user_id=current_user_id)
             job_document["linked_vehicle_movement_id"] = movement_id
+            _record_dispatch_start_custody(
+                job_document,
+                movement_id,
+                current_user_id=current_user_id,
+            )
     elif action == "delivery_completed" and isinstance(job_document.get("linked_vehicle_movement_id"), ObjectId):
         vehicle_movements_collection().update_one(
             {"_id": job_document["linked_vehicle_movement_id"]},

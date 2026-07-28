@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
 import { getStoredSessionUser } from '../../lib/auth-session';
+import KpiGrid from '../shared/KpiGrid';
 
 type FaultStatus =
   | 'reported'
@@ -401,13 +402,13 @@ export default function FaultApprovals() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+      <KpiGrid>
         <SummaryCard label="Pending Fault Approvals" value={summary.pending} icon={Clock3} tone="amber" />
         <SummaryCard label="Critical Faults" value={summary.critical} icon={ShieldAlert} tone="rose" />
         <SummaryCard label="Pending Critical Faults" value={summary.pendingCritical} icon={AlertTriangle} tone="rose" />
         <SummaryCard label="Approved Faults" value={summary.approved} icon={CheckCircle2} tone="blue" />
         <SummaryCard label="Converted To Maintenance" value={summary.converted} icon={Wrench} tone="green" />
-      </div>
+      </KpiGrid>
 
       <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
         <div className="border-b border-gray-200 px-6 py-4">
@@ -768,12 +769,12 @@ function SummaryCard({
   }[tone];
 
   return (
-    <div className="rounded-xl border border-gray-200 bg-white p-5">
-      <div className={`mb-3 flex h-10 w-10 items-center justify-center rounded-lg ${toneClasses}`}>
-        <Icon className="h-5 w-5" />
+    <div className="h-full min-w-0 overflow-hidden rounded-xl border border-gray-200 bg-white p-3 sm:p-5">
+      <div className={`mb-2 flex h-8 w-8 items-center justify-center rounded-lg sm:h-10 sm:w-10 ${toneClasses}`}>
+        <Icon className="h-4 w-4 sm:h-5 sm:w-5" />
       </div>
-      <div className="text-2xl font-semibold text-[#0F172A]">{value}</div>
-      <div className="text-sm text-gray-600">{label}</div>
+      <div className="text-xl font-semibold text-[#0F172A] sm:text-2xl">{value}</div>
+      <div className="break-words text-xs text-gray-600 sm:text-sm">{label}</div>
     </div>
   );
 }

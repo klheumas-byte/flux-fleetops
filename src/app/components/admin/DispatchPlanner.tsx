@@ -22,13 +22,16 @@ import { getStoredSessionUser } from '../../lib/auth-session';
 import { fetchDispatchRequestById, type DispatchRequestRecord } from '../../lib/dispatch-request-api';
 import {
   assignDispatchPlannerJob,
+  cancelPlannerOperation,
   detectPlannerConflicts,
   fetchDispatchPlannerJob,
   fetchDispatchPlannerJobs,
   fetchPlannerAvailability,
   fetchPlannerOptions,
   fetchPlannerRequests,
+  planPlannerOperation,
   reassignDispatchPlannerJob,
+  reassignPlannerOperation,
   reserveDispatchPlannerJob,
   saveDispatchPlannerDraft,
   type DispatchPlannerAvailabilityResponse,
@@ -59,6 +62,7 @@ interface PlannerFormState {
   fragile: boolean;
   refrigerated: boolean;
   hazardous: boolean;
+  restriction_acknowledged: boolean;
   loading_notes: string;
   customer_contact: string;
   receiver_contact: string;
@@ -111,8 +115,8 @@ function toDateTimeLocalValue(value?: string | null) {
 
 function buildPlannerForm(requestRecord?: Partial<PlannerRequestRecord & DispatchRequestRecord> | null): PlannerFormState {
   return {
-    vehicle_id: '',
-    driver_id: '',
+    vehicle_id: requestRecord?.vehicle_id || '',
+    driver_id: requestRecord?.driver_id || '',
     assistant_id: '',
     dispatcher_id: sessionUser?.id || '',
     pickup: requestRecord?.pickup_location || '',
@@ -128,6 +132,7 @@ function buildPlannerForm(requestRecord?: Partial<PlannerRequestRecord & Dispatc
     fragile: false,
     refrigerated: false,
     hazardous: false,
+    restriction_acknowledged: false,
     loading_notes: '',
     customer_contact: requestRecord?.customer_phone || '',
     receiver_contact: '',
@@ -158,6 +163,7 @@ function buildPlannerFormFromJob(job: DispatchPlannerJobRecord): PlannerFormStat
     fragile: Boolean(job.fragile),
     refrigerated: Boolean(job.refrigerated),
     hazardous: Boolean(job.hazardous),
+    restriction_acknowledged: Boolean(job.restriction_acknowledged),
     loading_notes: job.loading_notes || '',
     customer_contact: job.customer_contact || '',
     receiver_contact: job.receiver_contact || '',
@@ -208,6 +214,7 @@ function buildDraftPayload(form: PlannerFormState, requestDetail: DispatchReques
     fragile: form.fragile,
     refrigerated: form.refrigerated,
     hazardous: form.hazardous,
+    restriction_acknowledged: form.restriction_acknowledged,
     loading_notes: form.loading_notes || undefined,
     customer_contact: form.customer_contact || undefined,
     receiver_contact: form.receiver_contact || undefined,
@@ -246,10 +253,12 @@ export default function DispatchPlanner() {
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [currentJob, setCurrentJob] = useState<DispatchPlannerJobRecord | null>(null);
   const [plannerForm, setPlannerForm] = useState<PlannerFormState>(buildPlannerForm());
-  const [conflicts, setConflicts] = useState<{ vehicle_conflicts: string[]; driver_conflicts: string[]; has_conflicts: boolean }>({
+  const [conflicts, setConflicts] = useState<{ vehicle_conflicts: string[]; driver_conflicts: string[]; has_conflicts: boolean; vehicle_restrictions: Array<{ override_id: string; operational_restriction: string; repair_deadline?: string | null }>; restriction_acknowledgement_required: boolean }>({
     vehicle_conflicts: [],
     driver_conflicts: [],
     has_conflicts: false,
+    vehicle_restrictions: [],
+    restriction_acknowledgement_required: false,
   });
   const [isDirty, setIsDirty] = useState(false);
   const [isLoadingRequests, setIsLoadingRequests] = useState(true);
@@ -287,6 +296,7 @@ export default function DispatchPlanner() {
         page_size: 10,
         q: debouncedSearchQuery || undefined,
         planning_status: planningStatusFilter || undefined,
+        operation_type: 'all',
       });
       setRequests(response.requests || []);
       setRequestPagination(response.pagination || { page: 1, page_size: 10, total: 0, total_pages: 1 });
@@ -358,6 +368,13 @@ export default function DispatchPlanner() {
       setSelectedRequestDetail(null);
       return;
     }
+    if ((selectedRequest.planner_operation_type || 'dispatch') !== 'dispatch') {
+      setSelectedRequestDetail(null);
+      setPlannerForm(buildPlannerForm(selectedRequest));
+      setCurrentJob(null);
+      setSelectedJobId(null);
+      return;
+    }
     setIsLoadingRequestDetail(true);
     setFormError('');
     void fetchDispatchRequestById(selectedRequest.id)
@@ -382,7 +399,7 @@ export default function DispatchPlanner() {
       ? new Date(`${plannerForm.dispatch_date}T${plannerForm.dispatch_time}:00`).toISOString()
       : '';
     if (!plannerForm.vehicle_id && !plannerForm.driver_id) {
-      setConflicts({ vehicle_conflicts: [], driver_conflicts: [], has_conflicts: false });
+      setConflicts({ vehicle_conflicts: [], driver_conflicts: [], has_conflicts: false, vehicle_restrictions: [], restriction_acknowledgement_required: false });
       return;
     }
     if (!scheduledStart || !plannerForm.expected_return_time) {
@@ -395,6 +412,7 @@ export default function DispatchPlanner() {
         scheduled_start_time: scheduledStart,
         expected_return_time: new Date(plannerForm.expected_return_time).toISOString(),
         exclude_job_id: currentJob?.id || undefined,
+        exclude_movement_id: selectedRequest?.linked_vehicle_movement_id || undefined,
       })
         .then((response) => setConflicts(response))
         .catch(() => {
@@ -409,6 +427,7 @@ export default function DispatchPlanner() {
     plannerForm.dispatch_time,
     plannerForm.expected_return_time,
     currentJob?.id,
+    selectedRequest?.linked_vehicle_movement_id,
   ]);
 
   const handleSelectRequest = (requestRecord: PlannerRequestRecord) => {
@@ -417,7 +436,7 @@ export default function DispatchPlanner() {
     setPlannerForm(buildPlannerForm(requestRecord));
     setCurrentJob(null);
     setSelectedJobId(null);
-    setConflicts({ vehicle_conflicts: [], driver_conflicts: [], has_conflicts: false });
+    setConflicts({ vehicle_conflicts: [], driver_conflicts: [], has_conflicts: false, vehicle_restrictions: [], restriction_acknowledgement_required: false });
     setFormError('');
     setIsDirty(false);
   };
@@ -510,6 +529,34 @@ export default function DispatchPlanner() {
     setIsAssigning(true);
     setFormError('');
     try {
+      const operationType = selectedRequest?.planner_operation_type || 'dispatch';
+      if (selectedRequest && operationType !== 'dispatch') {
+        const scheduledStart = plannerForm.dispatch_date && plannerForm.dispatch_time
+          ? new Date(`${plannerForm.dispatch_date}T${plannerForm.dispatch_time}:00`).toISOString()
+          : '';
+        if (!scheduledStart) {
+          throw new ApiRequestError('A schedule date and time are required.', 400);
+        }
+        const operationPayload = {
+          vehicle_id: plannerForm.vehicle_id,
+          driver_id: plannerForm.driver_id,
+          scheduled_start_time: scheduledStart,
+          expected_return_time: plannerForm.expected_return_time
+            ? new Date(plannerForm.expected_return_time).toISOString()
+            : undefined,
+        };
+        if (selectedRequest.status === 'scheduled') {
+          await reassignPlannerOperation(operationType, selectedRequest.id, operationPayload);
+          toast.success(`${selectedRequest.request_id} reassigned successfully.`);
+        } else {
+          await planPlannerOperation(operationType, selectedRequest.id, operationPayload);
+          toast.success(`${selectedRequest.request_id} assigned to Operational Tasks.`);
+        }
+        setSelectedRequest(null);
+        setIsDirty(false);
+        await Promise.all([loadRequests(), loadAvailability()]);
+        return;
+      }
       const draftJob = isDirty || !currentJob ? await ensureDraft() : currentJob;
       const assignedJob = currentJob?.status && currentJob.status !== 'draft'
         ? await assignDispatchPlannerJob(draftJob.id)
@@ -549,6 +596,26 @@ export default function DispatchPlanner() {
     }
   };
 
+  const handleCancelOperation = async () => {
+    if (!selectedRequest) return;
+    const operationType = selectedRequest.planner_operation_type || 'dispatch';
+    if (operationType === 'dispatch') return;
+    const reason = window.prompt(`Why is ${selectedRequest.request_id} being cancelled?`)?.trim();
+    if (!reason) return;
+    setIsSavingDraft(true);
+    setFormError('');
+    try {
+      await cancelPlannerOperation(operationType, selectedRequest.id, reason);
+      toast.success(`${selectedRequest.request_id} cancelled.`);
+      setSelectedRequest(null);
+      await Promise.all([loadRequests(), loadAvailability()]);
+    } catch (error) {
+      setFormError(getErrorMessage(error, 'Unable to cancel this operation.'));
+    } finally {
+      setIsSavingDraft(false);
+    }
+  };
+
   const openJobDetail = async (jobId: string) => {
     setIsDetailOpen(true);
     setIsLoadingDetail(true);
@@ -569,10 +636,10 @@ export default function DispatchPlanner() {
       <section className="rounded-[28px] border border-slate-200 bg-gradient-to-r from-slate-50 via-white to-blue-50 p-6 shadow-sm">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <p className="text-sm font-semibold uppercase tracking-[0.2em] text-blue-600">Dispatch Planning</p>
-            <h1 className="mt-2 text-3xl font-semibold text-slate-900">Dispatch Planner</h1>
+            <p className="text-sm font-semibold uppercase tracking-[0.2em] text-blue-600">Shared Resource Planning</p>
+            <h1 className="mt-2 text-3xl font-semibold text-slate-900">Operations Planner</h1>
             <p className="mt-2 max-w-3xl text-sm text-slate-600">
-              Reserve vehicles and drivers safely, prevent scheduling conflicts, and push dispatch assignments to the driver dashboard without touching the permanent assignment module.
+              Plan dispatches, supplier pickups, stock transfers, and operational requests with shared vehicle and driver availability.
             </p>
           </div>
           <div className="flex flex-wrap gap-3">
@@ -676,7 +743,9 @@ export default function DispatchPlanner() {
                         <div>{requestRecord.destination}</div>
                       </div>
                       <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
-                        <span className="rounded-full bg-white px-2.5 py-1 ring-1 ring-slate-200">{requestRecord.vehicle_type_needed}</span>
+                        <span className="rounded-full bg-white px-2.5 py-1 ring-1 ring-slate-200">
+                          {(requestRecord.planner_operation_type || 'dispatch').replaceAll('_', ' ')}
+                        </span>
                         <span className="rounded-full bg-white px-2.5 py-1 ring-1 ring-slate-200">{requestRecord.urgency || 'normal'}</span>
                         <span className="rounded-full bg-white px-2.5 py-1 ring-1 ring-slate-200">
                           {requestRecord.scheduled_start_time ? formatDateTime(requestRecord.scheduled_start_time) : 'Schedule pending'}
@@ -752,6 +821,13 @@ export default function DispatchPlanner() {
                       {[...conflicts.vehicle_conflicts, ...conflicts.driver_conflicts].map((item) => (
                         <div key={item} className="mt-1">{item}</div>
                       ))}
+                    </div>
+                  ) : null}
+                  {conflicts.vehicle_restrictions.length ? (
+                    <div className="rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
+                      <div className="flex items-center gap-2 font-semibold"><AlertTriangle className="h-4 w-4" /> Vehicle available with restriction</div>
+                      {conflicts.vehicle_restrictions.map((item) => <div key={item.override_id} className="mt-2"><div>{item.operational_restriction}</div>{item.repair_deadline ? <div className="text-xs">Repair deadline: {formatDateTime(item.repair_deadline)}</div> : null}</div>)}
+                      <label className="mt-3 flex items-start gap-2"><input type="checkbox" checked={plannerForm.restriction_acknowledged} onChange={(event) => handleFormChange('restriction_acknowledged', event.target.checked)} /><span>I reviewed and explicitly acknowledge these restrictions for this assignment.</span></label>
                     </div>
                   ) : null}
 
@@ -842,24 +918,28 @@ export default function DispatchPlanner() {
                   </div>
 
                   <div className="flex flex-wrap gap-3">
-                    <button
-                      type="button"
-                      onClick={() => void handleSaveDraft()}
-                      disabled={isSavingDraft || !selectedRequest}
-                      className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-60"
-                    >
-                      {isSavingDraft ? <Loader2 className="h-4 w-4 animate-spin" /> : <ClipboardList className="h-4 w-4" />}
-                      Save Draft
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void handleReserve()}
-                      disabled={isReserving || !selectedRequest}
-                      className="inline-flex items-center gap-2 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-medium text-amber-800 disabled:opacity-60"
-                    >
-                      {isReserving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Clock3 className="h-4 w-4" />}
-                      Reserve Resources
-                    </button>
+                    {(selectedRequest?.planner_operation_type || 'dispatch') === 'dispatch' ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => void handleSaveDraft()}
+                          disabled={isSavingDraft || !selectedRequest}
+                          className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-60"
+                        >
+                          {isSavingDraft ? <Loader2 className="h-4 w-4 animate-spin" /> : <ClipboardList className="h-4 w-4" />}
+                          Save Draft
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleReserve()}
+                          disabled={isReserving || !selectedRequest}
+                          className="inline-flex items-center gap-2 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-medium text-amber-800 disabled:opacity-60"
+                        >
+                          {isReserving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Clock3 className="h-4 w-4" />}
+                          Reserve Resources
+                        </button>
+                      </>
+                    ) : null}
                     <button
                       type="button"
                       onClick={() => void handleAssign()}
@@ -867,7 +947,11 @@ export default function DispatchPlanner() {
                       className="inline-flex items-center gap-2 rounded-2xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-60"
                     >
                       {isAssigning ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
-                      Assign Dispatch
+                      {(selectedRequest?.planner_operation_type || 'dispatch') === 'dispatch'
+                        ? 'Assign Dispatch'
+                        : selectedRequest?.status === 'scheduled'
+                          ? 'Update Assignment'
+                          : 'Assign Operation'}
                     </button>
                     {currentJob && !['in_progress', 'completed', 'cancelled'].includes(currentJob.status) ? (
                       <button
@@ -878,6 +962,16 @@ export default function DispatchPlanner() {
                       >
                         <RefreshCcw className="h-4 w-4" />
                         Reassign
+                      </button>
+                    ) : null}
+                    {selectedRequest && (selectedRequest.planner_operation_type || 'dispatch') !== 'dispatch' ? (
+                      <button
+                        type="button"
+                        onClick={() => void handleCancelOperation()}
+                        disabled={isSavingDraft}
+                        className="inline-flex items-center gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-2.5 text-sm font-medium text-rose-700 disabled:opacity-60"
+                      >
+                        Cancel Operation
                       </button>
                     ) : null}
                   </div>

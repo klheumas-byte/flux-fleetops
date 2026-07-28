@@ -19,6 +19,8 @@ export type DispatchPlannerDriverResponseStatus =
 
 export interface PlannerRequestRecord {
   id: string;
+  planner_source_id?: string;
+  planner_operation_type?: 'dispatch' | 'supplier_pickup' | 'stock_transfer' | 'operational_request';
   request_id: string;
   customer_name: string;
   customer_phone: string;
@@ -29,6 +31,10 @@ export interface PlannerRequestRecord {
   status: string;
   planning_status?: string | null;
   scheduled_start_time?: string | null;
+  expected_return_time?: string | null;
+  vehicle_id?: string | null;
+  driver_id?: string | null;
+  linked_vehicle_movement_id?: string | null;
   pricing_status?: string | null;
   load_description?: string | null;
   stops_count?: number;
@@ -99,6 +105,7 @@ export interface DispatchPlannerJobRecord {
   vehicle_reservation_id?: string | null;
   driver_reservation_id?: string | null;
   linked_vehicle_movement_id?: string | null;
+  linked_waybill_id?: string | null;
   pickup?: string | null;
   destination?: string | null;
   stops?: DispatchPlannerStopRecord[];
@@ -114,6 +121,7 @@ export interface DispatchPlannerJobRecord {
   fragile?: boolean;
   refrigerated?: boolean;
   hazardous?: boolean;
+  restriction_acknowledged?: boolean;
   loading_notes?: string | null;
   customer_contact?: string | null;
   receiver_contact?: string | null;
@@ -161,6 +169,8 @@ export interface DispatchPlannerConflictResponse {
   has_conflicts: boolean;
   vehicle_conflicts: string[];
   driver_conflicts: string[];
+  vehicle_restrictions: Array<{ override_id: string; operational_restriction: string; repair_deadline?: string | null }>;
+  restriction_acknowledgement_required: boolean;
 }
 
 interface PlannerRequestsEnvelope {
@@ -228,6 +238,7 @@ export async function fetchPlannerRequests(params: {
   q?: string;
   planning_status?: string;
   urgency?: string;
+  operation_type?: 'dispatch' | 'supplier_pickup' | 'stock_transfer' | 'operational_request' | 'all';
 } = {}) {
   const query = toQueryString(params);
   const response = await apiRequest<PlannerRequestsEnvelope>(`/dispatch-planner/requests${query}`, {
@@ -324,4 +335,48 @@ export async function reassignDispatchPlannerJob(jobId: string, payload: Record<
     body: JSON.stringify(payload),
   });
   return response.data.job;
+}
+
+interface PlannerOperationEnvelope {
+  success: boolean;
+  data: {
+    operation_type: 'dispatch' | 'supplier_pickup' | 'stock_transfer' | 'operational_request';
+    record: Record<string, unknown>;
+  };
+}
+
+export async function planPlannerOperation(
+  operationType: NonNullable<PlannerRequestRecord['planner_operation_type']>,
+  sourceId: string,
+  payload: Record<string, unknown>,
+) {
+  const response = await apiRequest<PlannerOperationEnvelope>(
+    `/dispatch-planner/operations/${operationType}/${sourceId}/plan`,
+    { method: 'PATCH', body: JSON.stringify(payload) },
+  );
+  return response.data;
+}
+
+export async function reassignPlannerOperation(
+  operationType: NonNullable<PlannerRequestRecord['planner_operation_type']>,
+  sourceId: string,
+  payload: Record<string, unknown>,
+) {
+  const response = await apiRequest<PlannerOperationEnvelope>(
+    `/dispatch-planner/operations/${operationType}/${sourceId}/reassign`,
+    { method: 'PATCH', body: JSON.stringify(payload) },
+  );
+  return response.data;
+}
+
+export async function cancelPlannerOperation(
+  operationType: NonNullable<PlannerRequestRecord['planner_operation_type']>,
+  sourceId: string,
+  reason: string,
+) {
+  const response = await apiRequest<PlannerOperationEnvelope>(
+    `/dispatch-planner/operations/${operationType}/${sourceId}/cancel`,
+    { method: 'PATCH', body: JSON.stringify({ reason }) },
+  );
+  return response.data;
 }

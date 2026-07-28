@@ -26,7 +26,7 @@ faults_bp = Blueprint("faults", __name__)
 
 
 @faults_bp.get("")
-@role_required("owner", "admin", "driver")
+@role_required("owner", "admin", "driver", "fleet_owner")
 def get_faults():
     return success_response(
         data={
@@ -63,7 +63,7 @@ def get_critical_faults_route():
 
 
 @faults_bp.post("")
-@role_required("owner", "admin", "driver")
+@role_required("owner", "admin", "driver", "fleet_owner")
 def create_fault_route():
     fault = create_fault(
         payload=request.get_json(silent=True) or {},
@@ -78,13 +78,13 @@ def create_fault_route():
 
 
 @faults_bp.get("/options")
-@role_required("owner", "admin", "driver")
+@role_required("owner", "admin", "driver", "fleet_owner")
 def get_fault_options_route():
     return success_response(data=list_fault_options(get_jwt().get("role")))
 
 
 @faults_bp.get("/<fault_id>")
-@role_required("owner", "admin", "driver")
+@role_required("owner", "admin", "driver", "fleet_owner")
 def get_fault_route(fault_id: str):
     fault = get_fault_by_id(
         fault_id=fault_id,

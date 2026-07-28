@@ -108,6 +108,29 @@ export interface DispatchReturnMovementRecord {
   opening_fuel_level_details?: FuelLevelDetails | null;
   closing_fuel_level_details?: FuelLevelDetails | null;
   return_checklist?: DispatchReturnChecklist | null;
+  opening_fuel_recorded_at?: string | null;
+  opening_fuel_recorded_by?: string | null;
+  closing_fuel_recorded_at?: string | null;
+  closing_fuel_recorded_by?: string | null;
+  fuel_summary_status?: string | null;
+}
+
+export interface DispatchFuelAccountability {
+  opening_fuel_level?: number | null;
+  opening_fuel_recorded_at?: string | null;
+  opening_odometer?: number | null;
+  closing_fuel_level?: number | null;
+  closing_fuel_recorded_at?: string | null;
+  closing_odometer?: number | null;
+  total_fuel_litres_added: number;
+  total_fuel_cost: number;
+  distance_travelled?: number | null;
+  estimated_fuel_consumed?: number | null;
+  estimated_fuel_efficiency?: number | null;
+  litre_values_are_estimates: boolean;
+  tank_capacity_litres?: number | null;
+  fuel_summary_status: string;
+  legacy_opening_missing: boolean;
 }
 
 export interface DispatchReturnDetail {
@@ -139,6 +162,7 @@ export interface DispatchReturnDetail {
   };
   existing_faults: DispatchReturnFaultRecord[];
   linked_fault?: DispatchReturnFaultRecord | null;
+  fuel_accountability: DispatchFuelAccountability;
 }
 
 export interface DispatchReturnListResponse {
@@ -243,6 +267,9 @@ export async function linkOrCreateDispatchReturnFault(jobId: string, payload: {
   return patchDispatchReturnAction(jobId, 'fault', payload);
 }
 
-export async function closeDispatchReturn(jobId: string, payload?: { closure_note?: string }) {
+export async function closeDispatchReturn(jobId: string, payload?: {
+  closure_note?: string;
+  legacy_fuel_exception_reason?: string;
+}) {
   return patchDispatchReturnAction(jobId, 'close', payload);
 }

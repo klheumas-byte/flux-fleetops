@@ -4,6 +4,7 @@ from flask_jwt_extended import get_jwt, get_jwt_identity
 from services.dispatch_planner_service import (
     accept_driver_dispatch_job,
     assign_dispatch_job,
+    cancel_planned_operation,
     detect_dispatch_conflicts,
     get_dispatch_job,
     get_fleet_availability,
@@ -11,7 +12,9 @@ from services.dispatch_planner_service import (
     list_driver_dispatch_jobs,
     list_planner_options,
     list_planner_requests,
+    plan_operation,
     reassign_dispatch_job,
+    reassign_planned_operation,
     reject_driver_dispatch_job,
     request_dispatch_clarification,
     reserve_dispatch_resources,
@@ -35,6 +38,7 @@ def get_planner_requests_route():
             search_query=request.args.get("q"),
             planning_status=request.args.get("planning_status"),
             urgency=request.args.get("urgency"),
+            operation_type=request.args.get("operation_type"),
         )
     )
 
@@ -67,6 +71,7 @@ def detect_planner_conflicts_route():
             scheduled_start_time=payload.get("scheduled_start_time"),
             expected_return_time=payload.get("expected_return_time"),
             exclude_job_id=payload.get("exclude_job_id"),
+            exclude_movement_id=payload.get("exclude_movement_id"),
         )
     )
 
@@ -154,6 +159,45 @@ def reassign_dispatch_job_route(job_id: str):
         data={"job": job},
         message="Dispatch reassigned successfully.",
     )
+
+
+@dispatch_planner_bp.patch("/operations/<operation_type>/<source_id>/plan")
+@role_required("owner", "admin", "dispatcher", "customer_service")
+def plan_operation_route(operation_type: str, source_id: str):
+    result = plan_operation(
+        operation_type,
+        source_id,
+        request.get_json(silent=True) or {},
+        current_user_id=get_jwt_identity(),
+        current_role=get_jwt().get("role"),
+    )
+    return success_response(data=result, message="Operation planned successfully.")
+
+
+@dispatch_planner_bp.patch("/operations/<operation_type>/<source_id>/reassign")
+@role_required("owner", "admin", "dispatcher", "customer_service")
+def reassign_planned_operation_route(operation_type: str, source_id: str):
+    result = reassign_planned_operation(
+        operation_type,
+        source_id,
+        request.get_json(silent=True) or {},
+        current_user_id=get_jwt_identity(),
+        current_role=get_jwt().get("role"),
+    )
+    return success_response(data=result, message="Operation reassigned successfully.")
+
+
+@dispatch_planner_bp.patch("/operations/<operation_type>/<source_id>/cancel")
+@role_required("owner", "admin", "dispatcher", "customer_service")
+def cancel_planned_operation_route(operation_type: str, source_id: str):
+    result = cancel_planned_operation(
+        operation_type,
+        source_id,
+        request.get_json(silent=True) or {},
+        current_user_id=get_jwt_identity(),
+        current_role=get_jwt().get("role"),
+    )
+    return success_response(data=result, message="Operation cancelled successfully.")
 
 
 @dispatch_planner_bp.get("/driver/jobs")

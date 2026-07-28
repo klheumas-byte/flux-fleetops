@@ -465,6 +465,15 @@ def sidebar_work_queue_counts(current_user_id: str, current_role: str) -> dict:
         )
 
     if role in {"owner", "admin"}:
+        definitions["operational_requests"] = lambda: _module_count(
+            "vehicle_operation_requests",
+            {"status": {"$in": ["pending_approval", "approved", "awaiting_verification"]}},
+            critical_query={"$or": [{"priority": "critical"}, {"expected_return_at": {"$ne": None, "$lt": now}}]},
+        )
+        definitions["stock_transfers"] = lambda: _module_count(
+            "stock_transfers",
+            {"status": {"$in": ["pending_approval", "approved", "awaiting_receipt"]}},
+        )
         definitions["maintenance_jobs"] = lambda: _module_count(
             "maintenance_jobs",
             {"status": jobs_active},
@@ -489,6 +498,15 @@ def sidebar_work_queue_counts(current_user_id: str, current_role: str) -> dict:
         )
 
     if role == "driver":
+        def operational_task_count():
+            operation_query = {"driver_id": user_id, "status": {"$in": ["scheduled", "movement_in_progress"]}}
+            transfer_query = {"driver_id": user_id, "status": {"$in": ["scheduled", "released", "in_transit", "awaiting_receipt"]}}
+            operation_count = get_collection("vehicle_operation_requests").count_documents(operation_query)
+            transfer_count = get_collection("stock_transfers").count_documents(transfer_query)
+            critical = get_collection("vehicle_operation_requests").count_documents({"$and": [operation_query, {"expected_return_at": {"$ne": None, "$lt": now}}]})
+            total = operation_count + transfer_count
+            return {"status": "ok", "count": total, "priority": "critical" if critical else "action_required" if total else None, "critical_count": critical}
+        definitions["operational_tasks"] = operational_task_count
         definitions["dispatch_planner"] = lambda: _module_count(
             "dispatch_jobs",
             {"driver_id": user_id, "status": {"$in": ["assigned", "clarification_requested"]}},

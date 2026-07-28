@@ -4,6 +4,7 @@ import { apiRequest, ApiRequestError } from '../../lib/api';
 import { getAssignedVehicleLabel, type SessionUser } from '../../lib/auth-session';
 import type { DriverActiveAssignment } from '../../lib/driver-api';
 import { FuelGaugeSelector } from '../shared/FuelGaugeSelector';
+import VehicleRestrictionsPanel from '../shared/VehicleRestrictionsPanel';
 import {
   confirmVehicleMovementDelivery,
   fetchVehicleMovements,
@@ -67,6 +68,25 @@ interface MaintenanceJobsResponse {
 
 interface MaintenanceProgressMutationResponse {
   success: boolean;
+}
+
+interface AssignmentHandover {
+  id: string;
+  status: 'pending_handover' | 'pending_return';
+  handover_status?: string | null;
+  vehicle?: {
+    id: string;
+    registration_number: string;
+    make?: string | null;
+    model?: string | null;
+  } | null;
+}
+
+interface AssignmentHandoversResponse {
+  success: boolean;
+  data: {
+    assignments: AssignmentHandover[];
+  };
 }
 
 type PreventiveScheduleStatus = 'active' | 'due_soon' | 'due' | 'overdue' | 'completed' | 'paused';
@@ -226,10 +246,72 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
   const [dispatchError, setDispatchError] = useState('');
   const [deliveryNoteDrafts, setDeliveryNoteDrafts] = useState<Record<string, string>>({});
   const [confirmingMovementId, setConfirmingMovementId] = useState<string | null>(null);
+  const [assignmentHandovers, setAssignmentHandovers] = useState<AssignmentHandover[]>([]);
+  const [handoverError, setHandoverError] = useState('');
+  const [handoverActionId, setHandoverActionId] = useState<string | null>(null);
   const vehicleId = vehicle?.id || '';
 
   const formatValue = (value: string | number | null | undefined) =>
     value === null || value === undefined || value === '' ? 'Not provided' : String(value);
+
+  const loadAssignmentHandovers = async () => {
+    try {
+      const response = await apiRequest<AssignmentHandoversResponse>('/assignments/my-handovers');
+      setAssignmentHandovers(
+        Array.isArray(response.data?.assignments) ? response.data.assignments : [],
+      );
+      setHandoverError('');
+    } catch (error) {
+      setAssignmentHandovers([]);
+      setHandoverError(
+        error instanceof ApiRequestError
+          ? error.message
+          : 'Unable to load assignment handovers.',
+      );
+    }
+  };
+
+  useEffect(() => {
+    void loadAssignmentHandovers();
+  }, []);
+
+  const handleAssignmentHandover = async (assignment: AssignmentHandover) => {
+    setHandoverActionId(assignment.id);
+    setHandoverError('');
+    try {
+      const isReturn = assignment.status === 'pending_return';
+      const odometer = window.prompt(
+        isReturn
+          ? 'Closing odometer (optional):'
+          : 'Opening odometer (optional):',
+      )?.trim();
+      const fuelLevel = window.prompt('Fuel level from 0/8 to 8/8 (optional):')?.trim();
+      await apiRequest(
+        `/assignments/${assignment.id}/handover/${isReturn ? 'return' : 'accept'}`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            odometer: odometer ? Number(odometer) : undefined,
+            fuel_level: fuelLevel || undefined,
+            odometer_available: Boolean(odometer),
+            odometer_unavailable_reason: odometer
+              ? undefined
+              : 'Driver did not record an odometer during handover.',
+          }),
+        },
+      );
+      await loadAssignmentHandovers();
+      window.location.reload();
+    } catch (error) {
+      setHandoverError(
+        error instanceof ApiRequestError
+          ? error.message
+          : 'Unable to update assignment handover.',
+      );
+    } finally {
+      setHandoverActionId(null);
+    }
+  };
 
   useEffect(() => {
     if (!hasAssignedVehicle) {
@@ -489,6 +571,46 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
       </div>
 
       <div className="mx-auto max-w-4xl space-y-6 px-4">
+        <VehicleRestrictionsPanel vehicleId={vehicle?.id} driverMode />
+        {handoverError ? (
+          <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            {handoverError}
+          </div>
+        ) : null}
+        {assignmentHandovers.map((handover) => (
+          <div key={handover.id} className="rounded-xl border border-blue-200 bg-blue-50 p-5">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h3 className="font-semibold text-blue-950">
+                  {handover.status === 'pending_handover'
+                    ? 'Vehicle custody awaiting your acceptance'
+                    : 'Vehicle return awaiting confirmation'}
+                </h3>
+                <p className="mt-1 text-sm text-blue-700">
+                  {handover.vehicle?.registration_number || 'Assigned vehicle'} ·{' '}
+                  {handover.status === 'pending_handover'
+                    ? 'Review the vehicle, then accept custody to activate your assignment.'
+                    : 'Record the return condition and hand the vehicle back to company custody.'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleAssignmentHandover(handover)}
+                disabled={handoverActionId === handover.id}
+                className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
+              >
+                {handoverActionId === handover.id ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <CheckCircle className="h-4 w-4" />
+                )}
+                {handover.status === 'pending_handover'
+                  ? 'Accept Custody'
+                  : 'Confirm Return'}
+              </button>
+            </div>
+          </div>
+        ))}
         {!hasAssignedVehicle ? (
           <>
             <div className="rounded-xl border border-amber-200 bg-amber-50 p-5">

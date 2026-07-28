@@ -23,6 +23,7 @@ import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, R
 import { apiRequestSafe } from '../../lib/api';
 import type { UserRole } from '../../App';
 import type { BookingSummary, CustomerSummary } from '../../lib/customer-booking-api';
+import KpiGrid from '../shared/KpiGrid';
 
 interface DashboardProps {
   onNavigate: (section: string) => void;
@@ -646,14 +647,14 @@ export default function Dashboard({ onNavigate, userRole }: DashboardProps) {
       </div>
 
       {/* KPI Cards Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+      <KpiGrid className="xl:grid-cols-5">
         {kpiCards.map((kpi, index) => {
           const Icon = kpi.icon;
           return (
-            <div key={index} className="bg-white rounded-lg border border-gray-200 p-5 hover:shadow-md transition-shadow">
+            <div key={index} className="h-full min-w-0 overflow-hidden rounded-lg border border-gray-200 bg-white p-3 transition-shadow hover:shadow-md sm:p-5">
               <div className="flex items-start justify-between mb-3">
-                <div className={`w-10 h-10 ${kpi.color} rounded-lg flex items-center justify-center`}>
-                  <Icon className="w-5 h-5 text-white" />
+                <div className={`flex h-8 w-8 items-center justify-center rounded-lg sm:h-10 sm:w-10 ${kpi.color}`}>
+                  <Icon className="h-4 w-4 text-white sm:h-5 sm:w-5" />
                 </div>
                 {kpi.trend === 'up' && (
                   <div className="flex items-center gap-1 text-[#10B981] text-xs font-medium">
@@ -674,12 +675,12 @@ export default function Dashboard({ onNavigate, userRole }: DashboardProps) {
                   </div>
                 )}
               </div>
-              <div className="text-2xl font-semibold text-gray-900 mb-1">{kpi.value}</div>
-              <div className="text-sm text-gray-500">{kpi.label}</div>
+              <div className="mb-1 truncate text-xl font-semibold text-gray-900 sm:text-2xl">{kpi.value}</div>
+              <div className="break-words text-xs text-gray-500 sm:text-sm">{kpi.label}</div>
             </div>
           );
         })}
-      </div>
+      </KpiGrid>
 
       {/* Charts Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

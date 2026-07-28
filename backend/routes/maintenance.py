@@ -12,6 +12,7 @@ from services.maintenance_service import (
     list_overdue_follow_ups,
     update_maintenance_job,
     update_maintenance_status,
+    update_maintenance_transport,
 )
 from utils.decorators import role_required
 from utils.responses import success_response
@@ -160,4 +161,22 @@ def update_maintenance_status_route(maintenance_id: str):
     return success_response(
         data={"job": job},
         message="Maintenance status updated successfully.",
+    )
+
+
+@maintenance_bp.post("/<maintenance_id>/transport/<direction>")
+@role_required("owner", "admin")
+def update_maintenance_transport_route(maintenance_id: str, direction: str):
+    payload = request.get_json(silent=True) or {}
+    result = update_maintenance_transport(
+        maintenance_id,
+        direction,
+        payload.get("action") or "ensure",
+        payload,
+        current_user_id=get_jwt_identity(),
+        current_role=get_jwt().get("role"),
+    )
+    return success_response(
+        data=result,
+        message="Maintenance transport updated successfully.",
     )

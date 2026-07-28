@@ -87,6 +87,15 @@ const MOVEMENT_TYPE_LABELS: Record<VehicleMovementType, string> = {
   fuel_purchase: 'Fuel Purchase',
   maintenance: 'Maintenance',
   workshop: 'Workshop',
+  maintenance_transport: 'Maintenance Return Transport',
+  workshop_transport: 'Workshop Outbound Transport',
+  assignment_handover: 'Assignment Handover',
+  internal_company_delivery: 'Internal Company Delivery',
+  stock_transfer: 'Stock Transfer',
+  fuel_station_visit: 'Fuel-station Visit',
+  compliance_inspection_visit: 'Compliance / Inspection Visit',
+  administrative_errand: 'Administrative Errand',
+  vehicle_repositioning: 'Vehicle Repositioning',
   vehicle_transfer: 'Vehicle Transfer',
   internal_company_movement: 'Internal Company Movement',
   emergency: 'Emergency',
@@ -476,6 +485,7 @@ export default function VehicleMovements() {
   const vehicleOptions = options?.vehicles || [];
   const driverOptions = options?.drivers || [];
   const movementTypeOptions = options?.movement_types || [];
+  const creatableMovementTypeOptions = options?.creatable_movement_types || movementTypeOptions;
   const statusOptions = options?.statuses || [];
   const assignmentOptions = options?.assignments || [];
 
@@ -761,7 +771,7 @@ export default function VehicleMovements() {
                 <InputField label="Maintenance Job ID" value={createForm.maintenance_job_id} onChange={(value) => setCreateForm((current) => ({ ...current, maintenance_job_id: value }))} />
               ) : null}
               <SelectField label="Movement Type" value={createForm.movement_type} onChange={(value) => setCreateForm((current) => ({ ...current, movement_type: value as VehicleMovementType }))}>
-                {movementTypeOptions.map((movementType) => (
+                {creatableMovementTypeOptions.map((movementType) => (
                   <option key={movementType} value={movementType}>
                     {MOVEMENT_TYPE_LABELS[movementType]}
                   </option>

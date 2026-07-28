@@ -7,6 +7,15 @@ export type VehicleMovementType =
   | 'fuel_purchase'
   | 'maintenance'
   | 'workshop'
+  | 'maintenance_transport'
+  | 'workshop_transport'
+  | 'assignment_handover'
+  | 'internal_company_delivery'
+  | 'stock_transfer'
+  | 'fuel_station_visit'
+  | 'compliance_inspection_visit'
+  | 'administrative_errand'
+  | 'vehicle_repositioning'
   | 'vehicle_transfer'
   | 'internal_company_movement'
   | 'emergency'
@@ -62,6 +71,36 @@ export interface VehicleMovementRecord {
   vehicle_id: string;
   driver_id?: string | null;
   movement_custodian_id?: string | null;
+  custody_state?: string | null;
+  current_custody_location?: string | null;
+  custody_version?: number;
+  pending_custody_transfer?: {
+    event_id?: string | null;
+    to_user_id?: string | null;
+    to_location?: string | null;
+    initiated_by?: string | null;
+    initiated_at?: string | null;
+  } | null;
+  custody_events?: Array<{
+    event_id: string;
+    event_key?: string | null;
+    event_type: string;
+    from_user_id?: string | null;
+    from_location?: string | null;
+    to_user_id?: string | null;
+    to_location?: string | null;
+    initiated_by?: string | null;
+    accepted_by?: string | null;
+    occurred_at?: string | null;
+    accepted_at?: string | null;
+    condition_summary?: string | null;
+    fuel_level?: number | null;
+    odometer?: number | null;
+    odometer_available: boolean;
+    odometer_unavailable_reason?: string | null;
+    notes?: string | null;
+    evidence?: Array<{ url?: string | null; type?: string | null; label?: string | null }>;
+  }> | null;
   permanent_driver_id?: string | null;
   maintenance_job_id?: string | null;
   preventive_schedule_id?: string | null;
@@ -87,8 +126,15 @@ export interface VehicleMovementRecord {
   parts_changed?: string[] | null;
   test_result?: string | null;
   completion_status?: 'awaiting_admin_verification' | 'approved' | 'returned_for_correction' | 'rejected' | null;
+  physical_completion_status?: string | null;
+  handover_kind?: string | null;
+  handover_sequence?: number | null;
+  transport_direction?: 'outbound' | 'return' | null;
+  transport_mode?: string | null;
   opening_odometer?: number | null;
+  opening_condition_summary?: string | null;
   closing_odometer?: number | null;
+  closing_condition_summary?: string | null;
   opening_fuel_level?: number | null;
   closing_fuel_level?: number | null;
   opening_fuel_level_details?: FuelLevelDetails | null;
@@ -151,6 +197,7 @@ export interface VehicleMovementListResponse {
 
 export interface VehicleMovementOptionsResponse {
   movement_types: VehicleMovementType[];
+  creatable_movement_types?: VehicleMovementType[];
   statuses: VehicleMovementStatus[];
   open_statuses: VehicleMovementStatus[];
   drivers: UserSummary[];

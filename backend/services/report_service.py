@@ -922,7 +922,7 @@ def _load_report_vehicle_options() -> list[dict]:
         cache_key,
         _fetch_documents(
             vehicles_collection(),
-            {},
+            {"usage_type": {"$ne": "personal"}},
             REPORT_VEHICLE_PROJECTION,
             sort_fields=[("registration_number", ASCENDING)],
         ),
@@ -1344,6 +1344,7 @@ def get_finance_reports(
             )
             expenses_query = _apply_common_filters(
                 {
+                    "record_scope": {"$ne": "personal"},
                     **_build_string_date_query("expense_date", filters),
                     **({"finance_account_snapshot.branch": filters["branch"]} if filters["branch"] else {}),
                 },
@@ -1378,7 +1379,7 @@ def get_finance_reports(
                 _fetch_documents(
                     fuel_logs_collection(),
                     _apply_common_filters(
-                        _build_string_date_query("fuel_date", filters),
+                        {"record_scope": {"$ne": "personal"}, **_build_string_date_query("fuel_date", filters)},
                         filters=filters,
                         driver_field="driver_id",
                         vehicle_field="vehicle_id",
@@ -1395,8 +1396,8 @@ def get_finance_reports(
 
     if "maintenance" in selected_categories and not filters["branch"]:
         def maintenance_task():
-            maintenance_query = _apply_common_filters({}, filters=filters, driver_field="driver_id", vehicle_field="vehicle_id")
-            fault_query = _apply_common_filters({}, filters=filters, driver_field="driver_id", vehicle_field="vehicle_id")
+            maintenance_query = _apply_common_filters({"record_scope": {"$ne": "personal"}}, filters=filters, driver_field="driver_id", vehicle_field="vehicle_id")
+            fault_query = _apply_common_filters({"record_scope": {"$ne": "personal"}}, filters=filters, driver_field="driver_id", vehicle_field="vehicle_id")
             maintenance_documents = _fetch_documents(
                 maintenance_jobs_collection(),
                 maintenance_query,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 from flask import current_app
@@ -66,3 +66,27 @@ def ensure_indexes_for_collection(collection: Collection, index_specs: Iterable[
             collection_name,
             ", ".join(skipped_indexes),
         )
+
+
+def run_index_initializers(
+    initializers: Iterable[tuple[str, Callable[[], None]]],
+    *,
+    logger,
+) -> dict[str, Any]:
+    """Run every index initializer without allowing one failure to block the rest."""
+
+    completed: list[str] = []
+    failed: list[str] = []
+    for name, initializer in initializers:
+        try:
+            initializer()
+            completed.append(name)
+        except Exception:
+            failed.append(name)
+            logger.exception("[Flux Startup] Index checks failed for %s.", name)
+    return {
+        "completed": completed,
+        "failed": failed,
+        "completed_count": len(completed),
+        "failed_count": len(failed),
+    }

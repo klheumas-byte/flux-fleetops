@@ -76,19 +76,36 @@ const DASHBOARD_ITEM: SidebarItem = {
 
 const SECTIONS: SidebarSection[] = [
   {
-    id: 'fleet-operations',
-    title: 'Fleet Operations',
+    id: 'fleet-management',
+    title: 'Fleet Management',
     items: [
       { id: 'vehicles', label: 'Vehicles', icon: Truck },
-      { id: 'vehicle-movements', label: 'Vehicle Movements', icon: Route },
-      { id: 'dispatch-financials', label: 'Dispatch Financials', icon: FileBadge2 },
-      { id: 'dispatch-opportunities', label: 'Dispatch Opportunities', icon: Search },
-      { id: 'dispatch-returns', label: 'Vehicle Return & Handover', icon: TimerReset },
-      { id: 'dispatch-requests', label: 'Dispatch Requests', icon: PackageCheck },
-      { id: 'dispatch-planner', label: 'Dispatch Planner', icon: Calendar },
+      { id: 'fleet-owners', label: 'Fleet Owners', icon: Building2 },
       { id: 'drivers', label: 'Drivers', icon: Users },
-      { id: 'assignments', label: 'Assignments', icon: ClipboardList },
+      { id: 'assignments', label: 'Vehicle Assignments', icon: ClipboardList },
       { id: 'fleet-tracking', label: 'Fleet Tracking', icon: MapPin, badge: 'Live' },
+      { id: 'vehicle-movements', label: 'Vehicle Movements', icon: Route },
+      { id: 'dispatch-returns', label: 'Vehicle Return & Handover', icon: TimerReset },
+    ],
+  },
+  {
+    id: 'fleet-operations',
+    title: 'Operations',
+    items: [
+      { id: 'dispatch-requests', label: 'Dispatch Requests', icon: PackageCheck },
+      { id: 'dispatch-planner', label: 'Operations Planner', icon: Calendar },
+      { id: 'operational-requests', label: 'Operational Requests', icon: ClipboardList },
+      { id: 'stock-transfers', label: 'Stock Transfers', icon: PackageCheck },
+      { id: 'supplier-pickup', label: 'Supplier Pickup', icon: PackageCheck },
+      { id: 'digital-waybills', label: 'Digital Waybill', icon: FileBadge2 },
+    ],
+  },
+  {
+    id: 'dispatch-management',
+    title: 'Dispatch Management',
+    items: [
+      { id: 'dispatch-opportunities', label: 'Dispatch Opportunities', icon: Search },
+      { id: 'dispatch-financials', label: 'Dispatch Financials', icon: FileBadge2 },
     ],
   },
   {
@@ -110,8 +127,8 @@ const SECTIONS: SidebarSection[] = [
     ],
   },
   {
-    id: 'maintenance-compliance',
-    title: 'Maintenance & Compliance',
+    id: 'maintenance-safety',
+    title: 'Maintenance & Safety',
     items: [
       { id: 'fault-approvals', label: 'Fault Approvals', icon: ShieldAlert },
       { id: 'incidents', label: 'Accidents & Incidents', icon: AlertTriangle },
@@ -121,12 +138,12 @@ const SECTIONS: SidebarSection[] = [
     ],
   },
   {
-    id: 'performance-analytics',
-    title: 'Performance & Analytics',
+    id: 'fleet-reports',
+    title: 'Reports',
     items: [
+      { id: 'reports', label: 'Fleet Analytics', icon: FileText },
+      { id: 'revenue', label: 'Vehicle Profitability', icon: DollarSign },
       { id: 'driver-performance', label: 'Driver Performance', icon: Activity },
-      { id: 'revenue', label: 'Vehicle Utilization', icon: DollarSign },
-      { id: 'reports', label: 'Reports', icon: FileText },
     ],
   },
   {
@@ -145,6 +162,7 @@ const DEFAULT_OPEN_SECTIONS = SECTIONS.reduce<Record<string, boolean>>((accumula
   accumulator[section.id] = true;
   return accumulator;
 }, {});
+const SIDEBAR_GROUP_STORAGE_KEY = 'flux-admin-sidebar-groups';
 
 export default function Sidebar({
   userRole,
@@ -162,7 +180,13 @@ export default function Sidebar({
   onPointerEnter,
   onPointerLeave,
 }: SidebarProps) {
-  const [openSections, setOpenSections] = useState<Record<string, boolean>>(DEFAULT_OPEN_SECTIONS);
+  const [openSections, setOpenSections] = useState<Record<string, boolean>>(() => {
+    try {
+      return { ...DEFAULT_OPEN_SECTIONS, ...JSON.parse(localStorage.getItem(SIDEBAR_GROUP_STORAGE_KEY) || '{}') };
+    } catch {
+      return DEFAULT_OPEN_SECTIONS;
+    }
+  });
   const sidebarRef = useRef<HTMLDivElement>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
@@ -182,6 +206,10 @@ export default function Sidebar({
     document.addEventListener('keydown', onKeyDown);
     return () => { document.removeEventListener('keydown', onKeyDown); restoreFocusRef.current?.focus(); };
   }, [isOpen, onToggle]);
+
+  useEffect(() => {
+    localStorage.setItem(SIDEBAR_GROUP_STORAGE_KEY, JSON.stringify(openSections));
+  }, [openSections]);
 
   const visibleSections = useMemo(
     () =>

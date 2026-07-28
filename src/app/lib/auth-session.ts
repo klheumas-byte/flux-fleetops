@@ -1,12 +1,17 @@
 import { apiRequest } from './api';
 import type { DriverActiveAssignment } from './driver-api';
 
-export type SessionUserRole = 'owner' | 'admin' | 'driver' | 'dispatcher' | 'customer_service';
+export type SessionUserRole = 'owner' | 'admin' | 'driver' | 'dispatcher' | 'customer_service' | 'fleet_owner' | 'personal_vehicle_owner';
 export type SessionAccountStatus = 'active' | 'inactive' | 'suspended';
 
 export interface SessionDriverProfile {
   assigned_vehicle_id?: string | null;
   approval_status?: string | null;
+  operating_mode?: 'operations_only' | 'target_only' | 'hybrid';
+  target_enabled?: boolean;
+  target_amount?: number | null;
+  target_frequency?: 'daily' | 'weekly';
+  private_finance_enabled?: boolean;
 }
 
 export interface SessionUser {
@@ -17,6 +22,10 @@ export interface SessionUser {
   role: SessionUserRole | string;
   status: SessionAccountStatus | string;
   driver_profile?: SessionDriverProfile | null;
+  must_change_password?: boolean;
+  created_at?: string | null;
+  last_login?: string | null;
+  password_changed_at?: string | null;
 }
 
 function normalizeSessionUserRole(role: string | null | undefined): SessionUserRole | null {
@@ -27,6 +36,8 @@ function normalizeSessionUserRole(role: string | null | undefined): SessionUserR
     normalized === 'owner' ||
     normalized === 'dispatcher' ||
     normalized === 'customer_service'
+    || normalized === 'fleet_owner'
+    || normalized === 'personal_vehicle_owner'
   ) {
     return normalized;
   }

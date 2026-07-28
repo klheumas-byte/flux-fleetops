@@ -647,6 +647,8 @@ def submit_driver_payment(payload: dict, current_user_id: str) -> dict:
     )
     if not assignment:
         raise ApiError("You do not have an active assignment to submit payments for.", status_code=400)
+    if not assignment.get("target_enabled", True):
+        raise ApiError("Targets and payment collection are disabled for this driver.", status_code=403)
 
     vehicle = _get_vehicle_document(str(assignment.get("vehicle_id")))
     amount = _validate_positive_amount(payload.get("amount"), "amount")

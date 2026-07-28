@@ -2,6 +2,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from bson import ObjectId
 from pymongo import ASCENDING, DESCENDING
+from pymongo.errors import DuplicateKeyError
 
 from extensions import get_collection
 from models.expense import serialize_expense
@@ -12,9 +13,11 @@ from models.maintenance import (
 )
 from models.user import serialize_user
 from models.vehicle import serialize_vehicle
+from models.vehicle_movement import serialize_vehicle_movement
 from services.assignment_service import get_active_assignment_for_driver
 from services.expense_service import create_expense
 from services.notification_service import create_notification, notify_roles, resolve_action_notifications
+from services.fleet_owner_service import notify_linked_owner
 from utils.api_error import ApiError
 from utils.mongo_indexes import ensure_indexes_for_collection
 
@@ -65,6 +68,7 @@ ALLOWED_CURRENT_STAGES = {
     "completed",
     "delayed",
 }
+ALLOWED_TRANSPORT_MODES = {"company_driver", "tow", "third_party"}
 
 
 def now_utc():
@@ -153,6 +157,9 @@ def ensure_maintenance_indexes():
             {"keys": [("vehicle_id", ASCENDING), ("status", ASCENDING)]},
             {"keys": [("status", ASCENDING), ("priority", ASCENDING), ("is_overdue", ASCENDING)]},
             {"keys": [("driver_id", ASCENDING), ("status", ASCENDING), ("current_stage", ASCENDING)]},
+            {"keys": [("transport_required", ASCENDING), ("status", ASCENDING)], "options": {"sparse": True}},
+            {"keys": [("linked_outbound_movement_id", ASCENDING)], "options": {"sparse": True}},
+            {"keys": [("linked_return_movement_id", ASCENDING)], "options": {"sparse": True}},
         ],
         collection_name="maintenance_jobs",
     )
@@ -274,6 +281,310 @@ def _validate_odometer(value):
     return round(float(value), 2)
 
 
+def _validate_transport_fields(payload: dict, *, current: dict | None = None) -> dict:
+    current = current or {}
+    required = (
+        payload.get("transport_required")
+        if "transport_required" in payload
+        else bool(current.get("transport_required"))
+    )
+    if not isinstance(required, bool):
+        raise ApiError("transport_required must be a boolean.", status_code=400)
+    mode = (
+        str(payload.get("transport_mode") or "").strip().lower()
+        if "transport_mode" in payload
+        else current.get("transport_mode")
+    )
+    location = (
+        str(payload.get("workshop_location") or "").strip()
+        if "workshop_location" in payload
+        else current.get("workshop_location")
+    )
+    if required:
+        mode = mode or "company_driver"
+        location = location or str(payload.get("vendor_name") or current.get("vendor_name") or "").strip()
+        if mode not in ALLOWED_TRANSPORT_MODES:
+            raise ApiError(
+                "transport_mode must be one of: company_driver, tow, third_party.",
+                status_code=400,
+            )
+        if not location:
+            raise ApiError("workshop_location is required when transport is required.", status_code=400)
+    return {
+        "transport_required": required,
+        "transport_mode": mode if required else None,
+        "workshop_location": location if required else None,
+    }
+
+
+def _ensure_maintenance_transport_movement(
+    maintenance_document: dict,
+    *,
+    direction: str,
+    current_user_id: str | ObjectId,
+) -> dict:
+    from services.movement_source_service import ensure_movement_for_source
+
+    if direction not in {"outbound", "return"}:
+        raise ApiError("Maintenance transport direction must be outbound or return.", status_code=400)
+    if not maintenance_document.get("transport_required"):
+        raise ApiError("This maintenance job does not require physical transport.", status_code=400)
+    if direction == "outbound" and maintenance_document.get("status") not in {
+        "approved",
+        "in_progress",
+        "waiting_parts",
+    }:
+        raise ApiError(
+            "Outbound transport is available only after maintenance approval.",
+            status_code=400,
+        )
+    if (
+        direction == "return"
+        and maintenance_document.get("status") != "completed"
+        and maintenance_document.get("current_stage")
+        not in {"ready_for_driver_test", "driver_confirmed", "completed"}
+    ):
+        raise ApiError(
+            "Return transport is available only when maintenance is ready for return.",
+            status_code=400,
+        )
+    if not isinstance(maintenance_document.get("vehicle_id"), ObjectId):
+        raise ApiError("Maintenance job vehicle is invalid.", status_code=409)
+    actor_id = (
+        current_user_id
+        if isinstance(current_user_id, ObjectId)
+        else ObjectId(str(current_user_id))
+        if ObjectId.is_valid(str(current_user_id))
+        else None
+    )
+    if actor_id is None:
+        raise ApiError("Invalid user identity.", status_code=400)
+    vehicle = vehicles_collection().find_one(
+        {"_id": maintenance_document["vehicle_id"]},
+        {"assigned_driver_id": 1, "current_custodian_id": 1, "registration_number": 1},
+    )
+    if not vehicle:
+        raise ApiError("Maintenance vehicle not found.", status_code=404)
+    linked_field = (
+        "linked_outbound_movement_id"
+        if direction == "outbound"
+        else "linked_return_movement_id"
+    )
+    existing = None
+    linked_id = maintenance_document.get(linked_field)
+    if isinstance(linked_id, ObjectId):
+        existing = get_collection("vehicle_movements").find_one({"_id": linked_id})
+        if existing and existing.get("vehicle_id") != maintenance_document["vehicle_id"]:
+            raise ApiError("Linked maintenance movement belongs to another vehicle.", status_code=409)
+    if direction == "return":
+        conflicting = get_collection("vehicle_movements").find_one(
+            {
+                "vehicle_id": maintenance_document["vehicle_id"],
+                "status": {"$in": ["draft", "pending_approval", "approved", "checked_out", "in_progress"]},
+                "source_key": {"$ne": f"maintenance_job:{maintenance_document['_id']}:return"},
+            },
+            {"_id": 1, "source_key": 1},
+        )
+        if conflicting:
+            raise ApiError(
+                "Outbound maintenance transport must be completed before the return movement can begin.",
+                status_code=409,
+            )
+    timestamp = now_utc()
+    source_record_id = f"{maintenance_document['_id']}:{direction}"
+    is_outbound = direction == "outbound"
+    result = ensure_movement_for_source(
+        source_type="maintenance_job",
+        source_record_id=source_record_id,
+        source_reference=f"{maintenance_document.get('title') or maintenance_document['_id']}:{direction}",
+        movement_defaults={
+            "vehicle_id": maintenance_document["vehicle_id"],
+            "driver_id": maintenance_document.get("driver_id"),
+            "movement_custodian_id": (
+                vehicle.get("current_custodian_id") or vehicle.get("assigned_driver_id")
+                if is_outbound
+                else None
+            ),
+            "permanent_driver_id": vehicle.get("assigned_driver_id"),
+            "maintenance_job_id": maintenance_document["_id"],
+            "preventive_schedule_id": maintenance_document.get("preventive_schedule_id"),
+            "maintenance_assignee_id": maintenance_document.get("driver_id"),
+            "movement_type": "workshop_transport" if is_outbound else "maintenance_transport",
+            "transport_direction": direction,
+            "transport_mode": maintenance_document.get("transport_mode"),
+            "status": "approved",
+            "origin": "Company custody" if is_outbound else maintenance_document.get("workshop_location"),
+            "destination": maintenance_document.get("workshop_location") if is_outbound else "Company custody",
+            "purpose": f"Maintenance {direction} transport",
+            "workshop_name": maintenance_document.get("vendor_name"),
+            "opening_odometer": None,
+            "closing_odometer": None,
+            "opening_fuel_level": None,
+            "closing_fuel_level": None,
+            "custody_state": "company_custody" if is_outbound else "workshop_custody",
+            "current_custody_location": (
+                "Company custody" if is_outbound else maintenance_document.get("workshop_location")
+            ),
+            "custody_events": [],
+            "custody_version": 0,
+            "approved_by": actor_id,
+            "approved_at": timestamp,
+            "created_by": actor_id,
+            "created_at": timestamp,
+        },
+        existing_movement=existing,
+        legacy_query={
+            "maintenance_job_id": maintenance_document["_id"],
+            "transport_direction": direction,
+        },
+    )
+    movement = result["movement"]
+    if maintenance_document.get(linked_field) != movement["_id"]:
+        maintenance_jobs_collection().update_one(
+            {"_id": maintenance_document["_id"]},
+            {
+                "$set": {
+                    linked_field: movement["_id"],
+                    "physical_return_status": (
+                        "awaiting_return"
+                        if direction == "return"
+                        else maintenance_document.get("physical_return_status") or "outbound_pending"
+                    ),
+                    "updated_at": now_utc(),
+                }
+            },
+        )
+        maintenance_document[linked_field] = movement["_id"]
+    return movement
+
+
+def update_maintenance_transport(
+    maintenance_id: str,
+    direction: str,
+    action: str,
+    payload: dict,
+    *,
+    current_user_id: str,
+    current_role: str,
+) -> dict:
+    if current_role not in {"owner", "admin"}:
+        raise ApiError("You do not have permission to manage maintenance transport.", status_code=403)
+    from services.movement_custody_service import (
+        accept_movement_custody,
+        transfer_movement_custody,
+    )
+
+    document = _get_maintenance_document(maintenance_id)
+    movement = _ensure_maintenance_transport_movement(
+        document,
+        direction=direction,
+        current_user_id=current_user_id,
+    )
+    source_id = f"{document['_id']}:{direction}"
+    normalized_action = str(action or "ensure").strip().lower()
+    if normalized_action == "release":
+        destination = (
+            document.get("workshop_location")
+            if direction == "outbound"
+            else (payload or {}).get("to_location") or "Company custody"
+        )
+        transfer_result = transfer_movement_custody(
+            movement["_id"],
+            {
+                **(payload or {}),
+                "to_user_id": (payload or {}).get("to_user_id"),
+                "to_location": destination,
+                "event_type": (
+                    "transferred_to_mechanic"
+                    if direction == "outbound"
+                    else "returned_by_mechanic"
+                ),
+                "source_type": "maintenance_job",
+                "source_id": source_id,
+                "audit_reason": (payload or {}).get("audit_reason")
+                or "Maintenance transport released by an authorized administrator.",
+            },
+            current_user_id=current_user_id,
+            current_role=current_role,
+            source_event_key=f"maintenance:{source_id}:release",
+        )
+        get_collection("vehicle_movements").update_one(
+            {"_id": movement["_id"]},
+            {
+                "$set": {
+                    "opening_odometer": transfer_result["event"].get("odometer"),
+                    "opening_fuel_level": transfer_result["event"].get("fuel_level"),
+                    "opening_condition_summary": transfer_result["event"].get("condition_summary"),
+                    "updated_at": now_utc(),
+                }
+            },
+        )
+        transit_status = "outbound_in_transit" if direction == "outbound" else "return_in_transit"
+        maintenance_jobs_collection().update_one(
+            {"_id": document["_id"]},
+            {"$set": {"physical_return_status": transit_status, "updated_at": now_utc()}},
+        )
+        document["physical_return_status"] = transit_status
+    elif normalized_action == "accept":
+        event_type = "accepted_by_mechanic" if direction == "outbound" else "received_by_company"
+        result = accept_movement_custody(
+            movement["_id"],
+            {
+                **(payload or {}),
+                "event_type": event_type,
+                "to_location": (
+                    document.get("workshop_location")
+                    if direction == "outbound"
+                    else "Company custody"
+                ),
+                "source_type": "maintenance_job",
+                "source_id": source_id,
+            },
+            current_user_id=current_user_id,
+            current_role=current_role,
+            source_event_key=f"maintenance:{source_id}:accepted",
+        )
+        timestamp = now_utc()
+        get_collection("vehicle_movements").update_one(
+            {"_id": movement["_id"]},
+            {
+                "$set": {
+                    "status": "closed",
+                    "returned_by": ObjectId(current_user_id),
+                    "returned_at": timestamp,
+                    "actual_return_time": timestamp,
+                    "closed_by": ObjectId(current_user_id),
+                    "closed_at": timestamp,
+                    "physical_completion_status": "verified",
+                    "closing_odometer": result["event"].get("odometer"),
+                    "closing_fuel_level": result["event"].get("fuel_level"),
+                    "updated_at": timestamp,
+                }
+            },
+        )
+        status_value = "at_workshop" if direction == "outbound" else "returned_to_company"
+        maintenance_jobs_collection().update_one(
+            {"_id": document["_id"]},
+            {"$set": {"physical_return_status": status_value, "updated_at": timestamp}},
+        )
+        document["physical_return_status"] = status_value
+        if direction == "return" and document.get("status") == "completed":
+            vehicle_document = _get_vehicle_document(document["vehicle_id"])
+            _restore_vehicle_status_after_completion(
+                vehicle_document,
+                excluding_maintenance_job_id=document["_id"],
+            )
+    elif normalized_action != "ensure":
+        raise ApiError("action must be ensure, release, or accept.", status_code=400)
+    refreshed = get_collection("vehicle_movements").find_one({"_id": movement["_id"]}) or movement
+    return {
+        "job": _enrich_maintenance_job(
+            maintenance_jobs_collection().find_one({"_id": document["_id"]}) or document
+        ),
+        "movement": serialize_vehicle_movement(refreshed),
+    }
+
+
 def _get_user_document(user_id: str | ObjectId, field_name: str = "user_id"):
     user_object_id = _to_object_id(user_id, field_name)
     document = users_collection().find_one({"_id": user_object_id})
@@ -329,7 +640,7 @@ def _get_expense_document(expense_id: str | ObjectId):
 
 def _get_maintenance_document(maintenance_id: str | ObjectId):
     maintenance_object_id = _to_object_id(maintenance_id, "maintenance_id")
-    document = maintenance_jobs_collection().find_one({"_id": maintenance_object_id})
+    document = maintenance_jobs_collection().find_one({"_id": maintenance_object_id, "record_scope": {"$ne": "personal"}})
     if not document:
         raise ApiError("Maintenance job not found.", status_code=404)
     return document
@@ -823,7 +1134,7 @@ def _enrich_maintenance_jobs(documents: list[dict]) -> list[dict]:
 
 
 def list_maintenance_jobs(current_user_id: str, current_role: str) -> list[dict]:
-    query = {}
+    query = {"record_scope": {"$ne": "personal"}}
 
     documents = list(
         maintenance_jobs_collection()
@@ -963,6 +1274,12 @@ def create_maintenance_job(payload: dict, current_user_id: str, current_role: st
     status = _validate_status(payload.get("status") or "pending")
     current_stage = _validate_current_stage(payload.get("current_stage")) or "assigned_to_mechanic"
     derived_status = _derive_status_from_stage(current_stage, status)
+    transport_fields = _validate_transport_fields(payload)
+    if transport_fields["transport_required"] and derived_status == "completed":
+        raise ApiError(
+            "Transported maintenance cannot be created directly as completed; record outbound custody first.",
+            status_code=400,
+        )
     estimated_cost = _validate_non_negative_amount(payload.get("estimated_cost"), "estimated_cost")
     actual_cost = _validate_non_negative_amount(payload.get("actual_cost"), "actual_cost")
     preventive_schedule_object_id = _to_object_id(
@@ -1012,6 +1329,12 @@ def create_maintenance_job(payload: dict, current_user_id: str, current_role: st
         "priority": priority,
         "vendor_name": (payload.get("vendor_name") or "").strip() or None,
         "vendor_contact": (payload.get("vendor_contact") or "").strip() or None,
+        **transport_fields,
+        "linked_outbound_movement_id": None,
+        "linked_return_movement_id": None,
+        "physical_return_status": "transport_not_started"
+        if transport_fields["transport_required"]
+        else "not_required",
         "estimated_cost": estimated_cost,
         "actual_cost": actual_cost,
         "expense_id": expense_object_id,
@@ -1054,6 +1377,21 @@ def create_maintenance_job(payload: dict, current_user_id: str, current_role: st
     result = maintenance_jobs_collection().insert_one(document)
     document["_id"] = result.inserted_id
 
+    if document.get("transport_required") and derived_status in {
+        "approved",
+        "in_progress",
+        "waiting_parts",
+    }:
+        try:
+            _ensure_maintenance_transport_movement(
+                document,
+                direction="outbound",
+                current_user_id=current_user_id,
+            )
+        except Exception:
+            maintenance_jobs_collection().delete_one({"_id": document["_id"]})
+            raise
+
     if fault_document:
         faults_collection().update_one(
             {"_id": fault_document["_id"]},
@@ -1077,6 +1415,15 @@ def create_maintenance_job(payload: dict, current_user_id: str, current_role: st
         )
 
     _set_vehicle_status_for_maintenance(vehicle_document, priority, derived_status)
+    if derived_status != "completed":
+        notify_linked_owner(
+            vehicle_document["_id"],
+            "maintenance",
+            title="Linked vehicle entered maintenance",
+            message=f"{vehicle_document.get('registration_number') or 'A linked vehicle'} entered maintenance.",
+            priority="high" if priority in {"high", "critical"} else "medium",
+            reference_id=document["_id"],
+        )
 
     if derived_status == "completed":
         document["completion_date"] = document.get("completion_date") or timestamp.date().isoformat()
@@ -1180,6 +1527,13 @@ def update_maintenance_job(maintenance_id: str, payload: dict, current_user_id: 
         update_fields["vendor_name"] = (payload.get("vendor_name") or "").strip() or None
     if "vendor_contact" in payload:
         update_fields["vendor_contact"] = (payload.get("vendor_contact") or "").strip() or None
+    if any(
+        field in payload
+        for field in ("transport_required", "transport_mode", "workshop_location")
+    ):
+        update_fields.update(
+            _validate_transport_fields(payload, current={**document, **update_fields})
+        )
     if "estimated_cost" in payload:
         update_fields["estimated_cost"] = _validate_non_negative_amount(
             payload.get("estimated_cost"), "estimated_cost"
@@ -1238,6 +1592,17 @@ def update_maintenance_job(maintenance_id: str, payload: dict, current_user_id: 
     update_fields["updated_at"] = now_utc()
     maintenance_jobs_collection().update_one({"_id": document["_id"]}, {"$set": update_fields})
     document.update(update_fields)
+
+    if document.get("transport_required") and document.get("status") in {
+        "approved",
+        "in_progress",
+        "waiting_parts",
+    }:
+        _ensure_maintenance_transport_movement(
+            document,
+            direction="outbound",
+            current_user_id=current_user_id,
+        )
 
     _set_vehicle_status_for_maintenance(
         vehicle_document,
@@ -1323,6 +1688,14 @@ def update_maintenance_status(
             raise ApiError("parts_changed must be a string or list.", status_code=400)
         update_fields["parts_changed"] = parts_changed or None
         update_fields["current_stage"] = "completed"
+        if document.get("transport_required"):
+            return_movement = _ensure_maintenance_transport_movement(
+                {**document, **update_fields},
+                direction="return",
+                current_user_id=current_user_id,
+            )
+            update_fields["linked_return_movement_id"] = return_movement["_id"]
+            update_fields["physical_return_status"] = "awaiting_return"
         if fault_document:
             faults_collection().update_one(
                 {"_id": fault_document["_id"]},
@@ -1351,7 +1724,23 @@ def update_maintenance_status(
     maintenance_jobs_collection().update_one({"_id": document["_id"]}, {"$set": update_fields})
     document.update(update_fields)
 
+    if (
+        document.get("transport_required")
+        and next_status in {"approved", "in_progress", "waiting_parts"}
+    ):
+        _ensure_maintenance_transport_movement(
+            document,
+            direction="outbound",
+            current_user_id=current_user_id,
+        )
+
     if next_status == "completed":
+        from flask import has_app_context
+        if has_app_context():
+            from services.maintenance_override_service import close_overrides_for_issue
+            close_overrides_for_issue("maintenance", document["_id"], current_user_id)
+            if fault_document:
+                close_overrides_for_issue("fault", fault_document["_id"], current_user_id)
         preventive_schedule_id = document.get("preventive_schedule_id")
         if preventive_schedule_id:
             from services.preventive_maintenance_service import complete_preventive_schedule
@@ -1568,10 +1957,15 @@ def submit_driver_maintenance_confirmation(
 
 def convert_fault_to_maintenance_job(fault_id: str, current_user_id: str, current_role: str) -> dict:
     fault_document = _get_fault_document(fault_id)
+    existing = None
+    if fault_document.get("maintenance_job_id"):
+        existing = maintenance_jobs_collection().find_one({"_id": fault_document["maintenance_job_id"]})
+    if not existing:
+        existing = maintenance_jobs_collection().find_one({"fault_report_id": fault_document["_id"]})
+    if existing:
+        return _enrich_maintenance_job(existing)
     if fault_document.get("status") != "approved":
         raise ApiError("Only approved faults can be converted to maintenance.", status_code=400)
-    if fault_document.get("maintenance_job_id"):
-        raise ApiError("This fault has already been converted to a maintenance job.", status_code=400)
 
     category_name = "Repair"
     component_name = "Fault"
@@ -1595,4 +1989,12 @@ def convert_fault_to_maintenance_job(fault_id: str, current_user_id: str, curren
         "notes": fault_document.get("admin_notes") or None,
         "next_action": "Assign mechanic/workshop and start diagnosis.",
     }
-    return create_maintenance_job(payload, current_user_id=current_user_id, current_role=current_role)
+    try:
+        return create_maintenance_job(payload, current_user_id=current_user_id, current_role=current_role)
+    except DuplicateKeyError:
+        # The unique fault_report_id index is the concurrency boundary. A
+        # repeated click or concurrent request returns the one canonical job.
+        existing = maintenance_jobs_collection().find_one({"fault_report_id": fault_document["_id"]})
+        if existing:
+            return _enrich_maintenance_job(existing)
+        raise

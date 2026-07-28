@@ -16,6 +16,8 @@ import {
 } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
 import { getStoredSessionUser } from '../../lib/auth-session';
+import MaintenanceOverridesPanel from './MaintenanceOverridesPanel';
+import KpiGrid from '../shared/KpiGrid';
 
 type MaintenanceType =
   | 'repair'
@@ -131,6 +133,12 @@ interface MaintenanceJob {
   priority: MaintenancePriority;
   vendor_name: string | null;
   vendor_contact: string | null;
+  transport_required: boolean;
+  transport_mode: 'company_driver' | 'tow' | 'third_party' | null;
+  workshop_location: string | null;
+  linked_outbound_movement_id: string | null;
+  linked_return_movement_id: string | null;
+  physical_return_status: string | null;
   estimated_cost: number | null;
   actual_cost: number | null;
   expense_id: string | null;
@@ -237,6 +245,9 @@ interface MaintenanceFormState {
   priority: MaintenancePriority;
   vendor_name: string;
   vendor_contact: string;
+  transport_required: boolean;
+  transport_mode: 'company_driver' | 'tow' | 'third_party';
+  workshop_location: string;
   estimated_cost: string;
   actual_cost: string;
   expense_id: string;
@@ -276,6 +287,9 @@ const initialFormState: MaintenanceFormState = {
   priority: 'medium',
   vendor_name: '',
   vendor_contact: '',
+  transport_required: false,
+  transport_mode: 'company_driver',
+  workshop_location: '',
   estimated_cost: '',
   actual_cost: '',
   expense_id: '',
@@ -620,6 +634,9 @@ export default function Maintenance() {
       priority: job.priority,
       vendor_name: job.vendor_name || '',
       vendor_contact: job.vendor_contact || '',
+      transport_required: job.transport_required,
+      transport_mode: job.transport_mode || 'company_driver',
+      workshop_location: job.workshop_location || '',
       estimated_cost: job.estimated_cost != null ? String(job.estimated_cost) : '',
       actual_cost: job.actual_cost != null ? String(job.actual_cost) : '',
       expense_id: job.expense_id || '',
@@ -659,6 +676,9 @@ export default function Maintenance() {
       priority: formState.priority,
       vendor_name: formState.vendor_name,
       vendor_contact: formState.vendor_contact,
+      transport_required: formState.transport_required,
+      transport_mode: formState.transport_required ? formState.transport_mode : null,
+      workshop_location: formState.transport_required ? formState.workshop_location : null,
       estimated_cost: formState.estimated_cost ? Number(formState.estimated_cost) : null,
       actual_cost: formState.actual_cost ? Number(formState.actual_cost) : null,
       expense_id: formState.expense_id || null,
@@ -706,6 +726,36 @@ export default function Maintenance() {
       }
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleTransportAction = async (
+    job: MaintenanceJob,
+    direction: 'outbound' | 'return',
+    action: 'ensure' | 'release' | 'accept',
+  ) => {
+    setActionError('');
+    setActiveRowActionJobId(job.id);
+    try {
+      await apiRequest(`/maintenance/${job.id}/transport/${direction}`, {
+        method: 'POST',
+        body: JSON.stringify({
+          action,
+          audit_reason:
+            action === 'ensure'
+              ? undefined
+              : `Maintenance ${direction} transport ${action} recorded by authorized operations staff.`,
+        }),
+      });
+      await loadMaintenance();
+    } catch (error) {
+      setActionError(
+        error instanceof ApiRequestError
+          ? error.message
+          : 'Unable to update maintenance transport.',
+      );
+    } finally {
+      setActiveRowActionJobId(null);
     }
   };
 
@@ -923,6 +973,8 @@ export default function Maintenance() {
         </div>
       </div>
 
+      <MaintenanceOverridesPanel />
+
       {pageError && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
           {pageError}
@@ -940,14 +992,14 @@ export default function Maintenance() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-3 xl:grid-cols-6">
+      <KpiGrid>
         <SummaryCard label="Open Jobs" value={dashboardTotals.open} icon={Wrench} tone="slate" />
         <SummaryCard label="In Progress" value={dashboardTotals.inProgress} icon={Truck} tone="blue" />
         <SummaryCard label="Waiting Parts" value={dashboardTotals.waitingParts} icon={Clock3} tone="amber" />
         <SummaryCard label="Critical Jobs" value={dashboardTotals.critical} icon={ShieldAlert} tone="rose" />
         <SummaryCard label="Completed Jobs" value={dashboardTotals.completed} icon={CheckCircle2} tone="green" />
         <SummaryCard label="Overdue Jobs" value={dashboardTotals.overdue} icon={TimerReset} tone="rose" />
-      </div>
+      </KpiGrid>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
         <FollowUpPanel
@@ -1143,6 +1195,46 @@ export default function Maintenance() {
                         >
                           Edit
                         </button>
+                        {job.transport_required && !job.linked_outbound_movement_id ? (
+                          <button
+                            onClick={() => void handleTransportAction(job, 'outbound', 'ensure')}
+                            className="inline-flex items-center gap-1 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
+                          >
+                            Ensure Outbound
+                          </button>
+                        ) : null}
+                        {job.transport_required && job.physical_return_status === 'outbound_pending' ? (
+                          <button
+                            onClick={() => void handleTransportAction(job, 'outbound', 'release')}
+                            className="inline-flex items-center gap-1 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
+                          >
+                            Release to Workshop
+                          </button>
+                        ) : null}
+                        {job.transport_required && job.physical_return_status === 'outbound_in_transit' ? (
+                          <button
+                            onClick={() => void handleTransportAction(job, 'outbound', 'accept')}
+                            className="inline-flex items-center gap-1 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
+                          >
+                            Confirm Workshop Receipt
+                          </button>
+                        ) : null}
+                        {job.transport_required && job.physical_return_status === 'awaiting_return' ? (
+                          <button
+                            onClick={() => void handleTransportAction(job, 'return', 'release')}
+                            className="inline-flex items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-100"
+                          >
+                            Release Return
+                          </button>
+                        ) : null}
+                        {job.transport_required && job.physical_return_status === 'return_in_transit' ? (
+                          <button
+                            onClick={() => void handleTransportAction(job, 'return', 'accept')}
+                            className="inline-flex items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-100"
+                          >
+                            Receive Vehicle
+                          </button>
+                        ) : null}
                       </div>
                     </td>
                   </tr>
@@ -1315,6 +1407,25 @@ export default function Maintenance() {
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <InputField label="Vendor Name" value={formState.vendor_name} onChange={(value) => setFormState((current) => ({ ...current, vendor_name: value }))} />
                 <InputField label="Vendor Contact" value={formState.vendor_contact} onChange={(value) => setFormState((current) => ({ ...current, vendor_contact: value }))} />
+                <label className="flex items-center gap-3 rounded-lg border border-gray-200 px-4 py-3 text-sm font-medium text-gray-700">
+                  <input
+                    type="checkbox"
+                    checked={formState.transport_required}
+                    onChange={(event) => setFormState((current) => ({ ...current, transport_required: event.target.checked }))}
+                    className="h-4 w-4 rounded border-gray-300 text-blue-600"
+                  />
+                  Workshop transport required
+                </label>
+                {formState.transport_required ? (
+                  <>
+                    <SelectField label="Transport Mode" value={formState.transport_mode} onChange={(value) => setFormState((current) => ({ ...current, transport_mode: value as MaintenanceFormState['transport_mode'] }))}>
+                      <option value="company_driver">Company Driver</option>
+                      <option value="tow">Tow</option>
+                      <option value="third_party">Third Party</option>
+                    </SelectField>
+                    <InputField label="Workshop Location" value={formState.workshop_location} onChange={(value) => setFormState((current) => ({ ...current, workshop_location: value }))} />
+                  </>
+                ) : null}
                 <InputField label="Estimated Cost" type="number" value={formState.estimated_cost} onChange={(value) => setFormState((current) => ({ ...current, estimated_cost: value }))} />
                 <InputField label="Actual Cost" type="number" value={formState.actual_cost} onChange={(value) => setFormState((current) => ({ ...current, actual_cost: value }))} />
                 <InputField label="Odometer Reading" type="number" value={formState.odometer_reading} onChange={(value) => setFormState((current) => ({ ...current, odometer_reading: value }))} />
@@ -1558,12 +1669,12 @@ function SummaryCard({
   }[tone];
 
   return (
-    <div className="rounded-xl border border-gray-200 bg-white p-5">
-      <div className={`mb-2 flex h-10 w-10 items-center justify-center rounded-lg ${toneClasses}`}>
-        <Icon className="h-5 w-5" />
+    <div className="h-full min-w-0 overflow-hidden rounded-xl border border-gray-200 bg-white p-3 sm:p-5">
+      <div className={`mb-2 flex h-8 w-8 items-center justify-center rounded-lg sm:h-10 sm:w-10 ${toneClasses}`}>
+        <Icon className="h-4 w-4 sm:h-5 sm:w-5" />
       </div>
-      <div className="text-2xl font-semibold text-[#0F172A]">{value}</div>
-      <div className="text-sm text-gray-600">{label}</div>
+      <div className="text-xl font-semibold text-[#0F172A] sm:text-2xl">{value}</div>
+      <div className="break-words text-xs text-gray-600 sm:text-sm">{label}</div>
     </div>
   );
 }

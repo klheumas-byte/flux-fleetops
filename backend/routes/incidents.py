@@ -18,7 +18,7 @@ incidents_bp = Blueprint("incidents", __name__)
 
 
 @incidents_bp.get("")
-@role_required("owner", "admin", "driver")
+@role_required("owner", "admin", "driver", "fleet_owner")
 def get_incidents_route():
     return success_response(
         data=list_incidents(
@@ -29,7 +29,7 @@ def get_incidents_route():
 
 
 @incidents_bp.post("")
-@role_required("owner", "admin", "driver")
+@role_required("owner", "admin", "driver", "fleet_owner")
 def create_incident_route():
     incident = create_incident(
         payload=request.get_json(silent=True) or {},
@@ -44,7 +44,7 @@ def create_incident_route():
 
 
 @incidents_bp.get("/<incident_id>")
-@role_required("owner", "admin", "driver")
+@role_required("owner", "admin", "driver", "fleet_owner")
 def get_incident_route(incident_id: str):
     incident = get_incident_by_id(
         incident_id,
@@ -55,7 +55,7 @@ def get_incident_route(incident_id: str):
 
 
 @incidents_bp.get("/<incident_id>/attachments/<attachment_id>")
-@role_required("owner", "admin", "driver")
+@role_required("owner", "admin", "driver", "fleet_owner")
 def get_incident_attachment_route(incident_id: str, attachment_id: str):
     attachment = get_incident_attachment(
         incident_id,

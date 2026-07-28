@@ -16,6 +16,8 @@ from services.vehicle_service import (
     transfer_vehicle_ownership,
     update_vehicle,
     update_vehicle_status,
+    list_fleet_owners,
+    create_fleet_owner,
 )
 from services.preventive_maintenance_service import generate_default_preventive_schedules_for_vehicle
 from utils.decorators import role_required
@@ -23,6 +25,33 @@ from utils.responses import success_response
 
 
 vehicles_bp = Blueprint("vehicles", __name__)
+
+
+@vehicles_bp.get("/fleet-owners")
+@role_required("owner", "admin")
+def get_fleet_owners_route():
+    return success_response(
+        data={
+            "fleet_owners": list_fleet_owners(
+                current_role=get_jwt().get("role"),
+                current_user_id=get_jwt_identity(),
+            )
+        }
+    )
+
+
+@vehicles_bp.post("/fleet-owners")
+@role_required("owner", "admin")
+def create_fleet_owner_route():
+    fleet_owner = create_fleet_owner(
+        request.get_json(silent=True) or {},
+        current_user_id=get_jwt_identity(),
+    )
+    return success_response(
+        data={"fleet_owner": fleet_owner},
+        message="Fleet Owner created successfully.",
+        status_code=201,
+    )
 
 
 @vehicles_bp.get("")

@@ -1,78 +1,4 @@
-function buildLocalApiBaseCandidates(hostname: string, protocol: string) {
-  const normalizedProtocol = protocol || 'http:';
-  const candidates: string[] = [];
-  const seen = new Set<string>();
-  const localhostAliases =
-    hostname === 'localhost'
-      ? ['localhost', '127.0.0.1']
-      : hostname === '127.0.0.1'
-      ? ['127.0.0.1', 'localhost']
-      : [hostname];
-  const ports = ['5001', '5000'];
-
-  const add = (baseUrl: string) => {
-    if (seen.has(baseUrl)) {
-      return;
-    }
-    seen.add(baseUrl);
-    candidates.push(baseUrl);
-  };
-
-  localhostAliases.forEach((host) => {
-    ports.forEach((port) => {
-      add(`${normalizedProtocol}//${host}:${port}/api`);
-    });
-  });
-  add('/api');
-
-  return candidates;
-}
-
-function resolveApiBaseUrl() {
-  const configured = import.meta.env.VITE_API_BASE_URL?.trim();
-  if (configured) {
-    return configured.replace(/\/+$/, '');
-  }
-
-  if (typeof window !== 'undefined') {
-    const { origin, hostname } = window.location;
-    const normalizedHostname = hostname.toLowerCase();
-    const isLocalhost =
-      normalizedHostname === 'localhost' ||
-      normalizedHostname === '127.0.0.1' ||
-      normalizedHostname === '0.0.0.0';
-
-    if (!isLocalhost) {
-      return `${origin}/api`;
-    }
-    return '/api';
-  }
-
-  return '/api';
-}
-
-const API_BASE_URL = resolveApiBaseUrl();
-const API_BASE_URL_CANDIDATES =
-  typeof window !== 'undefined'
-    ? (() => {
-        const configured = import.meta.env.VITE_API_BASE_URL?.trim();
-        if (configured) {
-          return [configured.replace(/\/+$/, '')];
-        }
-        const { origin, hostname, protocol } = window.location;
-        const normalizedHostname = hostname.toLowerCase();
-        const isLocalhost =
-          normalizedHostname === 'localhost' ||
-          normalizedHostname === '127.0.0.1' ||
-          normalizedHostname === '0.0.0.0';
-
-        if (!isLocalhost) {
-          return [`${origin}/api`];
-        }
-
-        return buildLocalApiBaseCandidates(hostname, protocol);
-      })()
-    : [API_BASE_URL];
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL?.trim() || '/api').replace(/\/+$/, '');
 
 type ApiRequestOptions = Omit<RequestInit, 'headers'> & {
   headers?: Record<string, string>;
@@ -167,6 +93,17 @@ function normalizeErrorMessage(status: number, data: any, fallback?: string) {
   const rawMessage = String(data?.error || data?.message || fallback || '').trim();
   const lowerRawMessage = rawMessage.toLowerCase();
 
+  if (
+    status === 404
+    && (
+      lowerRawMessage.includes('<!doctype html')
+      || lowerRawMessage.includes('<html')
+      || lowerRawMessage.includes('the requested url was not found on the server')
+    )
+  ) {
+    return 'This feature endpoint is unavailable on the connected backend. Restart the current Flux backend and try again.';
+  }
+
   if (lowerRawMessage.includes('vehicle id not found') || lowerRawMessage.includes('vehicle not found')) {
     return 'That vehicle could not be found. Please return to the vehicle list and try again.';
   }
@@ -194,42 +131,6 @@ function normalizeErrorMessage(status: number, data: any, fallback?: string) {
   }
 
   return fallback || 'Unable to complete the request right now.';
-}
-
-function isLikelyHtmlPayload(response: Response, responseText: string) {
-  const contentType = response.headers.get('content-type') || '';
-  if (contentType.toLowerCase().includes('text/html')) {
-    return true;
-  }
-
-  const trimmed = responseText.trim().toLowerCase();
-  return trimmed.startsWith('<!doctype html') || trimmed.startsWith('<html');
-}
-
-function isLikelyMissingRoutePayload(status: number, data: any) {
-  if (status !== 404) {
-    return false;
-  }
-  const message = String(data?.error || data?.message || '').trim().toLowerCase();
-  return message.includes('requested url was not found on the server');
-}
-
-function shouldRetryWithNextCandidate(response: Response, responseText: string, candidateUrl: string, candidateUrls: string[]) {
-  if (candidateUrls.length <= 1 || candidateUrl === candidateUrls[candidateUrls.length - 1]) {
-    return false;
-  }
-
-  const status = response.status;
-  if (isLikelyHtmlPayload(response, responseText)) {
-    return status === 404 || status === 502 || status === 503 || status === 504;
-  }
-
-  try {
-    const data = responseText ? JSON.parse(responseText) : null;
-    return isLikelyMissingRoutePayload(status, data);
-  } catch {
-    return false;
-  }
 }
 
 export async function apiRequest<T>(
@@ -306,7 +207,7 @@ export async function apiRequest<T>(
     let responseText = '';
     let data: any = null;
     let activeRequestUrl = requestUrl;
-    const candidateUrls = API_BASE_URL_CANDIDATES.map((baseUrl) => `${baseUrl}${path}`);
+    const candidateUrls = [`${API_BASE_URL}${path}`];
     try {
       let lastError: unknown = null;
       for (const candidateUrl of candidateUrls) {
@@ -326,19 +227,6 @@ export async function apiRequest<T>(
             }
           } else {
             data = null;
-          }
-          if (shouldRetryWithNextCandidate(response, responseText, candidateUrl, candidateUrls)) {
-            console.warn('[Flux API] Retrying next candidate after HTML/local-proxy miss', {
-              path,
-              method,
-              status: response.status,
-              requestUrl: candidateUrl,
-              nextCandidateUrl: candidateUrls[candidateUrls.indexOf(candidateUrl) + 1] || null,
-            });
-            response = null;
-            responseText = '';
-            data = null;
-            continue;
           }
           break;
         } catch (error) {

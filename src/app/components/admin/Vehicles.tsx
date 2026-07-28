@@ -79,6 +79,8 @@ interface Vehicle {
   operating_fleet_name?: string;
   asset_owner_type?: AssetOwnerType | string | null;
   asset_owner_name?: string | null;
+  ownership_type?: 'company_owned' | 'third_party_owned';
+  fleet_owner_id?: string | null;
   asset_owner_contact?: {
     phone?: string | null;
     email?: string | null;
@@ -184,6 +186,8 @@ interface VehicleFormState {
   operating_fleet_name: string;
   asset_owner_type: AssetOwnerType;
   asset_owner_name: string;
+  ownership_type: 'company_owned' | 'third_party_owned';
+  fleet_owner_id: string;
   asset_owner_phone: string;
   asset_owner_email: string;
   asset_owner_address: string;
@@ -240,6 +244,8 @@ const initialVehicleForm: VehicleFormState = {
   operating_fleet_name: 'Flux Fleet Ops',
   asset_owner_type: 'Axelera Owned',
   asset_owner_name: 'Axelera',
+  ownership_type: 'company_owned',
+  fleet_owner_id: '',
   asset_owner_phone: '',
   asset_owner_email: '',
   asset_owner_address: '',
@@ -294,6 +300,16 @@ interface EconomicsDashboardResponse {
       vehicles_profit_generating?: number;
     };
   };
+}
+
+interface FleetOwner {
+  id: string;
+  name: string;
+  vehicle_count: number;
+}
+
+interface FleetOwnersResponse {
+  data: { fleet_owners: FleetOwner[] };
 }
 
 interface VehicleCostItemFormState {
@@ -447,6 +463,8 @@ function buildVehiclePayload(form: VehicleFormState) {
     operating_fleet_name: parseOptionalString(form.operating_fleet_name) || 'Flux Fleet Ops',
     asset_owner_type: parseOptionalString(form.asset_owner_type),
     asset_owner_name: parseOptionalString(form.asset_owner_name),
+    ownership_type: form.ownership_type,
+    fleet_owner_id: form.ownership_type === 'third_party_owned' ? form.fleet_owner_id : null,
     asset_owner_phone: parseOptionalString(form.asset_owner_phone),
     asset_owner_email: parseOptionalString(form.asset_owner_email),
     asset_owner_address: parseOptionalString(form.asset_owner_address),
@@ -509,6 +527,7 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
   const [economicsDashboard, setEconomicsDashboard] = useState<EconomicsDashboardResponse['data']['dashboard'] | null>(null);
   const [systemSettings, setSystemSettings] = useState<SystemSettingsRecord | null>(null);
   const [costItemVehicle, setCostItemVehicle] = useState<Vehicle | null>(null);
+  const [fleetOwners, setFleetOwners] = useState<FleetOwner[]>([]);
   const [costItemForm, setCostItemForm] = useState<VehicleCostItemFormState>({
     item_name: '',
     amount: '',
@@ -522,14 +541,16 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
 
   const loadVehicleSupplementalData = async () => {
     try {
-      const [dashboardResponse, settingsResponse] = await Promise.all([
+      const [dashboardResponse, settingsResponse, fleetOwnerResponse] = await Promise.all([
         apiRequest<EconomicsDashboardResponse>('/vehicles/economics/dashboard', {
           cacheTtlMs: 15000,
         }),
         fetchSystemSettings(),
+        apiRequest<FleetOwnersResponse>('/vehicles/fleet-owners', { cacheTtlMs: 15000 }),
       ]);
       setEconomicsDashboard(dashboardResponse.data.dashboard);
       setSystemSettings(settingsResponse);
+      setFleetOwners(fleetOwnerResponse.data.fleet_owners || []);
     } catch {
       setEconomicsDashboard(null);
     }
@@ -722,6 +743,8 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
       operating_fleet_name: vehicle.operating_fleet_name || 'Flux Fleet Ops',
       asset_owner_type: (vehicle.asset_owner_type as AssetOwnerType) || 'Axelera Owned',
       asset_owner_name: vehicle.asset_owner_name || 'Axelera',
+      ownership_type: vehicle.ownership_type || 'company_owned',
+      fleet_owner_id: vehicle.fleet_owner_id || '',
       asset_owner_phone: vehicle.asset_owner_contact?.phone || '',
       asset_owner_email: vehicle.asset_owner_contact?.email || '',
       asset_owner_address: vehicle.asset_owner_contact?.address || '',
@@ -1170,7 +1193,9 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
                   {paginatedVehicles.length === 0 && (
                     <tr>
                       <td colSpan={10} className="px-6 py-12 text-center text-sm text-gray-500">
-                        {vehicles.length === 0
+                        {pageError
+                          ? 'Vehicles could not be loaded. Use the error above and retry.'
+                          : vehicles.length === 0
                           ? 'No vehicles have been added yet.'
                           : 'No matching records found.'}
                       </td>
@@ -1260,6 +1285,8 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
                       <option value="pickup">Pickup</option>
                       <option value="van">Van</option>
                       <option value="truck">Truck</option>
+                      <option value="tricycle">Tricycle</option>
+                      <option value="motor">Motor</option>
                       <option value="motorcycle">Motorcycle</option>
                     </select>
                   </div>
@@ -1399,6 +1426,52 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
                           readOnly
                         />
                       </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Ownership Type</label>
+                        <select
+                          value={formState.ownership_type}
+                          onChange={(e) => {
+                            const ownershipType = e.target.value as VehicleFormState['ownership_type'];
+                            setFormState((current) => ({
+                              ...current,
+                              ownership_type: ownershipType,
+                              fleet_owner_id: ownershipType === 'company_owned' ? '' : current.fleet_owner_id,
+                              asset_owner_type: ownershipType === 'company_owned'
+                                ? 'Axelera Owned'
+                                : 'Managed Third-Party Vehicle',
+                            }));
+                          }}
+                          className="w-full px-3 py-2.5 border border-gray-300 rounded-lg bg-white"
+                        >
+                          <option value="company_owned">Company owned</option>
+                          <option value="third_party_owned">Third-party owned</option>
+                        </select>
+                      </div>
+                      {formState.ownership_type === 'third_party_owned' && (
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-2">Fleet Owner</label>
+                          <select
+                            value={formState.fleet_owner_id}
+                            onChange={(e) => {
+                              const fleetOwner = fleetOwners.find((item) => item.id === e.target.value);
+                              setFormState((current) => ({
+                                ...current,
+                                fleet_owner_id: e.target.value,
+                                asset_owner_name: fleetOwner?.name || current.asset_owner_name,
+                              }));
+                            }}
+                            required
+                            className="w-full px-3 py-2.5 border border-gray-300 rounded-lg bg-white"
+                          >
+                            <option value="">Select Fleet Owner...</option>
+                            {fleetOwners.map((fleetOwner) => (
+                              <option key={fleetOwner.id} value={fleetOwner.id}>
+                                {fleetOwner.name} ({fleetOwner.vehicle_count} vehicles)
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
                       <div>
                         <label className="block text-sm font-medium text-gray-700 mb-2">Asset Owner Type</label>
                         <select

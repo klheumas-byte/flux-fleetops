@@ -18,6 +18,12 @@ from services.vehicle_movement_service import (
     submit_maintenance_completion,
     review_maintenance_completion,
 )
+from services.movement_custody_service import (
+    accept_movement_custody,
+    append_custody_event,
+    return_movement_custody,
+    transfer_movement_custody,
+)
 from utils.decorators import role_required
 from utils.responses import success_response
 
@@ -199,6 +205,89 @@ def cancel_vehicle_movement_route(movement_id: str):
     return success_response(
         data={"movement": movement},
         message="Vehicle movement cancelled successfully.",
+    )
+
+
+@vehicle_movements_bp.post("/<movement_id>/custody/transfer")
+@role_required("owner", "admin", "driver")
+def transfer_vehicle_movement_custody_route(movement_id: str):
+    result = transfer_movement_custody(
+        movement_id,
+        request.get_json(silent=True) or {},
+        current_user_id=get_jwt_identity(),
+        current_role=get_jwt().get("role"),
+    )
+    return success_response(
+        data={"movement": get_vehicle_movement_by_id(
+            movement_id,
+            current_user_id=get_jwt_identity(),
+            current_role=get_jwt().get("role"),
+        ), "custody_event": result["event"]},
+        message="Vehicle custody transfer recorded.",
+        status_code=201 if result["created"] else 200,
+    )
+
+
+@vehicle_movements_bp.post("/<movement_id>/custody/accept")
+@role_required("owner", "admin", "driver")
+def accept_vehicle_movement_custody_route(movement_id: str):
+    result = accept_movement_custody(
+        movement_id,
+        request.get_json(silent=True) or {},
+        current_user_id=get_jwt_identity(),
+        current_role=get_jwt().get("role"),
+    )
+    return success_response(
+        data={"movement": get_vehicle_movement_by_id(
+            movement_id,
+            current_user_id=get_jwt_identity(),
+            current_role=get_jwt().get("role"),
+        ), "custody_event": result["event"]},
+        message="Vehicle custody accepted.",
+        status_code=201 if result["created"] else 200,
+    )
+
+
+@vehicle_movements_bp.post("/<movement_id>/custody/return")
+@role_required("owner", "admin", "driver")
+def return_vehicle_movement_custody_route(movement_id: str):
+    result = return_movement_custody(
+        movement_id,
+        request.get_json(silent=True) or {},
+        current_user_id=get_jwt_identity(),
+        current_role=get_jwt().get("role"),
+    )
+    return success_response(
+        data={"movement": get_vehicle_movement_by_id(
+            movement_id,
+            current_user_id=get_jwt_identity(),
+            current_role=get_jwt().get("role"),
+        ), "custody_event": result["event"]},
+        message="Vehicle custody returned.",
+        status_code=201 if result["created"] else 200,
+    )
+
+
+@vehicle_movements_bp.post("/<movement_id>/custody/corrections")
+@role_required("owner", "admin")
+def correct_vehicle_movement_custody_route(movement_id: str):
+    payload = request.get_json(silent=True) or {}
+    result = append_custody_event(
+        movement_id,
+        event_type=payload.get("event_type") or "other",
+        initiated_by=get_jwt_identity(),
+        current_role=get_jwt().get("role"),
+        payload={**payload, "is_correction": True},
+        source_event_key=payload.get("event_key"),
+    )
+    return success_response(
+        data={"movement": get_vehicle_movement_by_id(
+            movement_id,
+            current_user_id=get_jwt_identity(),
+            current_role=get_jwt().get("role"),
+        ), "custody_event": result["event"]},
+        message="Audited custody correction recorded.",
+        status_code=201 if result["created"] else 200,
     )
 
 

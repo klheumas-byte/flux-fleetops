@@ -141,8 +141,10 @@ class DispatchReturnConfirmationTests(unittest.TestCase):
             patch.object(service, "_build_return_detail", return_value={"ok": True}),
             patch.object(service, "resolve_action_notifications"),
             patch("services.dispatch_financial_service.ensure_dispatch_financial_record"),
+            patch("services.dispatch_fuel_service.refresh_dispatch_fuel_summary"),
+            patch("services.movement_custody_service.return_movement_custody"),
         ]
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
             result = service.confirm_dispatch_return(
                 str(self.job_id),
                 self.payload,
@@ -174,7 +176,8 @@ class DispatchReturnConfirmationTests(unittest.TestCase):
 
     def test_closing_odometer_is_optional(self):
         self.payload.pop("closing_odometer")
-        self._run_confirm()
+        result, _, _ = self._run_confirm()
+        self.assertEqual(result["detail"], {"ok": True})
         self.assertIsNone(self.movement["closing_odometer"])
         self.assertIsNone(self.job["return_checklist"]["closing_odometer"])
 

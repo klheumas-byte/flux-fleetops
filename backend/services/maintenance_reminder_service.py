@@ -100,7 +100,7 @@ def run_maintenance_reminder_sweep(*, batch_size=50, schedule_ids=None):
         return {"skipped": True, "reason": "another sweep holds the lease"}
 
     summary = {"skipped": False, "schedules": 0, "maintenance_jobs": 0,
-               "movements": 0, "notifications": 0, "errors": 0}
+               "movements": 0, "overrides_expired": 0, "notifications": 0, "errors": 0}
     try:
         # Date-driven schedule reminders intentionally do not resolve odometers.
         # Missing mileage therefore falls back to the time rule.
@@ -313,6 +313,11 @@ def run_maintenance_reminder_sweep(*, batch_size=50, schedule_ids=None):
                         summary["notifications"] += 1
             except Exception:
                 summary["errors"] += 1
+        try:
+            from services.maintenance_override_service import reconcile_expired_overrides
+            summary["overrides_expired"] = reconcile_expired_overrides()
+        except Exception:
+            summary["errors"] += 1
         return summary
     finally:
         try:

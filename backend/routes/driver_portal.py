@@ -1,4 +1,4 @@
-from flask import Blueprint
+from flask import Blueprint, Response
 from flask_jwt_extended import get_jwt_identity
 
 from services.assignment_service import get_active_assignment_for_driver
@@ -30,6 +30,10 @@ from services.dispatch_opportunity_service import (
     withdraw_driver_dispatch_opportunity,
 )
 from services.fuel_service import list_fuel_logs
+from services.dispatch_fuel_service import (
+    get_dispatch_fuel_accountability,
+    record_dispatch_opening_fuel,
+)
 from services.maintenance_service import (
     get_driver_maintenance_job_by_id,
     list_driver_maintenance_jobs,
@@ -37,12 +41,89 @@ from services.maintenance_service import (
     submit_driver_maintenance_confirmation,
 )
 from services.preventive_maintenance_service import get_driver_preventive_maintenance_snapshot
+from services.operational_task_service import (
+    get_driver_operations_dashboard_summary,
+    list_driver_operational_tasks,
+)
 from services.wallet_service import get_logged_in_driver_wallet
-from utils.decorators import role_required
+from services.driver_private_finance_service import (
+    create_private_entry,
+    delete_private_entry,
+    export_private_entries_csv,
+    list_private_entries,
+    private_entry_history,
+    private_finance_summary,
+    update_private_entry,
+)
+from utils.decorators import driver_mode_required, role_required
 from utils.responses import success_response
 
 
 driver_portal_bp = Blueprint("driver_portal", __name__)
+
+
+@driver_portal_bp.get("/private-finance")
+@role_required("driver")
+@driver_mode_required("targets")
+def get_private_finance_entries():
+    return success_response(data=list_private_entries(
+        get_jwt_identity(), request.args.get("start_date"), request.args.get("end_date"),
+        request.args.get("platform"), request.args.get("page", default=1, type=int),
+        request.args.get("page_size", default=25, type=int),
+    ))
+
+
+@driver_portal_bp.post("/private-finance")
+@role_required("driver")
+@driver_mode_required("targets")
+def post_private_finance_entry():
+    return success_response(
+        data={"entry": create_private_entry(get_jwt_identity(), request.get_json(silent=True) or {})},
+        message="Private earnings entry saved.", status_code=201,
+    )
+
+
+@driver_portal_bp.patch("/private-finance/<entry_id>")
+@role_required("driver")
+@driver_mode_required("targets")
+def patch_private_finance_entry(entry_id):
+    return success_response(data={"entry": update_private_entry(
+        get_jwt_identity(), entry_id, request.get_json(silent=True) or {}
+    )}, message="Private earnings entry updated.")
+
+
+@driver_portal_bp.delete("/private-finance/<entry_id>")
+@role_required("driver")
+@driver_mode_required("targets")
+def remove_private_finance_entry(entry_id):
+    return success_response(data=delete_private_entry(get_jwt_identity(), entry_id), message="Private earnings entry deleted.")
+
+
+@driver_portal_bp.get("/private-finance/<entry_id>/history")
+@role_required("driver")
+@driver_mode_required("targets")
+def get_private_finance_history(entry_id):
+    return success_response(data={"history": private_entry_history(get_jwt_identity(), entry_id)})
+
+
+@driver_portal_bp.get("/private-finance/summary")
+@role_required("driver")
+@driver_mode_required("targets")
+def get_private_finance_summary_route():
+    return success_response(data={"summary": private_finance_summary(
+        get_jwt_identity(), request.args.get("start_date"), request.args.get("end_date"),
+        request.args.get("platform"), request.args.get("period", "daily"),
+    )})
+
+
+@driver_portal_bp.get("/private-finance/export.csv")
+@role_required("driver")
+@driver_mode_required("targets")
+def export_private_finance_route():
+    content = export_private_entries_csv(
+        get_jwt_identity(), request.args.get("start_date"), request.args.get("end_date"), request.args.get("platform")
+    )
+    return Response(content, mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=my-earnings.csv"})
 
 
 @driver_portal_bp.get("/active-assignment")
@@ -54,13 +135,29 @@ def get_active_assignment():
 
 @driver_portal_bp.get("/dashboard-summary")
 @role_required("driver")
+@driver_mode_required("targets")
 def get_dashboard_summary():
     summary = get_driver_dashboard_summary(get_jwt_identity())
     return success_response(data={"summary": summary})
 
 
+@driver_portal_bp.get("/operational-tasks")
+@role_required("driver")
+@driver_mode_required("operations")
+def get_driver_operational_tasks():
+    return success_response(data=list_driver_operational_tasks(get_jwt_identity()))
+
+
+@driver_portal_bp.get("/operations-summary")
+@role_required("driver")
+@driver_mode_required("operations")
+def get_driver_operations_summary():
+    return success_response(data=get_driver_operations_dashboard_summary(get_jwt_identity()))
+
+
 @driver_portal_bp.get("/wallet")
 @role_required("driver")
+@driver_mode_required("targets")
 def get_driver_wallet():
     wallet = get_logged_in_driver_wallet(get_jwt_identity())
     return success_response(data={"wallet": wallet})
@@ -74,6 +171,7 @@ def get_driver_preventive_maintenance():
 
 @driver_portal_bp.get("/fuel-logs")
 @role_required("driver")
+@driver_mode_required("operations")
 def get_driver_fuel_logs():
     return success_response(
         data=list_fuel_logs(
@@ -136,6 +234,7 @@ def post_driver_maintenance_progress(maintenance_id: str):
 
 @driver_portal_bp.post("/payments")
 @role_required("driver")
+@driver_mode_required("targets")
 def submit_payment():
     payment = submit_driver_payment(request.get_json(silent=True) or {}, get_jwt_identity())
     return success_response(
@@ -147,6 +246,7 @@ def submit_payment():
 
 @driver_portal_bp.get("/dispatch-jobs")
 @role_required("driver")
+@driver_mode_required("operations")
 def get_driver_dispatch_jobs():
     return success_response(
         data=list_driver_dispatch_jobs(
@@ -161,12 +261,14 @@ def get_driver_dispatch_jobs():
 
 @driver_portal_bp.get("/dispatch-jobs/<job_id>")
 @role_required("driver")
+@driver_mode_required("operations")
 def get_driver_dispatch_job_route(job_id: str):
     return success_response(data={"job": get_driver_dispatch_job(job_id, current_user_id=get_jwt_identity())})
 
 
 @driver_portal_bp.patch("/dispatch-jobs/<job_id>/accept")
 @role_required("driver")
+@driver_mode_required("operations")
 def accept_driver_dispatch(job_id: str):
     job = accept_driver_dispatch_job(job_id, current_user_id=get_jwt_identity())
     return success_response(
@@ -177,6 +279,7 @@ def accept_driver_dispatch(job_id: str):
 
 @driver_portal_bp.patch("/dispatch-jobs/<job_id>/clarify")
 @role_required("driver")
+@driver_mode_required("operations")
 def clarify_driver_dispatch(job_id: str):
     job = request_dispatch_clarification(
         job_id,
@@ -191,6 +294,7 @@ def clarify_driver_dispatch(job_id: str):
 
 @driver_portal_bp.patch("/dispatch-jobs/<job_id>/reject")
 @role_required("driver")
+@driver_mode_required("operations")
 def reject_driver_dispatch(job_id: str):
     job = reject_driver_dispatch_job(
         job_id,
@@ -205,6 +309,7 @@ def reject_driver_dispatch(job_id: str):
 
 @driver_portal_bp.patch("/dispatch-jobs/<job_id>/workflow")
 @role_required("driver")
+@driver_mode_required("operations")
 def update_driver_dispatch_workflow(job_id: str):
     job = update_driver_dispatch_job_workflow(
         job_id,
@@ -217,8 +322,37 @@ def update_driver_dispatch_workflow(job_id: str):
     )
 
 
+@driver_portal_bp.get("/dispatch-jobs/<job_id>/fuel")
+@role_required("driver")
+@driver_mode_required("operations")
+def get_driver_dispatch_fuel(job_id: str):
+    return success_response(
+        data=get_dispatch_fuel_accountability(
+            job_id,
+            current_user_id=get_jwt_identity(),
+            current_role="driver",
+        )
+    )
+
+
+@driver_portal_bp.patch("/dispatch-jobs/<job_id>/fuel/opening")
+@role_required("driver")
+@driver_mode_required("operations")
+def confirm_driver_dispatch_opening_fuel(job_id: str):
+    return success_response(
+        data=record_dispatch_opening_fuel(
+            job_id,
+            request.get_json(silent=True) or {},
+            current_user_id=get_jwt_identity(),
+            current_role="driver",
+        ),
+        message="Opening fuel and odometer confirmed successfully.",
+    )
+
+
 @driver_portal_bp.get("/dispatch-financials")
 @role_required("driver")
+@driver_mode_required("operations")
 def get_driver_dispatch_financials_route():
     return success_response(
         data=list_driver_dispatch_financials(
@@ -233,6 +367,7 @@ def get_driver_dispatch_financials_route():
 
 @driver_portal_bp.get("/dispatch-financials/<job_id>")
 @role_required("driver")
+@driver_mode_required("operations")
 def get_driver_dispatch_financial_detail_route(job_id: str):
     return success_response(
         data=get_dispatch_financial_detail(
@@ -245,6 +380,7 @@ def get_driver_dispatch_financial_detail_route(job_id: str):
 
 @driver_portal_bp.post("/dispatch-financials/<job_id>/money")
 @role_required("driver")
+@driver_mode_required("operations")
 def submit_driver_dispatch_money_route(job_id: str):
     return success_response(
         data=submit_driver_dispatch_money(
@@ -260,6 +396,7 @@ def submit_driver_dispatch_money_route(job_id: str):
 
 @driver_portal_bp.post("/dispatch-financials/<job_id>/expenses")
 @role_required("driver")
+@driver_mode_required("operations")
 def submit_driver_dispatch_expense_route(job_id: str):
     return success_response(
         data=submit_driver_dispatch_expense(
@@ -275,6 +412,7 @@ def submit_driver_dispatch_expense_route(job_id: str):
 
 @driver_portal_bp.post("/dispatch-financials/<job_id>/incidents")
 @role_required("driver")
+@driver_mode_required("operations")
 def submit_driver_dispatch_incident_route(job_id: str):
     return success_response(
         data=submit_dispatch_financial_incident(
@@ -290,12 +428,14 @@ def submit_driver_dispatch_incident_route(job_id: str):
 
 @driver_portal_bp.get("/dispatch-opportunities/options")
 @role_required("driver")
+@driver_mode_required("operations")
 def get_driver_dispatch_opportunity_options_route():
     return success_response(data=list_dispatch_opportunity_options(current_role="driver"))
 
 
 @driver_portal_bp.get("/dispatch-opportunities")
 @role_required("driver")
+@driver_mode_required("operations")
 def get_driver_dispatch_opportunities_route():
     return success_response(
         data=list_dispatch_opportunities(
@@ -313,6 +453,7 @@ def get_driver_dispatch_opportunities_route():
 
 @driver_portal_bp.post("/dispatch-opportunities")
 @role_required("driver")
+@driver_mode_required("operations")
 def create_driver_dispatch_opportunity_route():
     opportunity = create_driver_dispatch_opportunity(
         request.get_json(silent=True) or {},
@@ -328,6 +469,7 @@ def create_driver_dispatch_opportunity_route():
 
 @driver_portal_bp.get("/dispatch-opportunities/<opportunity_id>")
 @role_required("driver")
+@driver_mode_required("operations")
 def get_driver_dispatch_opportunity_route(opportunity_id: str):
     return success_response(
         data={
@@ -342,6 +484,7 @@ def get_driver_dispatch_opportunity_route(opportunity_id: str):
 
 @driver_portal_bp.patch("/dispatch-opportunities/<opportunity_id>")
 @role_required("driver")
+@driver_mode_required("operations")
 def update_driver_dispatch_opportunity_route(opportunity_id: str):
     opportunity = update_driver_dispatch_opportunity(
         opportunity_id,
@@ -357,6 +500,7 @@ def update_driver_dispatch_opportunity_route(opportunity_id: str):
 
 @driver_portal_bp.patch("/dispatch-opportunities/<opportunity_id>/submit")
 @role_required("driver")
+@driver_mode_required("operations")
 def submit_driver_dispatch_opportunity_route(opportunity_id: str):
     opportunity = submit_driver_dispatch_opportunity(
         opportunity_id,
@@ -371,6 +515,7 @@ def submit_driver_dispatch_opportunity_route(opportunity_id: str):
 
 @driver_portal_bp.patch("/dispatch-opportunities/<opportunity_id>/withdraw")
 @role_required("driver")
+@driver_mode_required("operations")
 def withdraw_driver_dispatch_opportunity_route(opportunity_id: str):
     opportunity = withdraw_driver_dispatch_opportunity(
         opportunity_id,

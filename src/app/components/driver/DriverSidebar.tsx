@@ -6,9 +6,11 @@ import {
   Calendar,
   ChevronDown,
   Clock,
+  ClipboardList,
   Fuel,
   LayoutDashboard,
   LogOut,
+  PackageCheck,
   Plus,
   Pin,
   PinOff,
@@ -26,7 +28,7 @@ import {
   type SessionUser,
 } from '../../lib/auth-session';
 import type { DriverActiveAssignment } from '../../lib/driver-api';
-import { filterAccessibleModules, type AppModule } from '../../lib/role-access';
+import { canDriverAccessModule, filterAccessibleModules, type AppModule } from '../../lib/role-access';
 import { SIDEBAR_COUNT_KEY_BY_MODULE, type WorkQueueModuleCount } from '../../lib/notification-count';
 
 const LOGO_URL =
@@ -79,6 +81,8 @@ const DRIVER_SECTIONS: DriverSidebarSection[] = [
       { id: 'my-vehicle', label: 'My Vehicle', icon: Truck },
       { id: 'my-dispatch-opportunities', label: 'Dispatch Opportunities', icon: Search },
       { id: 'my-dispatches', label: 'My Dispatches', icon: Route },
+      { id: 'my-operational-tasks', label: 'Operational Tasks', icon: ClipboardList },
+      { id: 'digital-waybills', label: 'Digital Waybill', icon: PackageCheck },
       { id: 'calendar', label: 'Scheduled Bookings', icon: Calendar },
       { id: 'create-ride', label: 'Log Trip', icon: Plus },
       { id: 'ride-history', label: 'Trip History', icon: Clock },
@@ -90,6 +94,7 @@ const DRIVER_SECTIONS: DriverSidebarSection[] = [
     title: 'Wallet & Fuel',
     items: [
       { id: 'my-wallet', label: 'My Wallet', icon: Wallet },
+      { id: 'my-earnings', label: 'My Earnings', icon: WalletCards },
       { id: 'my-dispatch-financials', label: 'Dispatch Financials', icon: WalletCards },
       { id: 'fuel-logs', label: 'Fuel Logs', icon: Fuel },
     ],
@@ -155,7 +160,10 @@ export default function DriverSidebar({
     () =>
       DRIVER_SECTIONS.map((section) => ({
         ...section,
-        items: filterAccessibleModules('driver', section.items).map((item) => {
+        items: filterAccessibleModules('driver', section.items)
+          .filter((item) => canDriverAccessModule(currentUser?.driver_profile?.operating_mode, item.id))
+          .filter((item) => item.id !== 'my-earnings' || currentUser?.driver_profile?.private_finance_enabled === true)
+          .map((item) => {
           const countKey = SIDEBAR_COUNT_KEY_BY_MODULE[item.id];
           const result = countKey ? moduleCounts[countKey] : undefined;
           const count = result?.status === 'ok' ? Number(result.count) || 0 : 0;
@@ -167,7 +175,7 @@ export default function DriverSidebar({
             : item;
         }),
       })).filter((section) => section.items.length > 0),
-    [actionableCount, actionableBadgeTone, moduleCounts],
+    [actionableCount, actionableBadgeTone, currentUser?.driver_profile?.operating_mode, currentUser?.driver_profile?.private_finance_enabled, moduleCounts],
   );
 
   const handleNavigate = (section: string) => {

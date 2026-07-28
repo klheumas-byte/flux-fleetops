@@ -22,7 +22,7 @@ def configure_backend_logging(app) -> None:
 
     root_logger = logging.getLogger()
     for handler in list(root_logger.handlers):
-        if getattr(handler, "name", "").startswith("flux-"):
+        if str(getattr(handler, "name", "") or "").startswith("flux-"):
             root_logger.removeHandler(handler)
 
     if app.config.get("DEBUG") or app.config.get("ENV_NAME") == "development":

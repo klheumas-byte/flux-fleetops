@@ -22,13 +22,19 @@ import {
 import AdminLayout from './components/admin/AdminLayout';
 import DriverLayout from './components/driver/DriverLayout';
 import AccessDenied from './components/shared/AccessDenied';
+import ChangePassword from './components/ChangePassword';
 import NotificationSoundController from './components/shared/NotificationSoundController';
-import { canAccessModule, type AppModule } from './lib/role-access';
+import { canAccessModule, canDriverAccessModule, type AppModule } from './lib/role-access';
 
 const Dashboard = lazy(() => import('./components/admin/Dashboard'));
 const FleetTracking = lazy(() => import('./components/admin/FleetTracking'));
 const Vehicles = lazy(() => import('./components/admin/Vehicles'));
 const VehicleMovements = lazy(() => import('./components/admin/VehicleMovements'));
+const OperationalRequests = lazy(() => import('./components/shared/OperationalRequests'));
+const StockTransfers = lazy(() => import('./components/shared/StockTransfers'));
+const SupplierPickup = lazy(() => import('./components/shared/SupplierPickup'));
+const OperationalTasks = lazy(() => import('./components/driver/OperationalTasks'));
+const DigitalWaybills = lazy(() => import('./components/shared/DigitalWaybills'));
 const DispatchFinancials = lazy(() => import('./components/admin/DispatchFinancials'));
 const DispatchOpportunitiesReview = lazy(() => import('./components/admin/DispatchOpportunitiesReview'));
 const DispatchReturns = lazy(() => import('./components/admin/DispatchReturns'));
@@ -58,6 +64,7 @@ const CustomerManagement = lazy(() => import('./components/driver/CustomerManage
 const DriverCalendar = lazy(() => import('./components/driver/DriverCalendar'));
 const MyVehicle = lazy(() => import('./components/driver/MyVehicle'));
 const MyWallet = lazy(() => import('./components/driver/MyWallet'));
+const MyEarnings = lazy(() => import('./components/driver/MyEarnings'));
 const MyDispatchFinancials = lazy(() => import('./components/driver/MyDispatchFinancials'));
 const DispatchOpportunities = lazy(() => import('./components/driver/DispatchOpportunities'));
 const MyDispatches = lazy(() => import('./components/driver/MyDispatches'));
@@ -72,6 +79,9 @@ const IncidentsModule = lazy(() => import('./components/shared/IncidentsModule')
 const Reports = lazy(() => import('./components/admin/Reports'));
 const Notifications = lazy(() => import('./components/admin/Notifications'));
 const VehicleDetails = lazy(() => import('./components/admin/VehicleDetails'));
+const FleetOwners = lazy(() => import('./components/admin/FleetOwners'));
+const FleetOwnerPortal = lazy(() => import('./components/fleet-owner/FleetOwnerPortal'));
+const PersonalVehiclePortal = lazy(() => import('./components/personal/PersonalVehiclePortal'));
 
 export type UserRole = SessionUserRole;
 export type AuthUser = SessionUser;
@@ -185,6 +195,33 @@ export default function App() {
     void verifySession();
   }, []);
 
+  useEffect(() => {
+    if (!isLoggedIn || userRole !== 'driver') return;
+    let cancelled = false;
+    const refreshMutableDriverAccess = async () => {
+      try {
+        const verifiedUser = await fetchAuthenticatedUser();
+        if (cancelled) return;
+        setCurrentUser((current) => {
+          const before = JSON.stringify(current?.driver_profile || {});
+          const after = JSON.stringify(verifiedUser.driver_profile || {});
+          return before === after ? current : verifiedUser;
+        });
+      } catch {
+        // The shared API layer handles expired sessions; a transient refresh
+        // failure must not interrupt the driver's current safety workflow.
+      }
+    };
+    void refreshMutableDriverAccess();
+    const intervalId = window.setInterval(refreshMutableDriverAccess, 15000);
+    window.addEventListener('focus', refreshMutableDriverAccess);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', refreshMutableDriverAccess);
+    };
+  }, [isLoggedIn, userRole]);
+
   const handleLogin = (user: AuthUser) => {
     setStoredSessionUser(user);
     resetAuthExpirySignal();
@@ -224,7 +261,11 @@ export default function App() {
   };
 
   const renderProtectedPage = (moduleId: AppModule, node: React.ReactNode) => {
-    if (!canAccessModule(userRole, moduleId)) {
+    if (
+      !canAccessModule(userRole, moduleId) ||
+      (userRole === 'driver' &&
+        !canDriverAccessModule(currentUser?.driver_profile?.operating_mode, moduleId))
+    ) {
       return <AccessDenied />;
     }
     return node;
@@ -366,6 +407,14 @@ export default function App() {
     return <Login onLogin={handleLogin} />;
   }
 
+  if (currentUser?.must_change_password) {
+    return <ChangePassword onLogout={handleLogout} onChanged={(user) => {
+      setStoredSessionUser(user);
+      setCurrentUser(user);
+      setUserRole(String(user.role).trim().toLowerCase() as UserRole);
+    }} />;
+  }
+
   if (userRole === 'owner' || userRole === 'admin' || userRole === 'dispatcher' || userRole === 'customer_service') {
     return (
       <>
@@ -384,7 +433,12 @@ export default function App() {
           {currentPage === 'dashboard' && (userRole === 'owner' || userRole === 'admin') && renderProtectedPage('dashboard', <Dashboard onNavigate={navigateToPage} userRole={userRole} />)}
           {currentPage === 'fleet-tracking' && renderProtectedPage('fleet-tracking', <FleetTracking />)}
           {currentPage === 'vehicles' && renderProtectedPage('vehicles', <Vehicles onOpenVehicleDetails={handleOpenVehicleDetails} />)}
+          {currentPage === 'fleet-owners' && renderProtectedPage('fleet-owners', <FleetOwners />)}
           {currentPage === 'vehicle-movements' && renderProtectedPage('vehicle-movements', <VehicleMovements />)}
+          {currentPage === 'operational-requests' && renderProtectedPage('operational-requests', <OperationalRequests />)}
+          {currentPage === 'stock-transfers' && renderProtectedPage('stock-transfers', <StockTransfers />)}
+          {currentPage === 'supplier-pickup' && renderProtectedPage('supplier-pickup', <SupplierPickup />)}
+          {currentPage === 'digital-waybills' && renderProtectedPage('digital-waybills', <DigitalWaybills />)}
           {currentPage === 'dispatch-financials' && renderProtectedPage('dispatch-financials', <DispatchFinancials />)}
           {currentPage === 'dispatch-opportunities' && renderProtectedPage('dispatch-opportunities', <DispatchOpportunitiesReview />)}
           {currentPage === 'dispatch-returns' && renderProtectedPage('dispatch-returns', <DispatchReturns />)}
@@ -460,9 +514,12 @@ export default function App() {
                 onRefresh={refreshDriverPortalData}
               />)
             )}
+            {currentPage === 'my-earnings' && currentUser.driver_profile?.private_finance_enabled === true && renderProtectedPage('my-earnings', <MyEarnings />)}
             {currentPage === 'my-dispatch-financials' && renderProtectedPage('my-dispatch-financials', <MyDispatchFinancials />)}
             {currentPage === 'my-dispatch-opportunities' && renderProtectedPage('my-dispatch-opportunities', <DispatchOpportunities />)}
             {currentPage === 'my-dispatches' && renderProtectedPage('my-dispatches', <MyDispatches />)}
+            {currentPage === 'my-operational-tasks' && renderProtectedPage('my-operational-tasks', <OperationalTasks onNavigate={navigateToPage} />)}
+            {currentPage === 'digital-waybills' && renderProtectedPage('digital-waybills', <DigitalWaybills driverMode />)}
             {currentPage === 'create-ride' && renderProtectedPage('create-ride', <CreateRide />)}
             {currentPage === 'ride-history' && renderProtectedPage('ride-history', <RideHistory />)}
             {currentPage === 'customers' && renderProtectedPage('customers', <CustomerManagement />)}
@@ -483,6 +540,30 @@ export default function App() {
             {currentPage === 'my-profile' && renderProtectedPage('my-profile', <DriverProfile currentUser={currentUser} />)}
           </Suspense>
         </DriverLayout>
+      </>
+    );
+  }
+
+  if (userRole === 'fleet_owner' && currentUser) {
+    return (
+      <>
+        <Toaster position="bottom-right" richColors closeButton />
+        <NotificationSoundController />
+        <Suspense fallback={loadingFallback}>
+          <FleetOwnerPortal currentUser={currentUser} onLogout={handleLogout} />
+        </Suspense>
+      </>
+    );
+  }
+
+  if (userRole === 'personal_vehicle_owner' && currentUser) {
+    return (
+      <>
+        <Toaster position="bottom-right" richColors closeButton />
+        <NotificationSoundController />
+        <Suspense fallback={loadingFallback}>
+          <PersonalVehiclePortal currentUser={currentUser} onLogout={handleLogout} />
+        </Suspense>
       </>
     );
   }

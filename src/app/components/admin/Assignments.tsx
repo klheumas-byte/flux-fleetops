@@ -17,7 +17,7 @@ import {
 import { apiRequest, ApiRequestError } from '../../lib/api';
 import { useDebouncedValue } from '../../lib/use-debounced-value';
 
-type AssignmentStatus = 'active' | 'ended' | 'suspended';
+type AssignmentStatus = 'pending_handover' | 'active' | 'pending_return' | 'ended' | 'suspended';
 
 interface DriverOption {
   id: string;
@@ -27,6 +27,10 @@ interface DriverOption {
   driver_profile: {
     approval_status?: string | null;
     assigned_vehicle_id?: string | null;
+    operating_mode?: 'operations_only' | 'target_only' | 'hybrid';
+    target_enabled?: boolean;
+    target_amount?: number | null;
+    target_frequency?: 'daily' | 'weekly';
   } | null;
 }
 
@@ -43,12 +47,25 @@ interface Assignment {
   vehicle_id: string;
   weekly_target: number;
   daily_target: number;
+  target_enabled: boolean;
+  target_amount?: number | null;
+  target_frequency: 'daily' | 'weekly';
+  operating_mode: 'operations_only' | 'target_only' | 'hybrid';
   start_date: string;
+  start_time?: string | null;
+  expected_end_at?: string | null;
+  assignment_reason?: string | null;
+  ended_by?: string | null;
+  end_reason?: string | null;
   end_date: string | null;
   status: AssignmentStatus;
+  handover_status?: string | null;
+  linked_handover_movement_id?: string | null;
   created_at: string | null;
   updated_at: string | null;
   assigned_by?: string | null;
+  assigned_by_user?: { full_name?: string | null; role?: string | null } | null;
+  ended_by_user?: { full_name?: string | null; role?: string | null } | null;
   driver: {
     id: string;
     full_name: string;
@@ -97,6 +114,12 @@ interface AssignmentFormState {
   weekly_target: string;
   daily_target: string;
   start_date: string;
+  expected_end_at: string;
+  reason: string;
+  operating_mode: 'operations_only' | 'target_only' | 'hybrid';
+  target_enabled: boolean;
+  target_frequency: 'daily' | 'weekly';
+  target_amount: string;
 }
 
 const initialFormState: AssignmentFormState = {
@@ -105,6 +128,12 @@ const initialFormState: AssignmentFormState = {
   weekly_target: '',
   daily_target: '',
   start_date: '',
+  expected_end_at: '',
+  reason: '',
+  operating_mode: 'hybrid',
+  target_enabled: true,
+  target_frequency: 'weekly',
+  target_amount: '',
 };
 
 function formatCurrency(value: number) {
@@ -128,10 +157,34 @@ function formatDate(value: string | null) {
   });
 }
 
+function formatDateTime(value?: string | null) {
+  if (!value) return 'Not set';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return 'Not set';
+  return parsed.toLocaleString('en-GB', {
+    day: '2-digit', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: true,
+  });
+}
+
+function formatMode(value: Assignment['operating_mode']) {
+  return { target_only: 'Target Only', operations_only: 'Operations Only', hybrid: 'Hybrid' }[value] || 'Unknown';
+}
+
+function actorLabel(actor?: { full_name?: string | null; role?: string | null } | null) {
+  if (!actor?.full_name) return 'Unknown user';
+  const role = String(actor.role || '').replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+  return role ? `${actor.full_name} (${role})` : actor.full_name;
+}
+
 function formatStatus(value: AssignmentStatus) {
   switch (value) {
     case 'active':
       return 'Active';
+    case 'pending_handover':
+      return 'Awaiting Driver Acceptance';
+    case 'pending_return':
+      return 'Awaiting Vehicle Return';
     case 'suspended':
       return 'Suspended';
     default:
@@ -151,6 +204,9 @@ export default function Assignments() {
   const [pageError, setPageError] = useState('');
   const [formError, setFormError] = useState('');
   const [formState, setFormState] = useState<AssignmentFormState>(initialFormState);
+  const [actionAssignmentId, setActionAssignmentId] = useState<string | null>(null);
+  const [selectedAssignment, setSelectedAssignment] = useState<Assignment | null>(null);
+  const [historyVehicleId, setHistoryVehicleId] = useState<string | null>(null);
 
   const storedUser = localStorage.getItem('flux_user');
   const currentRole = storedUser ? JSON.parse(storedUser).role : null;
@@ -226,6 +282,10 @@ export default function Assignments() {
     switch (status) {
       case 'active':
         return 'bg-green-100 text-green-800 border-green-200';
+      case 'pending_handover':
+        return 'bg-blue-100 text-blue-800 border-blue-200';
+      case 'pending_return':
+        return 'bg-purple-100 text-purple-800 border-purple-200';
       case 'suspended':
         return 'bg-amber-100 text-amber-800 border-amber-200';
       default:
@@ -241,7 +301,7 @@ export default function Assignments() {
     return 'text-red-600';
   };
 
-  const handleFieldChange = (field: keyof AssignmentFormState, value: string) => {
+  const handleFieldChange = (field: keyof AssignmentFormState, value: string | boolean) => {
     setFormState((current) => ({
       ...current,
       [field]: value,
@@ -268,6 +328,12 @@ export default function Assignments() {
           weekly_target: Number(formState.weekly_target),
           daily_target: Number(formState.daily_target),
           start_date: formState.start_date,
+          expected_end_at: formState.expected_end_at || null,
+          reason: formState.reason,
+          operating_mode: formState.operating_mode,
+          target_enabled: formState.target_enabled,
+          target_frequency: formState.target_frequency,
+          target_amount: formState.target_enabled ? Number(formState.target_amount) : null,
         }),
       });
 
@@ -285,11 +351,15 @@ export default function Assignments() {
   };
 
   const handleEndAssignment = async (assignmentId: string) => {
+    const reason = window.prompt('Reason for unassigning this vehicle:')?.trim();
+    if (!reason || !window.confirm('Unassign this vehicle? Its allocation history will be preserved.')) return;
     setPageError('');
+    setActionAssignmentId(assignmentId);
 
     try {
-      await apiRequest<AssignmentMutationResponse>(`/assignments/${assignmentId}/end`, {
+      await apiRequest<AssignmentMutationResponse>(`/assignments/${assignmentId}/unassign`, {
         method: 'PATCH',
+        body: JSON.stringify({ reason }),
       });
       await loadAssignments();
     } catch (error) {
@@ -298,6 +368,64 @@ export default function Assignments() {
       } else {
         setPageError('Unable to end assignment right now.');
       }
+    } finally {
+      setActionAssignmentId(null);
+    }
+  };
+
+  const handleTransferAssignment = async (assignment: Assignment) => {
+    const driverId = window.prompt('Enter the destination driver ID:')?.trim();
+    if (!driverId) return;
+    const reason = window.prompt('Reason for transfer/reassignment:')?.trim();
+    if (!reason || !window.confirm('Transfer this active allocation to the selected driver?')) return;
+    setPageError('');
+    setActionAssignmentId(assignment.id);
+    try {
+      await apiRequest<AssignmentMutationResponse>(`/assignments/${assignment.id}/transfer`, {
+        method: 'POST',
+        body: JSON.stringify({
+          driver_id: driverId,
+          reason,
+          operating_mode: assignment.operating_mode,
+          target_enabled: assignment.target_enabled,
+          target_frequency: assignment.target_frequency,
+          target_amount: assignment.target_amount,
+        }),
+      });
+      await loadAssignments();
+    } catch (error) {
+      setPageError(error instanceof ApiRequestError ? error.message : 'Unable to transfer allocation.');
+    } finally {
+      setActionAssignmentId(null);
+    }
+  };
+
+  const handleHandoverAction = async (
+    assignment: Assignment,
+    action: 'accept' | 'return',
+  ) => {
+    const auditReason = window.prompt(
+      action === 'accept'
+        ? 'Enter the audit reason for accepting on behalf of the assigned driver:'
+        : 'Enter the audit reason for receiving the vehicle on behalf of the custodian:',
+    )?.trim();
+    if (!auditReason) return;
+    setPageError('');
+    try {
+      await apiRequest<AssignmentMutationResponse>(
+        `/assignments/${assignment.id}/handover/${action}`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ audit_reason: auditReason }),
+        },
+      );
+      await loadAssignments();
+    } catch (error) {
+      setPageError(
+        error instanceof ApiRequestError
+          ? error.message
+          : 'Unable to update assignment custody right now.',
+      );
     }
   };
 
@@ -314,8 +442,8 @@ export default function Assignments() {
   return (
     <div className="p-6 space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold text-[#0F172A]">Vehicle Assignments</h1>
-        <p className="mt-1 text-gray-600">Manage vehicle-to-driver assignments and targets</p>
+        <h1 className="text-2xl font-semibold text-[#0F172A]">Vehicle Allocations</h1>
+        <p className="mt-1 text-gray-600">Temporary, auditable driver-to-vehicle allocations and history</p>
       </div>
 
       <div className="grid grid-cols-4 gap-6">
@@ -460,10 +588,10 @@ export default function Assignments() {
                     const driverName = assignment.driver?.full_name || 'Unknown Driver';
                     const vehicleLabel = assignment.vehicle?.registration_number || 'Unknown Vehicle';
                     const vehicleType = assignment.vehicle?.vehicle_type || 'Vehicle';
-                    const achievementColor = getAchievementColor(
+                    const achievementColor = assignment.target_enabled ? getAchievementColor(
                       assignment.weekly_target,
                       assignment.daily_target,
-                    );
+                    ) : 'text-gray-500';
 
                     return (
                       <tr key={assignment.id} className="transition-colors hover:bg-gray-50">
@@ -496,11 +624,11 @@ export default function Assignments() {
                         </td>
                         <td className="px-6 py-4">
                           <div className="font-semibold text-[#0F172A]">
-                            {formatCurrency(assignment.weekly_target)}
+                            {assignment.target_enabled ? formatCurrency(assignment.weekly_target) : 'Disabled'}
                           </div>
                         </td>
                         <td className="px-6 py-4">
-                          <div className="text-gray-700">{formatCurrency(assignment.daily_target)}</div>
+                          <div className="text-gray-700">{assignment.target_enabled ? formatCurrency(assignment.daily_target) : '—'}</div>
                         </td>
                         <td className="px-6 py-4">
                           <span
@@ -517,27 +645,60 @@ export default function Assignments() {
                         </td>
                         <td className="px-6 py-4">
                           <div className={`text-sm font-semibold ${achievementColor}`}>
-                            {(assignment.weekly_target / (assignment.daily_target * 7) * 100).toFixed(1)}%
+                            {assignment.target_enabled && assignment.daily_target > 0
+                              ? `${(assignment.weekly_target / (assignment.daily_target * 7) * 100).toFixed(1)}%`
+                              : assignment.operating_mode.replaceAll('_', ' ')}
                           </div>
                         </td>
                         <td className="px-6 py-4">
                           <div className="flex items-center gap-2">
-                            {assignment.status !== 'ended' && (
+                            {assignment.status === 'pending_handover' && (
+                              <button
+                                onClick={() => void handleHandoverAction(assignment, 'accept')}
+                                className="rounded p-1.5 text-blue-600 transition-all hover:bg-blue-50"
+                                title="Audited Handover Acceptance"
+                              >
+                                <CheckCircle className="h-4 w-4" />
+                              </button>
+                            )}
+                            {assignment.status === 'pending_return' && (
+                              <button
+                                onClick={() => void handleHandoverAction(assignment, 'return')}
+                                className="rounded p-1.5 text-purple-600 transition-all hover:bg-purple-50"
+                                title="Confirm Vehicle Return"
+                              >
+                                <Truck className="h-4 w-4" />
+                              </button>
+                            )}
+                            {['active', 'suspended'].includes(assignment.status) && (
+                              <button
+                                onClick={() => void handleTransferAssignment(assignment)}
+                                disabled={actionAssignmentId === assignment.id}
+                                className="rounded px-2 py-1 text-xs font-medium text-blue-700 transition-all hover:bg-blue-50"
+                                title="Transfer/Reassign"
+                              >
+                                Transfer
+                              </button>
+                            )}
+                            {['active', 'suspended', 'pending_handover'].includes(assignment.status) && (
                               <button
                                 onClick={() => void handleEndAssignment(assignment.id)}
+                                disabled={actionAssignmentId === assignment.id}
                                 className="rounded p-1.5 text-red-600 transition-all hover:bg-red-50"
-                                title="End Assignment"
+                                title="Unassign"
                               >
                                 <XCircle className="h-4 w-4" />
                               </button>
                             )}
                             <button
+                              onClick={() => setHistoryVehicleId(assignment.vehicle_id)}
                               className="rounded p-1.5 text-gray-600 transition-all hover:bg-gray-100"
-                              title="View History"
+                              title={assignment.end_reason || assignment.assignment_reason || 'Allocation history'}
                             >
                               <History className="h-4 w-4" />
                             </button>
                             <button
+                              onClick={() => setSelectedAssignment(assignment)}
                               className="rounded p-1.5 text-gray-600 transition-all hover:bg-gray-100"
                               title="View Details"
                             >
@@ -618,7 +779,17 @@ export default function Assignments() {
                   <label className="mb-2 block text-sm font-medium text-gray-700">Select Driver</label>
                   <select
                     value={formState.driver_id}
-                    onChange={(event) => handleFieldChange('driver_id', event.target.value)}
+                    onChange={(event) => {
+                      const driver = assignableDrivers.find((item) => item.id === event.target.value);
+                      setFormState((current) => ({
+                        ...current,
+                        driver_id: event.target.value,
+                        operating_mode: driver?.driver_profile?.operating_mode || current.operating_mode,
+                        target_enabled: driver?.driver_profile?.target_enabled ?? current.target_enabled,
+                        target_frequency: driver?.driver_profile?.target_frequency || current.target_frequency,
+                        target_amount: String(driver?.driver_profile?.target_amount ?? current.target_amount),
+                      }));
+                    }}
                     className="w-full rounded-lg border border-gray-300 px-4 py-2.5 focus:border-transparent focus:ring-2 focus:ring-[#2563EB]"
                     required
                   >
@@ -650,6 +821,65 @@ export default function Assignments() {
 
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                   <div>
+                    <label className="mb-2 block text-sm font-medium text-gray-700">Driver Operating Mode</label>
+                    <select
+                      value={formState.operating_mode}
+                      onChange={(event) => {
+                        const mode = event.target.value as AssignmentFormState['operating_mode'];
+                        setFormState((current) => ({
+                          ...current,
+                          operating_mode: mode,
+                          target_enabled: mode === 'operations_only' ? false : current.target_enabled,
+                        }));
+                      }}
+                      className="w-full rounded-lg border border-gray-300 px-4 py-2.5"
+                    >
+                      <option value="operations_only">Operations only</option>
+                      <option value="target_only">Target only</option>
+                      <option value="hybrid">Hybrid</option>
+                    </select>
+                  </div>
+                  <label className="flex items-center gap-3 rounded-lg border border-gray-200 px-4 py-3 text-sm font-medium text-gray-700">
+                    <input
+                      type="checkbox"
+                      checked={formState.target_enabled}
+                      disabled={formState.operating_mode === 'operations_only'}
+                      onChange={(event) => handleFieldChange('target_enabled', event.target.checked)}
+                    />
+                    Target enabled
+                  </label>
+                </div>
+
+                {formState.target_enabled && (
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                    <div>
+                      <label className="mb-2 block text-sm font-medium text-gray-700">Target Frequency</label>
+                      <select
+                        value={formState.target_frequency}
+                        onChange={(event) => handleFieldChange('target_frequency', event.target.value)}
+                        className="w-full rounded-lg border border-gray-300 px-4 py-2.5"
+                      >
+                        <option value="daily">Daily</option>
+                        <option value="weekly">Weekly</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="mb-2 block text-sm font-medium text-gray-700">Target Amount (GHS)</label>
+                      <input
+                        type="number"
+                        min="0.01"
+                        step="0.01"
+                        value={formState.target_amount}
+                        onChange={(event) => handleFieldChange('target_amount', event.target.value)}
+                        className="w-full rounded-lg border border-gray-300 px-4 py-2.5"
+                        required
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                  <div>
                     <label className="mb-2 block text-sm font-medium text-gray-700">
                       Weekly Target (GHS)
                     </label>
@@ -659,7 +889,8 @@ export default function Assignments() {
                       value={formState.weekly_target}
                       onChange={(event) => handleFieldChange('weekly_target', event.target.value)}
                       className="w-full rounded-lg border border-gray-300 px-4 py-2.5 focus:border-transparent focus:ring-2 focus:ring-[#2563EB]"
-                      required
+                      required={formState.target_enabled}
+                      disabled={!formState.target_enabled}
                     />
                   </div>
                   <div>
@@ -672,7 +903,8 @@ export default function Assignments() {
                       value={formState.daily_target}
                       onChange={(event) => handleFieldChange('daily_target', event.target.value)}
                       className="w-full rounded-lg border border-gray-300 px-4 py-2.5 focus:border-transparent focus:ring-2 focus:ring-[#2563EB]"
-                      required
+                      required={formState.target_enabled}
+                      disabled={!formState.target_enabled}
                     />
                   </div>
                 </div>
@@ -688,11 +920,31 @@ export default function Assignments() {
                   />
                 </div>
 
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-gray-700">Expected End (optional)</label>
+                  <input
+                    type="datetime-local"
+                    value={formState.expected_end_at}
+                    onChange={(event) => handleFieldChange('expected_end_at', event.target.value)}
+                    className="w-full rounded-lg border border-gray-300 px-4 py-2.5"
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-gray-700">Allocation Reason</label>
+                  <textarea
+                    value={formState.reason}
+                    onChange={(event) => handleFieldChange('reason', event.target.value)}
+                    className="min-h-20 w-full rounded-lg border border-gray-300 px-4 py-2.5"
+                    required
+                  />
+                </div>
+
                 <div className="flex items-start gap-3 rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-700">
                   <AlertCircle className="mt-0.5 h-5 w-5" />
                   <div>
-                    Assignment will link the selected driver and vehicle, mark the vehicle as assigned,
-                    and prevent duplicate active assignments.
+                    Allocation will reserve the vehicle and wait for custody acceptance. Targets are
+                    created only when explicitly enabled.
                   </div>
                 </div>
               </div>
@@ -717,6 +969,56 @@ export default function Assignments() {
                 </div>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {(selectedAssignment || historyVehicleId) && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+          <div className="max-h-[85vh] w-full max-w-3xl overflow-y-auto rounded-xl bg-white shadow-2xl">
+            <div className="sticky top-0 flex items-center justify-between border-b border-gray-200 bg-white px-6 py-4">
+              <h2 className="text-xl font-semibold text-[#0F172A]">
+                {selectedAssignment ? 'Allocation Details' : 'Allocation History'}
+              </h2>
+              <button
+                onClick={() => {
+                  setSelectedAssignment(null);
+                  setHistoryVehicleId(null);
+                }}
+                className="rounded p-2 hover:bg-gray-100"
+                aria-label="Close allocation details"
+              >
+                <XCircle className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="space-y-3 p-6">
+              {(selectedAssignment
+                ? [selectedAssignment]
+                : assignments.filter((item) => item.vehicle_id === historyVehicleId)
+              ).map((item) => (
+                <div key={item.id} className="rounded-xl border border-gray-200 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="font-semibold text-[#0F172A]">
+                      {item.vehicle?.registration_number || 'Unknown vehicle'} · {item.driver?.full_name || 'Unknown driver'}
+                    </div>
+                    <span className={`rounded-full border px-2.5 py-1 text-xs ${getStatusColor(item.status)}`}>
+                      {formatStatus(item.status)}
+                    </span>
+                  </div>
+                  <dl className="mt-4 grid grid-cols-1 gap-3 text-sm md:grid-cols-2">
+                    <div><dt className="text-gray-500">Start</dt><dd>{formatDateTime(item.start_time || item.start_date)}</dd></div>
+                    <div><dt className="text-gray-500">Expected end</dt><dd>{formatDateTime(item.expected_end_at)}</dd></div>
+                    <div><dt className="text-gray-500">Actual end</dt><dd>{formatDateTime(item.end_date)}</dd></div>
+                    <div><dt className="text-gray-500">Mode at assignment</dt><dd>{formatMode(item.operating_mode)}</dd></div>
+                    <div><dt className="text-gray-500">Target</dt><dd>{item.target_enabled ? `${item.target_frequency} · ${formatCurrency(item.target_amount || 0)}` : 'Disabled'}</dd></div>
+                    <div className="md:col-span-2"><dt className="text-gray-500">Assignment reason</dt><dd>{item.assignment_reason || 'Legacy record'}</dd></div>
+                    {item.end_reason && <div className="md:col-span-2"><dt className="text-gray-500">End reason</dt><dd>{item.end_reason}</dd></div>}
+                    <div><dt className="text-gray-500">Assigned by</dt><dd>{actorLabel(item.assigned_by_user)}</dd></div>
+                    <div><dt className="text-gray-500">Ended by</dt><dd>{item.end_date ? actorLabel(item.ended_by_user) : 'Not ended'}</dd></div>
+                  </dl>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       )}

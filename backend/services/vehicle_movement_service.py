@@ -22,6 +22,12 @@ from utils.mongo_indexes import ensure_indexes_for_collection
 from utils.performance import build_cache_key, get_ttl_cached, log_db_duration, set_ttl_cached
 from services.notification_service import create_notification, notify_roles, resolve_action_notifications
 from services.dispatch_planner_service import detect_dispatch_conflicts
+from services.movement_source_service import (
+    SOURCE_MANAGED_MOVEMENT_TYPES,
+    SOURCE_OWNERSHIP_FIELDS,
+    get_movement_source_ownership,
+    source_ownership_error,
+)
 from services.vehicle_availability_service import resolve_vehicle_availability
 
 
@@ -31,6 +37,17 @@ ALLOWED_MOVEMENT_TYPES = {
     "fuel_purchase",
     "maintenance",
     "workshop",
+    "maintenance_transport",
+    "workshop_transport",
+    "assignment_handover",
+    "internal_company_delivery",
+    "stock_transfer",
+    "supplier_pickup",
+    "stock_return",
+    "fuel_station_visit",
+    "compliance_inspection_visit",
+    "administrative_errand",
+    "vehicle_repositioning",
     "vehicle_transfer",
     "internal_company_movement",
     "emergency",
@@ -57,9 +74,18 @@ DELIVERY_CONFIRMABLE_STATUSES = {"checked_out", "in_progress"}
 ALLOWED_DELIVERY_STATUSES = {"pending", "delivered"}
 LIST_PROJECTION = {
     "movement_id": 1,
+    "source_type": 1,
+    "source_id": 1,
+    "source_key": 1,
+    "source_module": 1,
+    "source_reference": 1,
     "vehicle_id": 1,
     "driver_id": 1,
     "movement_custodian_id": 1,
+    "custody_state": 1,
+    "current_custody_location": 1,
+    "custody_version": 1,
+    "pending_custody_transfer": 1,
     "permanent_driver_id": 1,
     "maintenance_job_id": 1,
     "preventive_schedule_id": 1,
@@ -69,7 +95,14 @@ LIST_PROJECTION = {
     "dispatch_job_id": 1,
     "dispatch_request_id": 1,
     "reservation_id": 1,
+    "stock_transfer_id": 1,
+    "operation_request_id": 1,
+    "related_source_type": 1,
+    "related_source_id": 1,
     "movement_type": 1,
+    "financial_class": 1,
+    "journey_mode": 1,
+    "planned_stops": 1,
     "status": 1,
     "requested_departure_time": 1,
     "departure_time": 1,
@@ -77,6 +110,10 @@ LIST_PROJECTION = {
     "actual_return_time": 1,
     "origin": 1,
     "destination": 1,
+    "origin_location_id": 1,
+    "destination_location_id": 1,
+    "origin_snapshot": 1,
+    "destination_snapshot": 1,
     "purpose": 1,
     "opening_odometer": 1,
     "closing_odometer": 1,
@@ -115,6 +152,26 @@ DETAIL_PROJECTION = {
     "returned_at": 1,
     "closed_by": 1,
     "closed_at": 1,
+    "opening_fuel_recorded_at": 1,
+    "opening_fuel_recorded_by": 1,
+    "opening_fuel_photo": 1,
+    "opening_inspection_note": 1,
+    "closing_fuel_recorded_at": 1,
+    "closing_fuel_recorded_by": 1,
+    "total_fuel_litres_added": 1,
+    "total_fuel_cost": 1,
+    "estimated_fuel_consumed": 1,
+    "estimated_fuel_efficiency": 1,
+    "distance_travelled": 1,
+    "fuel_summary_status": 1,
+    "custody_events": 1,
+    "physical_completion_status": 1,
+    "handover_kind": 1,
+    "handover_sequence": 1,
+    "transport_direction": 1,
+    "transport_mode": 1,
+    "opening_condition_summary": 1,
+    "closing_condition_summary": 1,
 }
 USER_SUMMARY_PROJECTION = {"full_name": 1, "email": 1, "phone": 1, "role": 1, "status": 1, "driver_profile": 1}
 VEHICLE_SUMMARY_PROJECTION = {"registration_number": 1, "vehicle_type": 1, "make": 1, "model": 1, "status": 1}
@@ -130,7 +187,7 @@ ASSIGNMENT_SUMMARY_PROJECTION = {
     "created_at": 1,
     "updated_at": 1,
 }
-DRIVER_PATCHABLE_FIELDS = {"notes", "origin", "destination", "purpose", "expected_return_time", "workshop_name", "mechanic_name", "work_performed", "parts_changed", "test_result"}
+DRIVER_PATCHABLE_FIELDS = {"notes"}
 ADMIN_PATCHABLE_FIELDS = {
     "vehicle_id",
     "driver_id",
@@ -206,9 +263,30 @@ def ensure_vehicle_movement_indexes():
             {"keys": [("vehicle_id", ASCENDING)]},
             {"keys": [("driver_id", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("movement_custodian_id", ASCENDING)], "options": {"sparse": True}},
+            {"keys": [("custody_state", ASCENDING), ("status", ASCENDING)], "options": {"sparse": True}},
+            {"keys": [("custody_events.event_key", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("permanent_driver_id", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("maintenance_job_id", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("assignment_id", ASCENDING)], "options": {"sparse": True}},
+            {
+                "keys": [("source_key", ASCENDING)],
+                "options": {
+                    "name": "source_key_unique",
+                    "unique": True,
+                    "partialFilterExpression": {"source_key": {"$type": "string"}},
+                },
+            },
+            {
+                "keys": [("source_type", ASCENDING), ("dispatch_job_id", ASCENDING)],
+                "options": {
+                    "name": "dispatch_job_id_source_unique",
+                    "unique": True,
+                    "partialFilterExpression": {
+                        "source_type": "dispatch_job",
+                        "dispatch_job_id": {"$type": "objectId"},
+                    },
+                },
+            },
             {"keys": [("status", ASCENDING)]},
             {"keys": [("movement_type", ASCENDING)]},
             {"keys": [("created_at", DESCENDING)]},
@@ -217,6 +295,8 @@ def ensure_vehicle_movement_indexes():
             {"keys": [("vehicle_id", ASCENDING), ("created_at", DESCENDING)]},
             {"keys": [("driver_id", ASCENDING), ("created_at", DESCENDING)], "options": {"sparse": True}},
             {"keys": [("status", ASCENDING), ("created_at", DESCENDING)]},
+            {"keys": [("status", ASCENDING), ("expected_return_time", ASCENDING)]},
+            {"keys": [("source_type", ASCENDING), ("source_id", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("movement_type", ASCENDING), ("created_at", DESCENDING)]},
             {"keys": [("delivery_status", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("completion_status", ASCENDING)], "options": {"sparse": True}},
@@ -392,6 +472,16 @@ def _assert_vehicle_movement_access(document: dict, *, current_user_id: str, cur
         raise ApiError("You do not have permission to access this vehicle movement.", status_code=403)
 
 
+def _assert_vehicle_movement_mutation_access(document: dict, *, current_user_id: str, current_role: str):
+    if current_role in {"owner", "admin"}:
+        return
+    if current_role != "driver":
+        raise ApiError("You do not have permission to modify vehicle movements.", status_code=403)
+    user_id = _to_object_id(current_user_id, "current_user_id")
+    if user_id not in {document.get("driver_id"), document.get("movement_custodian_id")}:
+        raise ApiError("You do not have permission to modify this vehicle movement.", status_code=403)
+
+
 def _build_document_lookup(collection, ids: set[ObjectId], projection: dict) -> dict[ObjectId, dict]:
     if not ids:
         return {}
@@ -523,9 +613,9 @@ def _generate_movement_id() -> str:
 
 
 def _resolve_movement_times(document: dict) -> tuple[datetime | None, datetime | None, datetime | None]:
-    requested_departure_time = document.get("requested_departure_time")
-    departure_time = document.get("departure_time")
-    expected_return_time = document.get("expected_return_time")
+    requested_departure_time = _parse_datetime(document.get("requested_departure_time"), "requested_departure_time")
+    departure_time = _parse_datetime(document.get("departure_time"), "departure_time")
+    expected_return_time = _parse_datetime(document.get("expected_return_time"), "expected_return_time")
     return requested_departure_time, departure_time, expected_return_time
 
 
@@ -536,7 +626,7 @@ def _validate_time_relationships(document: dict):
         raise ApiError("departure_time or requested_departure_time is required.", status_code=400)
     if expected_return_time and expected_return_time <= reference_departure_time:
         raise ApiError("expected_return_time must be after the departure time.", status_code=400)
-    actual_return_time = document.get("actual_return_time")
+    actual_return_time = _parse_datetime(document.get("actual_return_time"), "actual_return_time")
     if actual_return_time and departure_time and actual_return_time <= departure_time:
         raise ApiError("actual_return_time must be after departure_time.", status_code=400)
     if actual_return_time and not departure_time:
@@ -555,12 +645,19 @@ def _validate_odometer_relationships(document: dict):
 
 
 def _assert_vehicle_is_not_blocked(vehicle_id: ObjectId, *, exclude_movement_id: ObjectId | None = None, source_type: str | None = None):
-    availability = resolve_vehicle_availability(vehicle_id)
+    availability = resolve_vehicle_availability(
+        vehicle_id,
+        context={"movement_type": source_type, "exclude_movement_id": exclude_movement_id},
+    )
     allowed_codes = set()
-    if source_type in {"maintenance", "workshop"}:
+    if source_type in {"maintenance", "workshop", "maintenance_transport", "workshop_transport"}:
         allowed_codes.add("active_maintenance_job")
     if source_type == "customer_dispatch":
         allowed_codes.add("active_dispatch")
+    if source_type == "compliance_inspection_visit":
+        # The source workflow already validated that the linked compliance
+        # record belongs to this vehicle before movement creation.
+        allowed_codes.add("expired_mandatory_compliance")
     for reason in availability.get("blocking_reasons", []):
         if reason.get("code") not in allowed_codes:
             raise ApiError(reason.get("message") or "Vehicle is unavailable for movement.", status_code=409)
@@ -672,6 +769,13 @@ def _validate_relationships(document: dict):
         driver = _get_driver_document(document.get("driver_id"))
     if document.get("assignment_id"):
         assignment = _get_assignment_document(document.get("assignment_id"))
+    primary_assignment = None
+    if document.get("primary_assignment_id"):
+        primary_assignment = (
+            assignment
+            if assignment and assignment.get("_id") == document.get("primary_assignment_id")
+            else _get_assignment_document(document.get("primary_assignment_id"))
+        )
     if assignment:
         if assignment.get("vehicle_id") != vehicle["_id"]:
             raise ApiError("assignment_id does not belong to the selected vehicle.", status_code=400)
@@ -679,6 +783,54 @@ def _validate_relationships(document: dict):
             driver = _get_driver_document(str(assignment.get("driver_id")))
         if driver and assignment.get("driver_id") != driver["_id"]:
             raise ApiError("assignment_id does not belong to the selected driver.", status_code=400)
+    if primary_assignment:
+        if primary_assignment.get("vehicle_id") != vehicle["_id"]:
+            raise ApiError("primary_assignment_id does not belong to the selected vehicle.", status_code=400)
+        if driver and primary_assignment.get("driver_id") != driver["_id"]:
+            raise ApiError("primary_assignment_id does not belong to the selected driver.", status_code=400)
+    dispatch_job = None
+    if document.get("dispatch_job_id"):
+        dispatch_job = dispatch_jobs_collection().find_one(
+            {"_id": document["dispatch_job_id"]},
+            {
+                "vehicle_id": 1,
+                "driver_id": 1,
+                "dispatch_request_id": 1,
+                "primary_assignment_id": 1,
+                "vehicle_reservation_id": 1,
+            },
+        )
+        if not dispatch_job:
+            raise ApiError("Dispatch job not found.", status_code=404)
+        if dispatch_job.get("vehicle_id") != vehicle["_id"]:
+            raise ApiError("dispatch_job_id does not belong to the selected vehicle.", status_code=400)
+        if driver and dispatch_job.get("driver_id") != driver["_id"]:
+            raise ApiError("dispatch_job_id does not belong to the selected driver.", status_code=400)
+        for movement_field, job_field in (
+            ("dispatch_request_id", "dispatch_request_id"),
+            ("primary_assignment_id", "primary_assignment_id"),
+            ("reservation_id", "vehicle_reservation_id"),
+        ):
+            if document.get(movement_field) and dispatch_job.get(job_field) != document.get(movement_field):
+                raise ApiError(f"{movement_field} does not belong to the selected dispatch job.", status_code=400)
+    if document.get("dispatch_request_id"):
+        request_document = get_collection("dispatch_requests").find_one(
+            {"_id": document["dispatch_request_id"]},
+            {"_id": 1},
+        )
+        if not request_document:
+            raise ApiError("Dispatch request not found.", status_code=404)
+    if document.get("reservation_id"):
+        reservation = resource_reservations_collection().find_one(
+            {"_id": document["reservation_id"]},
+            {"resource_id": 1, "dispatch_job_id": 1},
+        )
+        if not reservation:
+            raise ApiError("Reservation not found.", status_code=404)
+        if reservation.get("resource_id") != vehicle["_id"]:
+            raise ApiError("reservation_id does not belong to the selected vehicle.", status_code=400)
+        if dispatch_job and reservation.get("dispatch_job_id") != dispatch_job["_id"]:
+            raise ApiError("reservation_id does not belong to the selected dispatch job.", status_code=400)
     if document.get("maintenance_job_id"):
         job = maintenance_jobs_collection().find_one({"_id": document["maintenance_job_id"]}, {"vehicle_id": 1, "preventive_schedule_id": 1, "maintenance_coordinator_id": 1})
         if not job:
@@ -840,7 +992,36 @@ def create_vehicle_movement(payload: dict, *, current_user_id: str, current_role
     if normalized_role not in {"owner", "admin"}:
         raise ApiError("You do not have permission to create vehicle movements.", status_code=403)
 
-    normalized_payload = _normalize_vehicle_movement_payload(payload or {}, partial=False)
+    request_payload = payload or {}
+    normalized_payload = _normalize_vehicle_movement_payload(request_payload, partial=False)
+    if normalized_payload["movement_type"] in SOURCE_MANAGED_MOVEMENT_TYPES:
+        raise source_ownership_error(
+            normalized_payload["movement_type"],
+            code="source_managed_movement_required",
+            message="Source-managed vehicle movements must be created by their owning module.",
+            status_code=400,
+        )
+    protected_fields = sorted(SOURCE_OWNERSHIP_FIELDS.intersection(request_payload))
+    if protected_fields:
+        message = "Source ownership fields cannot be set through the generic Vehicle Movement API."
+        raise ApiError(
+            message,
+            status_code=400,
+            errors=[
+                {
+                    "code": "source_ownership_fields_forbidden",
+                    "message": message,
+                    "movement_type": normalized_payload["movement_type"],
+                    "owning_module": None,
+                    "fields": protected_fields,
+                }
+            ],
+        )
+    if normalized_payload["status"] not in {"draft", "pending_approval", "approved"}:
+        raise ApiError(
+            "New vehicle movements must start as draft, pending_approval, or approved.",
+            status_code=400,
+        )
     vehicle, driver, assignment = _validate_relationships(normalized_payload)
     _validate_time_relationships(normalized_payload)
     _validate_odometer_relationships(normalized_payload)
@@ -909,8 +1090,8 @@ def create_vehicle_movement(payload: dict, *, current_user_id: str, current_role
         "delivered_by": None,
         "notes": normalized_payload.get("notes"),
         "cancellation_reason": normalized_payload.get("cancellation_reason"),
-        "approved_by": None,
-        "approved_at": None,
+        "approved_by": _to_object_id(current_user_id, "current_user_id") if normalized_payload["status"] == "approved" else None,
+        "approved_at": timestamp if normalized_payload["status"] == "approved" else None,
         "checked_out_by": None,
         "checked_out_at": None,
         "returned_by": None,
@@ -939,14 +1120,45 @@ def create_vehicle_movement(payload: dict, *, current_user_id: str, current_role
 def update_vehicle_movement(movement_id: str, payload: dict, *, current_user_id: str, current_role: str) -> dict:
     normalized_role = _normalize_role(current_role) or current_role
     document = _get_vehicle_movement_document(movement_id)
-    _assert_vehicle_movement_access(document, current_user_id=current_user_id, current_role=normalized_role)
+    _assert_vehicle_movement_mutation_access(document, current_user_id=current_user_id, current_role=normalized_role)
     if document.get("status") in {"closed", "cancelled"}:
         raise ApiError("Closed or cancelled vehicle movements cannot be updated.", status_code=400)
     if "status" in (payload or {}):
         raise ApiError("Use the dedicated lifecycle endpoints to change status.", status_code=400)
 
+    request_payload = payload or {}
+    protected_fields = sorted(SOURCE_OWNERSHIP_FIELDS.intersection(request_payload))
+    if protected_fields:
+        ownership = get_movement_source_ownership(document.get("movement_type"))
+        message = "Source ownership fields cannot be modified through the generic Vehicle Movement API."
+        raise ApiError(
+            message,
+            status_code=409,
+            errors=[
+                {
+                    "code": "source_ownership_fields_immutable",
+                    "message": message,
+                    "movement_type": document.get("movement_type"),
+                    "owning_module": ownership["owning_module"] if ownership else document.get("source_module"),
+                    "fields": protected_fields,
+                }
+            ],
+        )
+
+    requested_movement_type = request_payload.get("movement_type")
+    existing_ownership = get_movement_source_ownership(document.get("movement_type"))
+    requested_ownership = get_movement_source_ownership(requested_movement_type)
+    if requested_movement_type is not None and (existing_ownership or requested_ownership):
+        managed_type = document.get("movement_type") if existing_ownership else requested_movement_type
+        raise source_ownership_error(
+            managed_type,
+            code="source_managed_movement_type_immutable",
+            message="Source-managed movement types cannot be changed through generic updates.",
+            status_code=409,
+        )
+
     allowed_fields = ADMIN_PATCHABLE_FIELDS if normalized_role in {"owner", "admin"} else DRIVER_PATCHABLE_FIELDS
-    filtered_payload = {key: value for key, value in (payload or {}).items() if key in allowed_fields}
+    filtered_payload = {key: value for key, value in request_payload.items() if key in allowed_fields}
     if not filtered_payload:
         raise ApiError("No valid vehicle movement fields provided for update.", status_code=400)
 
@@ -966,31 +1178,13 @@ def update_vehicle_movement(movement_id: str, payload: dict, *, current_user_id:
         "assignment_id": assignment["_id"] if assignment else None,
         "updated_at": timestamp,
     }
+    if "driver_id" in normalized_payload:
+        update_fields["movement_custodian_id"] = driver["_id"] if driver else None
     try:
         vehicle_movements_collection().update_one({"_id": document["_id"]}, {"$set": update_fields})
     except DuplicateKeyError:
         raise ApiError("Vehicle already has another open movement.", status_code=409) from None
     document.update(update_fields)
-    if document.get("movement_type") in {"maintenance", "workshop"}:
-        if next_status in {"checked_out", "in_progress"}:
-            vehicles_collection().update_one({"_id": document["vehicle_id"]}, {"$set": {"status": "maintenance", "updated_at": timestamp}})
-        elif next_status in {"closed", "cancelled"}:
-            vehicle_document = vehicles_collection().find_one({"_id": document["vehicle_id"]}, {"assigned_driver_id": 1}) or {}
-            vehicles_collection().update_one({"_id": document["vehicle_id"]}, {"$set": {"status": "assigned" if vehicle_document.get("assigned_driver_id") else "available", "updated_at": timestamp}})
-    if document.get("movement_type") in {"maintenance", "workshop"}:
-        event_labels = {
-            "approved": "approved",
-            "checked_out": "checked out",
-            "in_progress": "in progress",
-            "returned": "returned",
-            "closed": "closed",
-            "cancelled": "cancelled",
-        }
-        _notify_movement_participants(
-            document,
-            event=event_labels.get(next_status, next_status.replace("_", " ")),
-            message=f"Maintenance movement {document.get('movement_id')} is now {event_labels.get(next_status, next_status.replace('_', ' '))}.",
-        )
     return _batch_enrich_vehicle_movements([document])[0]
 
 
@@ -1003,7 +1197,7 @@ def confirm_vehicle_movement_delivery(
 ) -> dict:
     normalized_role = _normalize_role(current_role) or current_role
     document = _get_vehicle_movement_document(movement_id)
-    _assert_vehicle_movement_access(document, current_user_id=current_user_id, current_role=normalized_role)
+    _assert_vehicle_movement_mutation_access(document, current_user_id=current_user_id, current_role=normalized_role)
     if normalized_role not in {"owner", "admin", "driver"}:
         raise ApiError("You do not have permission to confirm delivery for vehicle movements.", status_code=403)
     if document.get("movement_type") != "customer_dispatch":
@@ -1041,7 +1235,7 @@ def _apply_status_transition(
 ) -> dict:
     normalized_role = _normalize_role(current_role) or current_role
     document = _get_vehicle_movement_document(movement_id)
-    _assert_vehicle_movement_access(document, current_user_id=current_user_id, current_role=normalized_role)
+    _assert_vehicle_movement_mutation_access(document, current_user_id=current_user_id, current_role=normalized_role)
     current_status = document.get("status")
     if current_status not in allowed_current_statuses:
         raise ApiError(f"Vehicle movement cannot transition from {current_status} to {next_status}.", status_code=400)
@@ -1097,6 +1291,39 @@ def _apply_status_transition(
     except DuplicateKeyError:
         raise ApiError("Vehicle already has another open movement.", status_code=409) from None
     document.update(update_fields)
+    if document.get("movement_type") in {"maintenance", "workshop"}:
+        if next_status in {"checked_out", "in_progress"}:
+            vehicles_collection().update_one(
+                {"_id": document["vehicle_id"]},
+                {"$set": {"status": "maintenance", "updated_at": timestamp}},
+            )
+        elif next_status in {"closed", "cancelled"}:
+            vehicle_document = vehicles_collection().find_one(
+                {"_id": document["vehicle_id"]},
+                {"assigned_driver_id": 1},
+            ) or {}
+            vehicles_collection().update_one(
+                {"_id": document["vehicle_id"]},
+                {
+                    "$set": {
+                        "status": "assigned" if vehicle_document.get("assigned_driver_id") else "available",
+                        "updated_at": timestamp,
+                    }
+                },
+            )
+        event_label = {
+            "approved": "approved",
+            "checked_out": "checked out",
+            "in_progress": "in progress",
+            "returned": "returned",
+            "closed": "closed",
+            "cancelled": "cancelled",
+        }.get(next_status, next_status.replace("_", " "))
+        _notify_movement_participants(
+            document,
+            event=event_label,
+            message=f"Maintenance movement {document.get('movement_id')} is now {event_label}.",
+        )
     return _batch_enrich_vehicle_movements([document])[0]
 
 
@@ -1158,8 +1385,16 @@ def return_vehicle_movement(movement_id: str, payload: dict, *, current_user_id:
 
 
 def close_vehicle_movement(movement_id: str, *, current_user_id: str, current_role: str) -> dict:
-    if _normalize_role(current_role) not in {"owner", "admin"}:
-        raise ApiError("You do not have permission to close vehicle movements.", status_code=403)
+    normalized_role = _normalize_role(current_role) or current_role
+    if normalized_role not in {"owner", "admin"}:
+        document = _get_vehicle_movement_document(movement_id, projection=DETAIL_PROJECTION)
+        assigned_stock_transfer_driver = (
+            normalized_role == "driver"
+            and document.get("movement_type") in {"stock_transfer", "stock_return", "supplier_pickup"}
+            and document.get("driver_id") == _to_object_id(current_user_id, "current_user_id")
+        )
+        if not assigned_stock_transfer_driver:
+            raise ApiError("You do not have permission to close vehicle movements.", status_code=403)
     return _apply_status_transition(
         movement_id,
         next_status="closed",
@@ -1357,6 +1592,9 @@ def list_vehicle_movement_options(*, current_user_id: str, current_role: str) ->
 
     payload = {
         "movement_types": sorted(ALLOWED_MOVEMENT_TYPES),
+        "creatable_movement_types": sorted(
+            ALLOWED_MOVEMENT_TYPES - SOURCE_MANAGED_MOVEMENT_TYPES
+        ),
         "statuses": sorted(ALLOWED_MOVEMENT_STATUSES),
         "open_statuses": sorted(OPEN_MOVEMENT_STATUSES),
         "drivers": [serialize_user(driver) for driver in drivers],

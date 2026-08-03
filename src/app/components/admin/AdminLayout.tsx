@@ -5,13 +5,15 @@ import type { UserRole } from '../../App';
 import PortalBackButton from '../shared/PortalBackButton';
 import { useActionableNotificationCount } from '../../lib/notification-count';
 import { useResponsiveSidebar } from '../../lib/responsive-sidebar';
+import type { SessionUser } from '../../lib/auth-session';
 
 interface AdminLayoutProps {
   children: ReactNode;
-  userRole: Extract<UserRole, 'owner' | 'admin' | 'dispatcher' | 'customer_service'>;
+  userRole: UserRole;
   activeSection?: string;
   onNavigate: (section: string) => void;
   onLogout: () => void;
+  currentUser?: SessionUser | null;
   showBackButton?: boolean;
   backLabel?: string;
   onBack?: () => void;
@@ -23,12 +25,13 @@ export default function AdminLayout({
   activeSection,
   onNavigate,
   onLogout,
+  currentUser,
   showBackButton = false,
   backLabel = 'Back',
   onBack,
 }: AdminLayoutProps) {
   const sidebar = useResponsiveSidebar();
-  const { actionableCount, actionableCounts, moduleCounts } = useActionableNotificationCount();
+  const { actionableCount, unreadCount, actionableCounts, moduleCounts } = useActionableNotificationCount();
   const handleNavigate = (section: string) => {
     onNavigate(section);
     if (typeof window !== 'undefined' && window.innerWidth < 1024) {
@@ -37,7 +40,7 @@ export default function AdminLayout({
   };
 
   return (
-    <div className="flex min-h-screen overflow-x-hidden bg-[#F8FAFC]">
+    <div className="flex h-dvh overflow-hidden bg-[#F8FAFC]">
       <Sidebar
         userRole={userRole}
         activeSection={activeSection}
@@ -54,11 +57,11 @@ export default function AdminLayout({
         onPointerEnter={sidebar.pointerEnter}
         onPointerLeave={sidebar.pointerLeave}
       />
-      <div className={`flex min-w-0 flex-1 flex-col overflow-x-hidden transition-all duration-300 ${
+      <div className={`flex h-dvh min-w-0 flex-1 flex-col overflow-hidden transition-all duration-300 ${
         sidebar.pinned ? 'lg:ml-72' : 'lg:ml-20'
       }`}>
-        <TopNav userRole={userRole} onMenuToggle={sidebar.toggle} onNavigate={handleNavigate} actionableCount={actionableCount} />
-        <main className="flex-1 overflow-x-hidden overflow-y-auto">
+        <TopNav userRole={userRole} currentUser={currentUser} activeSection={activeSection} onMenuToggle={sidebar.toggle} onNavigate={handleNavigate} unreadCount={unreadCount} />
+        <main className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain pb-[calc(4rem+env(safe-area-inset-bottom))] lg:pb-0">
           {showBackButton && onBack ? <PortalBackButton label={backLabel} onClick={onBack} /> : null}
           {children}
         </main>

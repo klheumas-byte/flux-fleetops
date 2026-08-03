@@ -18,6 +18,8 @@ from models.delivery_exception_investigation import serialize_delivery_exception
 from models.stock_transfer import serialize_stock_transfer
 from services.movement_source_service import ensure_movement_for_source
 from services.notification_service import create_notification, notify_roles, resolve_action_notifications
+from services.branch_access_service import branch_ids_for_user
+from services.rbac_service import role_definition, user_has_permission, user_role_codes
 from services.vehicle_availability_service import resolve_vehicle_availability
 from utils.api_error import ApiError
 from utils.file_validation import validate_attachment_list
@@ -29,9 +31,12 @@ OPERATION_TYPES = {"stock_transfer", "supplier_pickup"}
 SUPPLIER_PICKUP_ACTIVE_STATUSES = {"scheduled", "released", "in_transit", "awaiting_receipt"}
 LIST_PROJECTION = {
     "transfer_id": 1, "operation_type": 1, "supplier": 1, "supplier_reference": 1, "transfer_items": 1,
-    "sending_location_id": 1, "receiving_location_id": 1,
+    "sending_location_id": 1, "receiving_location_id": 1, "destination_branch_id": 1,
     "sending_location": 1, "receiving_location": 1, "approved_by": 1,
-    "released_by": 1, "received_by": 1, "dispatch_status": 1,
+    "released_by": 1, "received_by": 1, "received_by_user_id": 1,
+    "receiver_name": 1, "receiver_role": 1, "receiving_branch_id": 1, "received_at": 1,
+    "branch_receiving_status": 1, "receipt_confirmation": 1,
+    "dispatch_status": 1,
     "receiving_status": 1, "reservation_status": 1, "vehicle_required": 1,
     "vehicle_id": 1, "driver_id": 1, "scheduled_at": 1, "acknowledged_at": 1,
     "requested_date": 1, "purpose": 1,
@@ -100,7 +105,10 @@ def _limited_text(value, *, required=False, field="value", limit=300):
     return result
 
 
-def _recipient(value, *, required=True):
+ELIGIBLE_RECIPIENT_ROLES = {"branch_manager", "branch_warehouse_coordinator"}
+
+
+def _external_recipient(value, *, required=True):
     if not isinstance(value, dict):
         if required:
             raise ApiError("recipient must be an object.", status_code=400)
@@ -115,13 +123,87 @@ def _recipient(value, *, required=True):
         raise ApiError("recipient secondary phone is invalid.", status_code=400)
     if email and not EMAIL_PATTERN.fullmatch(email):
         raise ApiError("recipient email is invalid.", status_code=400)
-    return {
+    recipient = {
         "full_name": full_name,
         "role": _limited_text(value.get("role"), field="recipient role"),
         "primary_phone": primary_phone,
         "secondary_phone": secondary_phone,
         "email": email,
         "delivery_instructions": _limited_text(value.get("delivery_instructions"), field="delivery instructions", limit=2000),
+    }
+    if "recipient_type" in value or "recipient_user_id" in value:
+        recipient.update({"recipient_user_id": None, "recipient_type": "external"})
+    return recipient
+
+
+def _internal_recipient(value, receiving_branch_id):
+    if not isinstance(value, dict):
+        raise ApiError("recipient must be an object.", status_code=400)
+    if not receiving_branch_id:
+        raise ApiError("Select a receiving branch before selecting a FleetOps receiver.", status_code=400)
+    recipient_user_id = _oid(value.get("recipient_user_id"), "recipient_user_id")
+    user = get_collection("users").find_one({"_id": recipient_user_id})
+    status = str((user or {}).get("status") or ("active" if (user or {}).get("active", True) else "inactive")).lower()
+    if not user or status != "active":
+        raise ApiError("Selected recipient is unavailable.", status_code=409)
+    roles = set(user_role_codes(user)) & ELIGIBLE_RECIPIENT_ROLES
+    if not roles:
+        raise ApiError("Selected recipient must be a Branch Manager or Branch Warehouse Coordinator.", status_code=400)
+    assigned = str(user.get("primary_branch_id") or "") == str(receiving_branch_id) or any(
+        str(item) == str(receiving_branch_id) for item in (user.get("allowed_branch_ids") or [])
+    )
+    if not assigned:
+        raise ApiError("Selected recipient is not assigned to the receiving branch.", status_code=403)
+    role = "branch_manager" if "branch_manager" in roles else "branch_warehouse_coordinator"
+    branch = get_collection("branches").find_one({"_id": receiving_branch_id}, {"name": 1}) or {}
+    return {
+        "recipient_user_id": recipient_user_id, "recipient_type": "fleetops_user",
+        "full_name": _limited_text(user.get("full_name"), required=True, field="recipient full name"),
+        "role": role_definition(role).get("name") or role.replace("_", " ").title(),
+        "branch_id": receiving_branch_id, "branch_name": branch.get("name"),
+        "primary_phone": _limited_text(user.get("phone") or user.get("primary_phone"), required=True, field="recipient primary phone", limit=30),
+        "secondary_phone": _limited_text(user.get("secondary_phone"), field="recipient secondary phone", limit=30),
+        "email": _limited_text(user.get("email"), field="recipient email", limit=320),
+        "delivery_instructions": _limited_text(value.get("delivery_instructions"), field="delivery instructions", limit=2000),
+    }
+
+
+def _recipient(value, *, required=True, receiving_branch_id=None):
+    if isinstance(value, dict) and value.get("recipient_user_id"):
+        return _internal_recipient(value, receiving_branch_id)
+    if isinstance(value, dict) and value.get("recipient_type") == "fleetops_user":
+        raise ApiError("Select a FleetOps receiver by user ID.", status_code=400)
+    return _external_recipient(value, required=required)
+
+
+def list_stock_transfer_recipient_options(*, branch_id=None, current_user_id: str, current_role: str):
+    if current_role not in {"owner", "admin"}:
+        raise ApiError("Only an owner or admin can select transfer recipients.", status_code=403)
+    branches = list(get_collection("branches").find(
+        {"$or": [{"status": "active"}, {"status": {"$exists": False}, "active": {"$ne": False}}]}, {"name": 1, "code": 1},
+    ).sort("name", ASCENDING))
+    selected = _oid(branch_id, "branch_id", required=False)
+    if selected and not any(item["_id"] == selected for item in branches):
+        raise ApiError("Receiving branch was not found or is inactive.", status_code=404)
+    receivers = []
+    if selected:
+        query = {"status": "active", "$and": [
+            {"$or": [{"role": {"$in": list(ELIGIBLE_RECIPIENT_ROLES)}}, {"role_ids": {"$in": list(ELIGIBLE_RECIPIENT_ROLES)}}]},
+            {"$or": [{"primary_branch_id": selected}, {"allowed_branch_ids": selected}]},
+        ]}
+        branch_name = next((item.get("name") for item in branches if item["_id"] == selected), None)
+        for user in get_collection("users").find(query).sort("full_name", ASCENDING):
+            roles = set(user_role_codes(user)) & ELIGIBLE_RECIPIENT_ROLES
+            role = "branch_manager" if "branch_manager" in roles else "branch_warehouse_coordinator"
+            receivers.append({
+                "id": str(user["_id"]), "full_name": user.get("full_name"), "role": role,
+                "role_name": role_definition(role).get("name"), "branch_id": str(selected), "branch_name": branch_name,
+                "primary_phone": user.get("phone") or user.get("primary_phone"),
+                "secondary_phone": user.get("secondary_phone"), "email": user.get("email"),
+            })
+    return {
+        "branches": [{"id": str(item["_id"]), "name": item.get("name"), "code": item.get("code")} for item in branches],
+        "receivers": receivers,
     }
 
 
@@ -240,6 +322,43 @@ def _items(value, *, field="transfer_items", allow_zero=False):
     return result
 
 
+def _receiving_items(value, planned_items):
+    if not isinstance(value, list) or not value:
+        raise ApiError("received_items must contain at least one item.", status_code=400)
+    planned = {str(item["item_id"]).casefold(): item for item in planned_items or []}
+    supplied = {}
+    for raw in value:
+        if not isinstance(raw, dict):
+            raise ApiError("Each received item must be an object.", status_code=400)
+        item_id = _text(raw.get("item_id"), required=True, field="item identifier")
+        key = item_id.casefold()
+        if key not in planned or key in supplied:
+            raise ApiError("Received items must match every transferred item exactly once.", status_code=400)
+        try:
+            received = float(raw.get("received_quantity", raw.get("quantity", 0)))
+            good = float(raw.get("good_quantity", received))
+            damaged = float(raw.get("damaged_quantity", 0))
+            wrong = float(raw.get("wrong_item_quantity", raw.get("wrong_quantity", 0)))
+        except (TypeError, ValueError) as exc:
+            raise ApiError("Receipt quantities must be numeric.", status_code=400) from exc
+        if any(number < 0 for number in (received, good, damaged, wrong)):
+            raise ApiError("Receipt quantities cannot be negative.", status_code=400)
+        if round(good + damaged + wrong, 3) != round(received, 3):
+            raise ApiError("Received quantity must equal good + damaged + wrong-item quantity.", status_code=400)
+        sent = float(planned[key].get("quantity") or 0)
+        supplied[key] = {
+            "item_id": planned[key]["item_id"], "name": planned[key].get("name") or item_id,
+            "unit": planned[key].get("unit") or "unit", "sent_quantity": sent, "expected_quantity": sent,
+            "quantity": received, "received_quantity": received, "good_quantity": good,
+            "damaged_quantity": damaged, "wrong_item_quantity": wrong,
+            "missing_quantity": max(round(sent - received, 3), 0),
+            "notes": _limited_text(raw.get("notes"), field="receipt notes", limit=2000),
+        }
+    if set(supplied) != set(planned):
+        raise ApiError("Every transferred item must be confirmed exactly once.", status_code=400)
+    return list(supplied.values())
+
+
 def ensure_stock_transfer_indexes():
     ensure_indexes_for_collection(
         transfers_collection(),
@@ -250,6 +369,7 @@ def ensure_stock_transfer_indexes():
             {"keys": [("operation_type", ASCENDING), ("created_at", DESCENDING), ("_id", DESCENDING)]},
             {"keys": [("sending_location_id", ASCENDING), ("status", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("receiving_location_id", ASCENDING), ("status", ASCENDING)], "options": {"sparse": True}},
+            {"keys": [("recipient.recipient_user_id", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("driver_id", ASCENDING), ("status", ASCENDING), ("scheduled_at", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("linked_vehicle_movement_id", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("linked_waybill_id", ASCENDING)], "options": {"sparse": True}},
@@ -309,11 +429,56 @@ def _get(transfer_id: str, projection=None):
 
 
 def _assert_access(document, *, current_user_id, current_role):
-    if current_role in {"owner", "admin"}:
+    user = get_collection("users").find_one({"_id": _oid(current_user_id, "current_user_id")}) or {"role": current_role}
+    roles = set(user_role_codes(user))
+    if roles & {"owner", "admin", "system_administrator", "operations_administrator"}:
         return
     if current_role == "driver" and str(document.get("driver_id")) == str(current_user_id):
         return
+    if user_has_permission(user, "stock_transfers.view_incoming"):
+        _assert_destination_branch_access(document, user)
+        return
     raise ApiError("You do not have permission to access this stock transfer.", status_code=403)
+
+
+def _destination_branch_id(document):
+    return document.get("destination_branch_id") or document.get("receiving_location_id")
+
+
+def _assert_destination_branch_access(document, user):
+    destination = _destination_branch_id(document)
+    allowed = branch_ids_for_user(user)
+    if not destination or (allowed is not None and destination not in allowed):
+        raise ApiError("You do not have access to stock transfers for this destination branch.", status_code=403)
+
+
+def _notify_destination_receivers(document, title, message, *, event, action=False):
+    destination = _destination_branch_id(document)
+    if not isinstance(destination, ObjectId):
+        return
+    query = {"status": "active", "$and": [
+        {"$or": [{"role": {"$in": ["branch_manager", "branch_warehouse_coordinator"]}}, {"role_ids": {"$in": ["branch_manager", "branch_warehouse_coordinator"]}}]},
+        {"$or": [{"primary_branch_id": destination}, {"allowed_branch_ids": destination}]},
+    ]}
+    for recipient in get_collection("users").find(query, {"_id": 1}):
+        create_notification(
+            recipient["_id"], title, message, category="inventory", module="stock-transfers",
+            priority="high" if action else "medium", reference_type="stock_transfer", reference_id=document["_id"],
+            action_type="receive_stock_transfer" if action else None, action_url="stock-transfers",
+            action_label="Receive stock" if action else "View incoming stock",
+            dedupe_key=f"stock-transfer:{document['_id']}:destination:{event}:{recipient['_id']}",
+        )
+
+
+def _add_query_clause(query, clause):
+    if not clause:
+        return
+    if not query:
+        query.update(clause)
+        return
+    existing = dict(query)
+    query.clear()
+    query["$and"] = [existing, clause]
 
 
 def create_stock_transfer(payload: dict, *, current_user_id: str, current_role: str):
@@ -333,7 +498,7 @@ def create_stock_transfer(payload: dict, *, current_user_id: str, current_role: 
         raise ApiError("Sending and receiving locations must be different.", status_code=400)
     timestamp = now_utc()
     transfer_items = _items(payload.get("transfer_items"))
-    recipient = _recipient(payload.get("recipient"), required=operation_type != "supplier_pickup")
+    recipient = _recipient(payload.get("recipient"), required=operation_type != "supplier_pickup", receiving_branch_id=receiving_location_id)
     idempotency_key = _text(payload.get("idempotency_key"))
     if idempotency_key and len(idempotency_key) > 200:
         raise ApiError("idempotency_key is too long.", status_code=400)
@@ -345,7 +510,7 @@ def create_stock_transfer(payload: dict, *, current_user_id: str, current_role: 
         "requested_date": str(_date(payload.get("requested_date"), "requested_date") or ""),
         "purpose": _text(payload.get("purpose")),
         "notes": _text(payload.get("notes")),
-        "recipient": recipient,
+        "recipient": {key: str(value) if isinstance(value, ObjectId) else value for key, value in (recipient or {}).items()} if recipient else None,
         "supplier": supplier,
         "supplier_reference": _text(payload.get("supplier_reference") or payload.get("po_reference") or payload.get("reference")),
     }, sort_keys=True).encode("utf-8")).hexdigest()
@@ -364,6 +529,7 @@ def create_stock_transfer(payload: dict, *, current_user_id: str, current_role: 
         "supplier_reference": _text(payload.get("supplier_reference") or payload.get("po_reference") or payload.get("reference")),
         "sending_location_id": sending_location_id,
         "receiving_location_id": receiving_location_id,
+        "destination_branch_id": receiving_location_id,
         "sending_location": sending_location,
         "receiving_location": receiving_location,
         "transfer_items": transfer_items,
@@ -417,9 +583,20 @@ def _notify_approval(document):
 
 def list_stock_transfers(*, current_user_id: str, current_role: str, page=1, page_size=25, status=None, operation_type=None, active_tasks=False):
     query = {}
+    user = get_collection("users").find_one({"_id": _oid(current_user_id, "current_user_id")}) or {"role": current_role}
+    roles = set(user_role_codes(user))
     if current_role == "driver":
         query["driver_id"] = _oid(current_user_id, "current_user_id")
-    elif current_role not in {"owner", "admin"}:
+    elif roles & {"owner", "admin", "system_administrator", "operations_administrator"}:
+        pass
+    elif user_has_permission(user, "stock_transfers.view_incoming"):
+        allowed = branch_ids_for_user(user)
+        if allowed is not None:
+            _add_query_clause(query, {"$or": [
+                {"destination_branch_id": {"$in": list(allowed)}},
+                {"receiving_location_id": {"$in": list(allowed)}},
+            ]})
+    else:
         raise ApiError("You do not have permission to list stock transfers.", status_code=403)
     if status:
         if status not in TRANSFER_STATUSES:
@@ -429,7 +606,7 @@ def list_stock_transfers(*, current_user_id: str, current_role: str, page=1, pag
         if operation_type not in OPERATION_TYPES:
             raise ApiError("Invalid operation_type.", status_code=400)
         if operation_type == "stock_transfer":
-            query["$or"] = [{"operation_type": operation_type}, {"operation_type": {"$exists": False}}]
+            _add_query_clause(query, {"$or": [{"operation_type": operation_type}, {"operation_type": {"$exists": False}}]})
         else:
             query["operation_type"] = operation_type
     if current_role == "driver" and active_tasks:
@@ -437,21 +614,26 @@ def list_stock_transfers(*, current_user_id: str, current_role: str, page=1, pag
             raise ApiError("active_tasks is only supported for Supplier Pickups.", status_code=400)
         # Operational Tasks is a dedicated Supplier Pickup view. Keep this
         # discriminator server-side even if an older client omits it.
-        query.pop("$or", None)
-        query["operation_type"] = "supplier_pickup"
+        query = {"driver_id": _oid(current_user_id, "current_user_id"), "operation_type": "supplier_pickup"}
         query["status"] = {"$in": list(SUPPLIER_PICKUP_ACTIVE_STATUSES)}
     page, page_size = max(int(page or 1), 1), min(max(int(page_size or 25), 1), 100)
     total = transfers_collection().count_documents(query)
     documents = list(transfers_collection().find(query, LIST_PROJECTION).sort([("created_at", DESCENDING), ("_id", DESCENDING)]).skip((page - 1) * page_size).limit(page_size))
     vehicle_ids = {item.get("vehicle_id") for item in documents if isinstance(item.get("vehicle_id"), ObjectId)}
+    driver_ids = {item.get("driver_id") for item in documents if isinstance(item.get("driver_id"), ObjectId)}
     vehicles = {
         item["_id"]: item for item in get_collection("vehicles").find(
             {"_id": {"$in": list(vehicle_ids)}}, {"registration_number": 1, "make": 1, "model": 1},
         )
     } if vehicle_ids else {}
+    drivers = {
+        item["_id"]: item for item in get_collection("users").find(
+            {"_id": {"$in": list(driver_ids)}}, {"full_name": 1},
+        )
+    } if driver_ids else {}
     transfers = []
     for item in documents:
-        payload = serialize_stock_transfer(item, include_items=current_role == "driver" and active_tasks)
+        payload = serialize_stock_transfer(item, include_items=(current_role == "driver" and active_tasks) or user_has_permission(user, "stock_transfers.view_incoming"))
         vehicle = vehicles.get(item.get("vehicle_id"))
         if vehicle:
             payload["vehicle"] = {
@@ -460,6 +642,9 @@ def list_stock_transfers(*, current_user_id: str, current_role: str, page=1, pag
                 "make": vehicle.get("make"),
                 "model": vehicle.get("model"),
             }
+        driver = drivers.get(item.get("driver_id"))
+        if driver:
+            payload["driver"] = {"id": str(driver["_id"]), "full_name": driver.get("full_name")}
         transfers.append(payload)
     return {"transfers": transfers, "pagination": {"page": page, "page_size": page_size, "total": total, "total_pages": max(1, ceil(total / page_size))}}
 
@@ -516,7 +701,7 @@ def update_stock_transfer_recipient(transfer_id, payload, *, current_user_id, cu
         raise ApiError("Recipient details cannot be edited after the transfer is closed.", status_code=400)
     if document.get("acknowledged_at") or document.get("status") in {"released", "in_transit", "awaiting_receipt"}:
         raise ApiError("Recipient details are read-only after Driver Confirmation. Use a change request for future recipient changes.", status_code=409)
-    recipient = _recipient((payload or {}).get("recipient", payload))
+    recipient = _recipient((payload or {}).get("recipient", payload), receiving_branch_id=_destination_branch_id(document))
     if document.get("recipient") == recipient:
         return serialize_stock_transfer(document, include_items=True)
     reason = _limited_text((payload or {}).get("reason"), field="edit reason", limit=1000)
@@ -897,6 +1082,10 @@ def _reassign_scheduled_transfer(document, payload, *, current_user_id, current_
         "updated_at": timestamp,
         "version": int(document.get("version") or 1) + 1,
     }
+
+
+
+
     transfers_collection().update_one(
         {"_id": document["_id"], "status": "scheduled", "acknowledged_at": None},
         {"$set": updates, "$push": {"audit_log": audit}},
@@ -995,6 +1184,8 @@ def schedule_stock_transfer(transfer_id, payload, *, current_user_id, current_ro
     notification_reference_type = "supplier_pickup" if operation_label == "Supplier pickup" else "stock_transfer"
     notification_action = "accept_supplier_pickup" if operation_label == "Supplier pickup" else "acknowledge_stock_transfer"
     create_notification(driver_id, f"{operation_label} assigned", f"{document.get('transfer_id')} - Review the items and accept the assignment." if operation_label == "Supplier pickup" else f"{document.get('transfer_id')} - Review the items and accept custody.", category="inventory", module="my-operational-tasks", priority="high", reference_type=notification_reference_type, reference_id=document["_id"], action_type=notification_action, action_url="my-operational-tasks", action_label="Accept Pickup" if operation_label == "Supplier pickup" else "Accept Transfer", dedupe_key=f"{event_prefix}:{document['_id']}:driver:{driver_id}")
+    if operation_label == "Stock transfer":
+        _notify_destination_receivers(document, "Stock transfer assigned", f"{document.get('transfer_id')} has been assigned for delivery to your branch.", event="assigned")
     return serialize_stock_transfer(document, include_items=True)
 
 
@@ -1088,6 +1279,8 @@ def release_stock_transfer(transfer_id, payload, *, current_user_id, current_rol
     transfers_collection().update_one({"_id": document["_id"], "status": "scheduled"}, {"$set": updates, "$push": {"audit_log": audit}}); document.update(updates); document.setdefault("audit_log", []).append(audit)
     if is_pickup:
         _update_supplier_pickup_task(document, "loaded", audit)
+    else:
+        _notify_destination_receivers(document, "Stock transfer loaded and dispatched", f"{document.get('transfer_id')} has been loaded and released for delivery to your branch.", event="loaded-dispatched")
     return serialize_stock_transfer(document, include_items=True)
 
 
@@ -1108,6 +1301,8 @@ def start_stock_transfer(transfer_id, payload, *, current_user_id, current_role)
     updates = {"status": "in_transit", "dispatch_status": "in_transit", "started_by": _oid(current_user_id, "current_user_id"), "started_at": timestamp, "updated_at": timestamp, "version": int(document.get("version") or 1) + 1}
     transfers_collection().update_one({"_id": document["_id"], "status": "released"}, {"$set": updates, "$push": {"audit_log": audit}}); document.update(updates); document.setdefault("audit_log", []).append(audit)
     _update_supplier_pickup_task(document, "in_transit", audit)
+    if (document.get("operation_type") or "stock_transfer") == "stock_transfer":
+        _notify_destination_receivers(document, "Stock transfer in transit", f"{document.get('transfer_id')} is now in transit to your branch.", event="in-transit")
     return serialize_stock_transfer(document, include_items=True)
 
 
@@ -1138,6 +1333,8 @@ def arrive_stock_transfer(transfer_id, payload, *, current_user_id, current_role
         _update_supplier_pickup_task(document, "delivered", audit)
     label = "Supplier pickup" if is_pickup else "Stock transfer"
     notify_roles(["owner", "admin"], title=f"{label} awaiting receipt", message=f"{document.get('transfer_id')} has physically arrived. Confirm quantities before completion.", category="inventory", module="supplier-pickup" if is_pickup else "stock-transfers", priority="high", reference_type="supplier_pickup" if is_pickup else "stock_transfer", reference_id=document["_id"], action_type="verify_supplier_pickup_delivery" if is_pickup else "receive_stock_transfer", action_url="supplier-pickup" if is_pickup else "stock-transfers", action_label="Review delivery" if is_pickup else "Confirm receipt", dedupe_key=f"{_source_event_prefix(document)}:{document['_id']}:receipt")
+    if not is_pickup:
+        _notify_destination_receivers(document, "Stock transfer ready for receiving", f"{document.get('transfer_id')} has arrived. Confirm item quantities and condition.", event="ready", action=True)
     return serialize_stock_transfer(document, include_items=True)
 
 
@@ -2041,37 +2238,112 @@ def complete_delivery_investigation_action(transfer_id, action_id, payload, *, c
 
 
 def receive_stock_transfer(transfer_id, payload, *, current_user_id, current_role):
-    if current_role not in {"owner", "admin"}: raise ApiError("Only an owner or admin can confirm stock receipt.", status_code=403)
     document = _get(transfer_id)
+    actor = get_collection("users").find_one({"_id": _oid(current_user_id, "current_user_id")}) or {"role": current_role}
+    roles = set(user_role_codes(actor))
+    is_branch_receiver = bool(roles & {"branch_manager", "branch_warehouse_coordinator"})
+    is_privileged_receiver = bool(roles & {"owner", "admin", "system_administrator", "operations_administrator"})
+    if not is_privileged_receiver:
+        if not is_branch_receiver or not user_has_permission(actor, "stock_transfers.receive"):
+            raise ApiError("You do not have permission to receive stock transfers.", status_code=403)
+        _assert_destination_branch_access(document, actor)
     if (document.get("operation_type") or "stock_transfer") == "supplier_pickup":
         raise ApiError("Supplier Pickup receipt is not enabled yet.", status_code=409)
-    if document.get("recipient"):
-        raise ApiError("This transfer requires receiver verification from the delivered Digital Waybill.", status_code=409)
-    if document.get("receiving_status") == "received": return serialize_stock_transfer(document, include_items=True)
+    if document.get("branch_receiving_status") or document.get("receiving_status") == "received": return serialize_stock_transfer(document, include_items=True)
     if document.get("status") != "awaiting_receipt": raise ApiError("This transfer is not awaiting receipt.", status_code=400)
-    received_items = _items(payload.get("received_items"), field="received_items", allow_zero=True)
-    planned = {item["item_id"]: float(item["quantity"]) for item in document.get("transfer_items") or []}; received = {item["item_id"]: float(item["quantity"]) for item in received_items}
-    unknown = set(received) - set(planned)
-    if unknown: raise ApiError("Received items contain products not present in the transfer.", status_code=400)
-    variance = [{"item_id": item_id, "expected_quantity": quantity, "received_quantity": received.get(item_id, 0), "difference": received.get(item_id, 0) - quantity} for item_id, quantity in planned.items() if received.get(item_id, 0) != quantity]
+    if is_branch_receiver and payload.get("confirmed") is not True:
+        raise ApiError("Final receiver confirmation is required.", status_code=400)
+    received_items = _receiving_items(payload.get("received_items"), document.get("transfer_items") or [])
+    planned = {item["item_id"]: float(item["quantity"]) for item in document.get("transfer_items") or []}
+    received = {item["item_id"]: float(item["received_quantity"]) for item in received_items}
+    variance = [{
+        "item_id": item["item_id"], "expected_quantity": item["expected_quantity"], "received_quantity": item["received_quantity"],
+        "difference": item["received_quantity"] - item["expected_quantity"], "good_quantity": item["good_quantity"],
+        "damaged_quantity": item["damaged_quantity"], "wrong_item_quantity": item["wrong_item_quantity"],
+        "missing_quantity": item["missing_quantity"], "notes": item.get("notes"),
+    } for item in received_items if item["received_quantity"] != item["expected_quantity"] or item["damaged_quantity"] or item["wrong_item_quantity"]]
     waybill, waybill_collection = _linked_waybill(document)
     if waybill and waybill.get("status") == "in_transit":
         from services.waybill_service import transition_waybill
         transition_waybill(
             waybill["_id"], "delivered",
-            {"receiver": _text(payload.get("receiver")) or f"Operations user {current_user_id}", "quantities": [{"item_id": item_id, "quantity": received.get(item_id, 0)} for item_id in planned]},
+            {"receiver": _text(actor.get("full_name")) or f"Operations user {current_user_id}", "quantities": [{"item_id": item_id, "quantity": received.get(item_id, 0)} for item_id in planned]},
             current_user_id=current_user_id, current_role=current_role, collection=waybill_collection,
         )
     elif waybill and waybill.get("status") == "delivered":
         from services.waybill_service import record_waybill_destination_receipt
         record_waybill_destination_receipt(
             waybill["_id"],
-            {"receiver": _text(payload.get("receiver")) or f"Operations user {current_user_id}", "quantities": [{"item_id": item_id, "quantity": received.get(item_id, 0)} for item_id in planned]},
+            {"receiver": _text(actor.get("full_name")) or f"Operations user {current_user_id}", "quantities": [{"item_id": item_id, "quantity": received.get(item_id, 0)} for item_id in planned]},
             current_user_id=current_user_id, current_role=current_role, collection=waybill_collection,
         )
-    timestamp = now_utc(); audit = _audit("receipt_recorded", current_user_id, current_role, timestamp=timestamp)
-    updates = {"received_items": received_items, "quantity_variance": variance, "receiving_status": "received", "received_by": _oid(current_user_id, "current_user_id"), "received_at": timestamp, "updated_at": timestamp, "version": int(document.get("version") or 1) + 1}
+    timestamp = now_utc()
+    receiver_role_code = "branch_manager" if "branch_manager" in roles else "branch_warehouse_coordinator" if "branch_warehouse_coordinator" in roles else current_role if current_role in roles else next(iter(roles), current_role)
+    receiver_role = role_definition(receiver_role_code).get("name") or str(receiver_role_code).replace("_", " ").title()
+    receiving_branch_id = _destination_branch_id(document)
+    signature = _text(payload.get("receiver_signature") or payload.get("signature"))
+    initials = _limited_text(payload.get("receiver_initials"), field="receiver initials", limit=20)
+    if signature and len(signature) > 1_500_000:
+        raise ApiError("Receiver signature is too large.", status_code=400)
+    branch = get_collection("branches").find_one({"_id": receiving_branch_id}, {"name": 1}) if isinstance(receiving_branch_id, ObjectId) else None
+    manual_receiver = payload.get("actual_receiver") if is_privileged_receiver else None
+    if manual_receiver is not None and not isinstance(manual_receiver, dict):
+        raise ApiError("actual_receiver must be an object.", status_code=400)
+    if isinstance(manual_receiver, dict) and manual_receiver.get("receiver_type") == "external":
+        receiver_name = _limited_text(manual_receiver.get("full_name"), required=True, field="actual receiver name")
+        receiver_contact = _limited_text(manual_receiver.get("primary_contact"), required=True, field="actual receiver contact")
+        receiver_role = _limited_text(manual_receiver.get("role"), field="actual receiver role") or "External recipient"
+        actual_receiver = {
+            "receiver_type": "external", "user_id": None, "full_name": receiver_name,
+            "primary_contact": receiver_contact, "role": receiver_role,
+            "branch_id": receiving_branch_id, "branch_name": (branch or {}).get("name") or document.get("receiving_location"),
+            "initials": initials, "signature": signature,
+            "notes": _limited_text(manual_receiver.get("notes", payload.get("notes")), field="receiver notes", limit=2000),
+            "acknowledged": True,
+        }
+    else:
+        receiver_name = _text(actor.get("full_name")) or f"Operations user {current_user_id}"
+        receiver_contact = _text(actor.get("phone") or actor.get("email"))
+        actual_receiver = {
+            "receiver_type": "fleetops_user", "user_id": _oid(current_user_id, "current_user_id"),
+            "full_name": receiver_name, "primary_contact": receiver_contact,
+            "role": receiver_role, "branch_id": receiving_branch_id,
+            "branch_name": (branch or {}).get("name") or document.get("receiving_location"),
+            "initials": initials, "signature": signature,
+            "notes": _limited_text(payload.get("notes"), field="receiver notes", limit=2000),
+            "acknowledged": True,
+        }
+    outcome = "RECEIVED_WITH_VARIANCE" if variance else "VERIFIED"
+    confirmation = {"confirmed_by": _oid(current_user_id, "current_user_id"), "confirmed_at": timestamp, "receiver_name": receiver_name, "receiver_role": receiver_role, "receiver_contact": receiver_contact, "receiving_branch_id": receiving_branch_id, "initials": initials, "signature": signature, "immutable": True}
+    audit = _audit("branch_receipt_confirmed" if is_branch_receiver else "receipt_recorded", current_user_id, receiver_role_code, timestamp=timestamp, details={"outcome": outcome, "variance_count": len(variance)})
+    updates = {
+        "received_items": received_items, "quantity_variance": variance, "receiving_status": "received",
+        "received_by": _oid(current_user_id, "current_user_id"), "received_by_user_id": _oid(current_user_id, "current_user_id"),
+        "receiver_name": receiver_name, "receiver_role": receiver_role, "receiving_branch_id": receiving_branch_id,
+        "actual_receiver": actual_receiver,
+        "received_at": timestamp,
+        "updated_at": timestamp, "version": int(document.get("version") or 1) + 1,
+    }
+    if is_branch_receiver:
+        updates.update({"branch_receiving_status": outcome, "receipt_confirmation": confirmation})
+    if variance and is_branch_receiver:
+        exception_items = []
+        for item in received_items:
+            exception_quantities = (("missing", item["missing_quantity"]), ("damaged", item["damaged_quantity"]), ("wrong_item", item["wrong_item_quantity"]), ("excess", max(item["received_quantity"] - item["expected_quantity"], 0)))
+            for exception_type, quantity in exception_quantities:
+                if quantity:
+                    exception_items.append({"item_id": item["item_id"], "name": item["name"], "unit": item["unit"], "expected_quantity": item["expected_quantity"], "received_quantity": item["received_quantity"], "exception_quantity": quantity, "exception_type": exception_type, "variance": item["received_quantity"] - item["expected_quantity"], "notes": item.get("notes"), "photos": []})
+        exceptions = get_collection("delivery_exceptions")
+        existing = exceptions.find_one({"stock_transfer_id": document["_id"]})
+        if not existing:
+            existing = {"exception_number": f"DEX-{timestamp.strftime('%Y%m%d')}-{uuid4().hex[:6].upper()}", "stock_transfer_id": document["_id"], "waybill_id": document.get("linked_waybill_id"), "movement_id": document.get("linked_vehicle_movement_id"), "driver_id": document.get("driver_id"), "status": "open", "items": exception_items, "notes": _limited_text(payload.get("notes"), field="receipt notes", limit=2000), "reported_by": _oid(current_user_id, "current_user_id"), "reported_at": timestamp, "created_at": timestamp, "updated_at": timestamp, "audit_log": [audit]}
+            existing["_id"] = exceptions.insert_one(existing).inserted_id
+        summary = {"exception_number": existing["exception_number"], "status": existing.get("status", "open"), "affected_item_count": len(existing.get("items") or []), "exception_types": sorted({item["exception_type"] for item in existing.get("items") or []}), "reported_at": existing.get("reported_at")}
+        updates.update({"receiving_status": "exception_reported", "linked_delivery_exception_id": existing["_id"], "delivery_exception_status": "open", "delivery_exception_summary": summary})
     transfers_collection().update_one({"_id": document["_id"], "receiving_status": {"$ne": "received"}}, {"$set": updates, "$push": {"audit_log": audit}}); document.update(updates); document.setdefault("audit_log", []).append(audit)
+    resolve_action_notifications("stock_transfer", document["_id"], action_type="receive_stock_transfer", completed_by=current_user_id)
+    if variance and is_branch_receiver:
+        notify_roles(["owner", "admin"], title="Stock transfer receiving variance", message=f"{document.get('transfer_id')} was received with a quantity or condition variance.", category="inventory", module="stock-transfers", priority="high", reference_type="delivery_exception", reference_id=updates["linked_delivery_exception_id"], action_url="stock-transfers", action_label="Review exception", dedupe_key=f"delivery-exception:{updates['linked_delivery_exception_id']}:open")
     return serialize_stock_transfer(document, include_items=True)
 
 
@@ -2108,9 +2380,13 @@ def complete_stock_transfer(transfer_id, payload, *, current_user_id, current_ro
 
 
 def review_stock_transfer_variance(transfer_id, payload, *, current_user_id, current_role):
-    if current_role not in {"owner", "admin"}:
-        raise ApiError("Only an owner or admin can review stock transfer variance.", status_code=403)
     document = _get(transfer_id)
+    actor = get_collection("users").find_one({"_id": _oid(current_user_id, "current_user_id")}) or {"role": current_role}
+    roles = set(user_role_codes(actor))
+    if not (roles & {"owner", "admin", "system_administrator", "operations_administrator"}):
+        if not user_has_permission(actor, "stock_transfers.report_variance"):
+            raise ApiError("You do not have permission to report stock transfer variance.", status_code=403)
+        _assert_destination_branch_access(document, actor)
     if document.get("status") != "awaiting_receipt" or document.get("receiving_status") != "received":
         raise ApiError("Receive the stock transfer before reviewing variance.", status_code=400)
     if not document.get("quantity_variance"):

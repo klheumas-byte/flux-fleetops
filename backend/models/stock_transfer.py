@@ -16,6 +16,10 @@ def _value(value):
 def _workflow_stage(document: dict) -> str:
     """Expose the Phase 4 lifecycle without rewriting legacy status values."""
     status = document.get("status") or "draft"
+    if document.get("branch_receiving_status") == "RECEIVED_WITH_VARIANCE":
+        return "received_with_variance"
+    if document.get("branch_receiving_status") == "VERIFIED":
+        return "verified"
     if (document.get("operation_type") or "stock_transfer") == "supplier_pickup":
         if status in {"draft", "pending_approval"}:
             return "draft"
@@ -65,12 +69,20 @@ def serialize_stock_transfer(document: dict, *, include_items: bool = False) -> 
         "supplier_reference": document.get("supplier_reference"),
         "sending_location_id": _value(document.get("sending_location_id")),
         "receiving_location_id": _value(document.get("receiving_location_id")),
+        "destination_branch_id": _value(document.get("destination_branch_id") or document.get("receiving_location_id")),
         "sending_location": document.get("sending_location"),
         "receiving_location": document.get("receiving_location"),
         "approved_by": _value(document.get("approved_by")),
         "approved_at": _value(document.get("approved_at")),
         "released_by": _value(document.get("released_by")),
         "received_by": _value(document.get("received_by")),
+        "received_by_user_id": _value(document.get("received_by_user_id") or document.get("received_by")),
+        "receiver_name": document.get("receiver_name"),
+        "receiver_role": document.get("receiver_role"),
+        "receiving_branch_id": _value(document.get("receiving_branch_id") or document.get("destination_branch_id") or document.get("receiving_location_id")),
+        "received_at": _value(document.get("received_at")),
+        "branch_receiving_status": document.get("branch_receiving_status"),
+        "receipt_confirmation": _serialize_mapping(document.get("receipt_confirmation")),
         "dispatch_status": document.get("dispatch_status"),
         "receiving_status": document.get("receiving_status"),
         "reservation_status": document.get("reservation_status"),
@@ -78,6 +90,8 @@ def serialize_stock_transfer(document: dict, *, include_items: bool = False) -> 
         "vehicle_id": _value(document.get("vehicle_id")),
         "driver_id": _value(document.get("driver_id")),
         "scheduled_at": _value(document.get("scheduled_at")),
+        "dispatch_date": _value(document.get("started_at") or document.get("released_at")),
+        "expected_arrival": _value(document.get("expected_arrival") or document.get("scheduled_at")),
         "requested_date": _value(document.get("requested_date")),
         "purpose": document.get("purpose"),
         "recipient": _serialize_mapping(document.get("recipient")),
@@ -119,6 +133,7 @@ def serialize_stock_transfer(document: dict, *, include_items: bool = False) -> 
         "updated_at": _value(document.get("updated_at")),
         "version": int(document.get("version") or 1),
         "item_count": int(document.get("item_count") or len(document.get("transfer_items") or [])),
+        "total_quantity": sum(float(item.get("quantity") or 0) for item in (document.get("transfer_items") or [])),
         "audit_log": [
             _serialize_mapping(item) for item in (document.get("audit_log") or [])
         ],

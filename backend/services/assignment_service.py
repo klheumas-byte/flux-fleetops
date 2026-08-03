@@ -1178,6 +1178,7 @@ def complete_assignment_return(
 
 
 def list_assignable_drivers() -> list[dict]:
+    from services.driver_scope_service import operational_scope_for_driver
     blocked_driver_ids = [
         document["driver_id"]
         for document in assignments_collection().find(
@@ -1198,16 +1199,15 @@ def list_assignable_drivers() -> list[dict]:
     drivers = users_collection().find(
         {
             "_id": {"$nin": blocked_driver_ids},
-            "role": "driver",
             "status": "active",
             "driver_profile.approval_status": "approved",
-            "$or": [
-                {"driver_profile.assigned_vehicle_id": None},
-                {"driver_profile.assigned_vehicle_id": {"$exists": False}},
+            "$and": [
+                {"$or": [{"role": "driver"}, {"role_ids": "driver"}]},
+                {"$or": [{"driver_profile.assigned_vehicle_id": None}, {"driver_profile.assigned_vehicle_id": {"$exists": False}}]},
             ],
         }
     ).sort("full_name", ASCENDING)
-    return [serialize_user(driver) for driver in drivers]
+    return [serialize_user(driver) for driver in drivers if operational_scope_for_driver(driver) != "PERSONAL_ONLY"]
 
 
 def list_assignable_vehicles() -> list[dict]:

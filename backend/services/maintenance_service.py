@@ -19,6 +19,7 @@ from services.expense_service import create_expense
 from services.notification_service import create_notification, notify_roles, resolve_action_notifications
 from services.fleet_owner_service import notify_linked_owner
 from utils.api_error import ApiError
+from services.branch_access_service import branch_query as scoped_branch_query, current_user as current_branch_user, assert_branch_access
 from utils.mongo_indexes import ensure_indexes_for_collection
 
 
@@ -467,7 +468,7 @@ def update_maintenance_transport(
     current_user_id: str,
     current_role: str,
 ) -> dict:
-    if current_role not in {"owner", "admin"}:
+    if current_role not in {"owner", "admin", "operations_administrator", "operations_manager"}:
         raise ApiError("You do not have permission to manage maintenance transport.", status_code=403)
     from services.movement_custody_service import (
         accept_movement_custody,
@@ -1134,7 +1135,7 @@ def _enrich_maintenance_jobs(documents: list[dict]) -> list[dict]:
 
 
 def list_maintenance_jobs(current_user_id: str, current_role: str) -> list[dict]:
-    query = {"record_scope": {"$ne": "personal"}}
+    query = {"record_scope": {"$ne": "personal"}, **scoped_branch_query(current_branch_user(current_user_id))}
 
     documents = list(
         maintenance_jobs_collection()
@@ -1147,11 +1148,13 @@ def list_maintenance_jobs(current_user_id: str, current_role: str) -> list[dict]
 
 def get_maintenance_job_by_id(maintenance_id: str, current_user_id: str, current_role: str) -> dict:
     document = _get_maintenance_document(maintenance_id)
+    if document.get("branch_id"):
+        assert_branch_access(current_branch_user(current_user_id), document["branch_id"])
     return _enrich_maintenance_job(document)
 
 
 def list_maintenance_progress_logs(maintenance_id: str, current_user_id: str, current_role: str) -> list[dict]:
-    if current_role not in {"owner", "admin"}:
+    if current_role not in {"owner", "admin", "operations_administrator", "operations_manager"}:
         raise ApiError("You do not have permission to view maintenance progress.", status_code=403)
     _get_maintenance_document(maintenance_id)
     logs = list(
@@ -1174,7 +1177,7 @@ def list_maintenance_progress_logs(maintenance_id: str, current_user_id: str, cu
 
 
 def list_due_follow_ups(current_user_id: str, current_role: str) -> list[dict]:
-    if current_role not in {"owner", "admin"}:
+    if current_role not in {"owner", "admin", "operations_administrator", "operations_manager"}:
         raise ApiError("You do not have permission to view maintenance follow-ups.", status_code=403)
 
     today = date.today().isoformat()
@@ -1195,7 +1198,7 @@ def list_due_follow_ups(current_user_id: str, current_role: str) -> list[dict]:
 
 
 def list_overdue_follow_ups(current_user_id: str, current_role: str) -> list[dict]:
-    if current_role not in {"owner", "admin"}:
+    if current_role not in {"owner", "admin", "operations_administrator", "operations_manager"}:
         raise ApiError("You do not have permission to view maintenance follow-ups.", status_code=403)
 
     today = date.today().isoformat()
@@ -1244,11 +1247,13 @@ def list_driver_maintenance_progress_logs(maintenance_id: str, current_user_id: 
 
 
 def create_maintenance_job(payload: dict, current_user_id: str, current_role: str) -> dict:
-    if current_role not in {"owner", "admin"}:
+    if current_role not in {"owner", "admin", "operations_administrator", "operations_manager"}:
         raise ApiError("You do not have permission to create maintenance jobs.", status_code=403)
 
     _get_authenticated_actor_document(current_user_id, current_role)
     vehicle_document = _get_vehicle_document(payload.get("vehicle_id"))
+    if vehicle_document.get("branch_id"):
+        assert_branch_access(current_branch_user(current_user_id), vehicle_document["branch_id"], require_active=True)
     driver_object_id = _to_object_id(payload.get("driver_id"), "driver_id", required=False)
     if driver_object_id is not None:
         driver_document = _get_user_document(driver_object_id, "driver_id")
@@ -1322,6 +1327,9 @@ def create_maintenance_job(payload: dict, current_user_id: str, current_role: st
     document = {
         "preventive_schedule_id": preventive_schedule_object_id,
         "vehicle_id": vehicle_document["_id"],
+        "branch_id": vehicle_document.get("branch_id"),
+        "maintenance_funding_entity": payload.get("maintenance_funding_entity") or vehicle_document.get("maintenance_funding_entity") or "Flux FleetOps",
+        "cost_classification": "smart_living_funded" if str(payload.get("maintenance_funding_entity") or vehicle_document.get("maintenance_funding_entity") or "").strip().lower() == "smart living" else "fleetops_operating_cost",
         "driver_id": driver_object_id,
         "maintenance_type": maintenance_type,
         "title": title,
@@ -1484,7 +1492,7 @@ def create_maintenance_job(payload: dict, current_user_id: str, current_role: st
 
 
 def update_maintenance_job(maintenance_id: str, payload: dict, current_user_id: str, current_role: str) -> dict:
-    if current_role not in {"owner", "admin"}:
+    if current_role not in {"owner", "admin", "operations_administrator", "operations_manager"}:
         raise ApiError("You do not have permission to update maintenance jobs.", status_code=403)
 
     document = _get_maintenance_document(maintenance_id)
@@ -1621,7 +1629,7 @@ def update_maintenance_status(
     current_user_id: str,
     current_role: str,
 ) -> dict:
-    if current_role not in {"owner", "admin"}:
+    if current_role not in {"owner", "admin", "operations_administrator", "operations_manager"}:
         raise ApiError("You do not have permission to update maintenance status.", status_code=403)
 
     document = _get_maintenance_document(maintenance_id)
@@ -1773,7 +1781,7 @@ def assign_maintenance_coordinator(
     current_user_id: str,
     current_role: str,
 ) -> dict:
-    if current_role not in {"owner", "admin"}:
+    if current_role not in {"owner", "admin", "operations_administrator", "operations_manager"}:
         raise ApiError("You do not have permission to assign maintenance coordinators.", status_code=403)
 
     document = _get_maintenance_document(maintenance_id)
@@ -1815,7 +1823,7 @@ def add_maintenance_progress_update(
     current_role: str,
 ) -> dict:
     document = _get_maintenance_document(maintenance_id)
-    if current_role not in {"owner", "admin"}:
+    if current_role not in {"owner", "admin", "operations_administrator", "operations_manager"}:
         raise ApiError("You do not have permission to add maintenance progress updates.", status_code=403)
 
     update_type = _validate_progress_update_type(payload.get("update_type") or "general")

@@ -13,6 +13,7 @@ import {
 import VehicleRestrictionsPanel from '../shared/VehicleRestrictionsPanel';
 import KpiGrid, { compactKpiCardClass } from '../shared/KpiGrid';
 import FleetOwnerParticipationPanel from './FleetOwnerParticipationPanel';
+import WorkspaceSwitcher from '../shared/WorkspaceSwitcher';
 
 const money = new Intl.NumberFormat('en-GH', { style: 'currency', currency: 'GHS' });
 const today = new Date().toISOString().slice(0, 10);
@@ -159,7 +160,7 @@ export default function FleetOwnerPortal({
 }
 
 function PortalHeader({ user, onLogout }: { user: SessionUser; onLogout: () => void }) {
-  return <header className="border-b bg-slate-950 text-white"><div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 md:px-8"><div><span className="font-bold">Flux FleetOps</span><span className="ml-3 text-sm text-slate-400">Fleet Owner</span></div><div className="flex items-center gap-3"><Bell className="h-5 w-5 text-slate-300" /><UserRound className="h-5 w-5" /><span className="hidden text-sm sm:inline">{user.full_name}</span><button onClick={onLogout} className="rounded-md p-2 hover:bg-slate-800" aria-label="Log out"><LogOut className="h-5 w-5" /></button></div></div></header>;
+  return <header className="border-b bg-slate-950 text-white"><div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 md:px-8"><div><span className="font-bold">Flux FleetOps</span><span className="ml-3 text-sm text-slate-400">Fleet Owner</span></div><div className="flex items-center gap-3"><WorkspaceSwitcher user={user} /><Bell className="h-5 w-5 text-slate-300" /><UserRound className="h-5 w-5" /><span className="hidden text-sm sm:inline">{user.full_name}</span><button onClick={onLogout} className="rounded-md p-2 hover:bg-slate-800" aria-label="Log out"><LogOut className="h-5 w-5" /></button></div></div></header>;
 }
 
 function Metric({ label, value }: { label: string; value: string | number }) {

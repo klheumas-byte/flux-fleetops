@@ -3,6 +3,7 @@ import { AlertTriangle, Bell, CalendarClock, Car, FileText, Fuel, Gauge, History
 import { toast } from 'sonner';
 import type { SessionUser } from '../../lib/auth-session';
 import { ApiRequestError } from '../../lib/api';
+import WorkspaceSwitcher from '../shared/WorkspaceSwitcher';
 import {
   createPersonalRecord, createPersonalVehicle, fetchPersonalDashboard, fetchPersonalExpenseSummary,
   fetchPersonalProfile, fetchPersonalRecords, fetchPersonalTimeline, fetchPersonalVehicles,
@@ -63,7 +64,7 @@ export default function PersonalVehiclePortal({ currentUser, onLogout }: { curre
   useEffect(() => { void load(); }, [section, selectedVehicle, page]);
 
   return <div className="min-h-screen bg-slate-50 text-slate-900">
-    <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b bg-white px-4 md:pl-72"><button onClick={() => setMobileOpen(true)} className="rounded p-2 md:hidden"><Menu /></button><div><b>Flux My Vehicles</b><span className="ml-2 hidden text-sm text-slate-500 sm:inline">Personal vehicle care</span></div><div className="flex items-center gap-3"><Bell className="h-5 w-5" /><span className="hidden text-sm sm:inline">{currentUser.full_name}</span><button onClick={onLogout} title="Logout"><LogOut className="h-5 w-5" /></button></div></header>
+    <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b bg-white px-4 md:pl-72"><button onClick={() => setMobileOpen(true)} className="rounded p-2 md:hidden"><Menu /></button><div><b>Flux My Vehicles</b><span className="ml-2 hidden text-sm text-slate-500 sm:inline">Personal vehicle care</span></div><div className="flex items-center gap-3"><WorkspaceSwitcher user={currentUser} /><Bell className="h-5 w-5" /><span className="hidden text-sm sm:inline">{currentUser.full_name}</span><button onClick={onLogout} title="Logout"><LogOut className="h-5 w-5" /></button></div></header>
     <aside className={`fixed inset-y-0 left-0 z-40 w-64 bg-slate-950 p-4 text-white transition-transform md:translate-x-0 ${mobileOpen ? 'translate-x-0' : '-translate-x-full'}`}><div className="mb-6 flex items-center justify-between"><div><b className="text-lg">MY VEHICLES</b><p className="text-xs text-slate-400">Ownership & care</p></div><button onClick={() => setMobileOpen(false)} className="md:hidden"><X /></button></div><nav className="space-y-1">{sections.map(({ id, label, icon: Icon }) => <button key={id} onClick={() => navigate(id)} className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm ${section === id ? 'bg-blue-600' : 'text-slate-300 hover:bg-slate-800'}`}><Icon className="h-4 w-4" />{label}</button>)}</nav><button onClick={onLogout} className="mt-6 flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-slate-300 hover:bg-slate-800"><LogOut className="h-4 w-4" />Logout</button></aside>
     {mobileOpen && <button className="fixed inset-0 z-30 bg-black/40 md:hidden" onClick={() => setMobileOpen(false)} />}
     <main className="p-4 md:ml-64 md:p-7"><div className="mx-auto max-w-7xl space-y-5">

@@ -46,6 +46,11 @@ export type AppModule =
   | 'notifications'
   | 'security'
   | 'settings'
+  | 'users'
+  | 'roles-permissions'
+  | 'branches'
+  | 'audit-logs'
+  | 'smart-living-deliveries'
   | 'my-vehicle'
   | 'my-wallet'
   | 'my-earnings'
@@ -116,6 +121,11 @@ const NO_ACCESS: RolePermissions = {
 };
 
 export const MODULE_ACCESS_MATRIX: Record<AppModule, RoleMatrix> = {
+  users: { owner: FULL_ACCESS },
+  'roles-permissions': { owner: FULL_ACCESS },
+  branches: { owner: FULL_ACCESS },
+  'audit-logs': { owner: FULL_ACCESS },
+  'smart-living-deliveries': { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: DRIVER_ACCESS },
   dashboard: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: DRIVER_ACCESS, fleet_owner: { ...NO_ACCESS, can_view: true } },
   'fleet-tracking': { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
   vehicles: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
@@ -204,8 +214,38 @@ export function canAccessModule(
   if (!role) {
     return false;
   }
+  if (moduleId === 'dashboard') return true;
+  const requiredPermission = MODULE_REQUIRED_PERMISSION[moduleId];
+  if (requiredPermission && typeof localStorage !== 'undefined') {
+    try {
+      const stored = JSON.parse(localStorage.getItem('flux_user') || '{}') as { permissions?: string[] };
+      const required = Array.isArray(requiredPermission) ? requiredPermission : [requiredPermission];
+      if (stored.permissions?.includes('*') || required.some(permission => stored.permissions?.includes(permission))) return true;
+      if (Array.isArray(stored.permissions)) return false;
+    } catch {
+      // Fall through for legacy sessions created before server-issued permissions.
+    }
+  }
   return Boolean(MODULE_ACCESS_MATRIX[moduleId]?.[role]?.[capability]);
 }
+
+const MODULE_REQUIRED_PERMISSION: Partial<Record<AppModule, string | string[]>> = {
+  dashboard: 'operations.view', users: 'users.manage_operational',
+  'roles-permissions': 'roles.manage', branches: 'branches.manage', 'audit-logs': 'audit.view',
+  vehicles: 'vehicle.view', 'vehicle-details': 'vehicle.view', 'vehicle-movements': 'vehicle.manage',
+  drivers: 'driver.view', assignments: 'driver.assign',
+  'dispatch-planner': 'delivery.create', 'dispatch-requests': 'delivery.create',
+  'dispatch-returns': 'delivery.update', 'dispatch-opportunities': 'delivery.update',
+  'operational-requests': 'operations.view', maintenance: 'maintenance.view',
+  'stock-transfers': ['stock_transfers.view_incoming', 'stock_transfers.view_history'],
+  'preventive-maintenance': 'maintenance.view', 'fault-approvals': 'fault.view',
+  reports: 'operations.reports', notifications: 'notifications.view', settings: 'system.configure',
+  security: 'security.manage', expenses: 'expenses.manage', fuel: 'fuel.expenses',
+  'finance-accounts': 'finance.view', 'my-dispatches': 'delivery.view_own',
+  'my-operational-tasks': 'delivery.view_own', 'my-vehicle': 'vehicle.view_assigned',
+  'report-fault': 'fault.report', 'ride-history': 'trip.view_own',
+  'smart-living-deliveries': ['delivery_scheduler.view','delivery_schedule.view_assigned','loading_schedule.view','deliveries.view','deliveries.view_own','deliveries.view_assigned'],
+};
 
 export function filterAccessibleModules<T extends { id: AppModule }>(
   role: SessionUserRole | null | undefined,
@@ -223,6 +263,7 @@ const DRIVER_OPERATIONS_MODULES = new Set<AppModule>([
   'create-ride',
   'ride-history',
   'fuel-logs',
+  'smart-living-deliveries',
 ]);
 const DRIVER_TARGET_MODULES = new Set<AppModule>(['my-wallet', 'my-earnings', 'my-performance', 'calendar', 'customers']);
 const DRIVER_COMMON_MODULES = new Set<AppModule>([

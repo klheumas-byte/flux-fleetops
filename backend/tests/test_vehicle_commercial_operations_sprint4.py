@@ -124,7 +124,9 @@ class VehicleAllocationTests(unittest.TestCase):
         )
 
     def test_assign_available_vehicle_and_store_audit_configuration(self):
-        result = self.create(expected_end_at="2026-07-28T18:00:00Z")
+        # Keep this fixture in the future so the allocation validation remains
+        # deterministic regardless of the calendar date when the suite runs.
+        result = self.create(expected_end_at="2099-07-28T18:00:00Z")
         self.assertEqual(result["status"], "pending_handover")
         self.assertTrue(result["allocation_active"])
         self.assertEqual(result["assignment_reason"], "Commercial shift allocation")

@@ -1,7 +1,7 @@
 import type { FuelLevelDetails } from './fuel-gauge';
 import { apiRequest } from './api';
 
-export type DriverOperationalTaskType = 'supplier_pickup' | 'stock_transfer' | 'operational_request' | 'dispatch';
+export type DriverOperationalTaskType = 'supplier_pickup' | 'stock_transfer' | 'operational_request' | 'dispatch' | 'smart_living_delivery';
 
 export interface DriverOperationalTask {
   id: string;

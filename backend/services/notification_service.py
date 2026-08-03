@@ -525,6 +525,7 @@ def sidebar_work_queue_counts(current_user_id: str, current_role: str) -> dict:
 
     def notification_sidebar_count():
         counts = actionable_notification_counts(current_user_id)
+        unread_count = notifications_collection().count_documents({"recipient_user_id": user_id, "is_read": False})
         latest = notifications_collection().find_one(
             _actionable_query(user_id),
             {"_id": 1, "created_at": 1, "notification_type": 1, "priority": 1},
@@ -535,6 +536,7 @@ def sidebar_work_queue_counts(current_user_id: str, current_role: str) -> dict:
             "count": counts["total_actionable"],
             "priority": counts["highest_priority"],
             "critical_count": counts["critical"],
+            "unread_count": unread_count,
             "latest_actionable": {
                 "id": str(latest["_id"]),
                 "created_at": latest.get("created_at").isoformat() if latest.get("created_at") else None,

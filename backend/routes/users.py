@@ -5,14 +5,14 @@ from services.auth_service import (
     create_user_as,
     get_user_by_id,
     get_viewable_user,
-    list_users_for_role,
+    list_users_for_actor,
     update_user_role_as,
     update_user_status_as,
     update_user_account_as,
     reset_user_password_as,
 )
 from services.user_service import update_driver_profile_as
-from utils.decorators import role_required
+from utils.decorators import permission_required, role_required
 from utils.responses import success_response
 
 
@@ -20,10 +20,10 @@ users_bp = Blueprint("users", __name__)
 
 
 @users_bp.get("")
-@role_required("owner", "admin")
+@permission_required("users.manage_operational")
 def list_users():
-    current_role = get_jwt().get("role")
-    users = list_users_for_role(current_role)
+    actor = get_user_by_id(get_jwt_identity())
+    users = list_users_for_actor(actor)
     return success_response(data={"users": users})
 
 
@@ -48,7 +48,7 @@ def get_user(user_id: str):
 
 
 @users_bp.post("")
-@role_required("owner", "admin")
+@permission_required("users.manage_operational")
 def create_user():
     payload = request.get_json(silent=True) or {}
     current_role = get_jwt().get("role")
@@ -61,7 +61,7 @@ def create_user():
 
 
 @users_bp.patch("/<user_id>/status")
-@role_required("owner", "admin")
+@permission_required("users.manage_operational")
 def update_user_status(user_id: str):
     payload = request.get_json(silent=True) or {}
     current_role = get_jwt().get("role")
@@ -75,14 +75,14 @@ def update_user_status(user_id: str):
 
 
 @users_bp.patch("/<user_id>")
-@role_required("owner", "admin")
+@permission_required("users.manage_operational")
 def update_user_account(user_id: str):
     user = update_user_account_as(get_jwt_identity(), get_jwt().get("role"), user_id, request.get_json(silent=True) or {})
     return success_response(data={"user": user}, message="User account updated successfully.")
 
 
 @users_bp.post("/<user_id>/reset-password")
-@role_required("owner", "admin")
+@permission_required("users.manage_operational")
 def reset_user_password(user_id: str):
     payload = request.get_json(silent=True) or {}
     user = reset_user_password_as(get_jwt_identity(), get_jwt().get("role"), user_id, payload.get("temporary_password"))
@@ -90,7 +90,7 @@ def reset_user_password(user_id: str):
 
 
 @users_bp.patch("/<user_id>/role")
-@role_required("owner")
+@permission_required("users.manage")
 def update_user_role(user_id: str):
     payload = request.get_json(silent=True) or {}
     user = update_user_role_as(

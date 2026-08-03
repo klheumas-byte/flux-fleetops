@@ -24,6 +24,8 @@ type NotificationCounts = { critical: number; action_required: number; reminders
 type PageResponse = { data?: { notifications?: NotificationRecord[]; pagination?: { has_more: boolean; total: number }; counts?: Partial<NotificationCounts> & { unread?: number; pending_action?: number } } };
 type Props = { audience: 'admin' | 'driver'; onNavigate?: (section: string) => void };
 
+const notifyBadgeChanged = () => window.dispatchEvent(new CustomEvent('flux-notifications-changed'));
+
 const adminTargets: Record<string, string> = {
   maintenance: 'maintenance', preventive_maintenance: 'preventive-maintenance', incident: 'incidents',
   accident: 'incidents', dispatch_job: 'dispatch-planner', dispatch: 'dispatch-planner',
@@ -111,6 +113,7 @@ export default function NotificationCenter({ audience, onNavigate }: Props) {
     try {
       await apiRequest(`/notifications/${item.id}/state`, { method: 'PATCH', body: JSON.stringify({ state, snoozed_until: snoozedUntil }), headers: { 'Content-Type': 'application/json' } });
       setItems((current) => state === 'dismissed' ? current.filter(({ id }) => id !== item.id) : current.map((entry) => entry.id === item.id ? { ...entry, state, is_read: true } : entry));
+      notifyBadgeChanged();
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'Unable to update this notification.');
     } finally {
@@ -119,7 +122,11 @@ export default function NotificationCenter({ audience, onNavigate }: Props) {
   };
 
   const openAction = async (item: NotificationRecord) => {
-    if (!item.is_read) await apiRequest(`/notifications/${item.id}/read`, { method: 'PATCH' });
+    if (!item.is_read) {
+      await apiRequest(`/notifications/${item.id}/read`, { method: 'PATCH' });
+      setItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, is_read: true, state: entry.state === 'unread' ? 'viewed' : entry.state } : entry));
+      notifyBadgeChanged();
+    }
     const targetMap = audience === 'driver' ? driverTargets : adminTargets;
     const explicit = item.action_url?.replace(/^\//, '');
     const target = explicit || targetMap[item.reference_type || ''] || targetMap[item.module || item.category];
@@ -134,6 +141,7 @@ export default function NotificationCenter({ audience, onNavigate }: Props) {
     try {
       await apiRequest('/notifications/read-all', { method: 'PATCH' });
       setItems((current) => current.map((item) => ({ ...item, is_read: true, state: item.state === 'unread' ? 'viewed' : item.state })));
+      notifyBadgeChanged();
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'Unable to mark notifications as read.');
     } finally {

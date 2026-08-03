@@ -17,6 +17,7 @@ from services.system_settings_service import (
 )
 from services.vehicle_availability_service import resolve_many, resolve_vehicle_availability
 from utils.api_error import ApiError
+from services.branch_access_service import assert_branch_access, branch_query as scoped_branch_query, current_user as current_branch_user
 from utils.mongo_indexes import ensure_indexes_for_collection
 from utils.performance import build_cache_key, get_ttl_cached, set_ttl_cached
 
@@ -1288,11 +1289,15 @@ def normalize_vehicle_payload(
         "recovery_basis_type": normalize_string,
         "original_purchase_date": normalize_string,
         "ownership_type": normalize_string,
+        "operating_entity": normalize_string,
+        "maintenance_funding_entity": normalize_string,
     }
 
     for field_name, normalizer in string_fields.items():
         if field_name in payload:
             normalized_data[field_name] = normalizer(payload.get(field_name))
+    if "branch_id" in payload:
+        normalized_data["branch_id"] = payload.get("branch_id")
 
     if "year" in payload:
         year = payload.get("year")
@@ -1551,13 +1556,12 @@ def sync_vehicle_assignment(
         )
 
 
-def list_vehicles(*, current_role: str) -> list[dict]:
-    del current_role
+def list_vehicles(*, current_role: str, current_user_id: str | None = None) -> list[dict]:
     query_started_at = perf_counter()
     vehicle_documents = list(
         vehicles_collection()
         .find(
-            {"usage_type": {"$ne": "personal"}},
+            {"usage_type": {"$ne": "personal"}, **(scoped_branch_query(current_branch_user(current_user_id)) if current_user_id else {})},
             {
                 "registration_number": 1,
                 "vehicle_type": 1,
@@ -1578,6 +1582,9 @@ def list_vehicles(*, current_role: str) -> list[dict]:
                 "ownership_type": 1,
                 "fleet_owner_id": 1,
                 "status": 1,
+                "branch_id": 1,
+                "operating_entity": 1,
+                "maintenance_funding_entity": 1,
                 "assigned_driver_id": 1,
                 "created_by": 1,
                 "created_at": 1,
@@ -1606,13 +1613,18 @@ def list_vehicles(*, current_role: str) -> list[dict]:
     return serialized
 
 
-def get_vehicle_by_id(vehicle_id: str, *, current_role: str, include_economics: bool = True) -> dict:
+def get_vehicle_by_id(vehicle_id: str, *, current_role: str, current_user_id: str | None = None, include_economics: bool = True) -> dict:
     query_started_at = perf_counter()
     print(
         f"[Flux Performance] vehicle details query started vehicle_id={vehicle_id} "
         f"include_economics={include_economics}"
     )
     vehicle = get_vehicle_document_by_id_with_projection(vehicle_id, _vehicle_detail_projection())
+    if current_user_id:
+        scope_query = scoped_branch_query(current_branch_user(current_user_id))
+        allowed = (scope_query.get("branch_id") or {}).get("$in")
+        if allowed is not None and vehicle.get("branch_id") not in allowed:
+            raise ApiError("Vehicle not found.", status_code=404)
     if vehicle.get("usage_type") == "personal":
         raise ApiError("Vehicle not found.", status_code=404)
     _apply_vehicle_ownership_defaults(vehicle)
@@ -1701,6 +1713,8 @@ def create_vehicle(payload: dict, current_user_id: str, *, current_role: str) ->
 
     _restrict_admin_sensitive_payload(payload, current_role=current_role)
     normalized_data = normalize_vehicle_payload(payload, partial=False)
+    if normalized_data.get("branch_id"):
+        normalized_data["branch_id"] = assert_branch_access(current_branch_user(current_user_id), normalized_data["branch_id"], require_active=True)
     ensure_unique_vehicle_fields(normalized_data)
 
     timestamp = now_utc()
@@ -1778,6 +1792,8 @@ def update_vehicle_status(vehicle_id: str, status: str, *, current_role: str) ->
         {"_id": vehicle["_id"]},
         {"$set": {"status": status, "updated_at": timestamp}},
     )
+    if normalized_data.get("branch_id"):
+        normalized_data["branch_id"] = assert_branch_access(current_branch_user(current_user_id), normalized_data["branch_id"], require_active=True)
     if vehicle.get("status") != status:
         from services.fleet_owner_service import notify_linked_owner
         notify_linked_owner(

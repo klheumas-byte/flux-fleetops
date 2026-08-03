@@ -1328,7 +1328,7 @@ def _validate_schedule_payload(payload: dict, partial: bool = False, existing_do
 
 
 def create_preventive_schedule(payload: dict, current_user_id: str, current_role: str):
-    if current_role not in {"owner", "admin"}:
+    if current_role not in {"owner", "admin", "operations_administrator", "operations_manager"}:
         raise ApiError("You do not have permission to create preventive maintenance schedules.", status_code=403)
 
     _get_authenticated_actor_document(current_user_id, current_role)
@@ -1370,7 +1370,7 @@ def create_preventive_schedule(payload: dict, current_user_id: str, current_role
 
 
 def update_preventive_schedule(schedule_id: str, payload: dict, current_user_id: str, current_role: str):
-    if current_role not in {"owner", "admin"}:
+    if current_role not in {"owner", "admin", "operations_administrator", "operations_manager"}:
         raise ApiError("You do not have permission to update preventive maintenance schedules.", status_code=403)
 
     _get_authenticated_actor_document(current_user_id, current_role)
@@ -1401,7 +1401,7 @@ def update_preventive_schedule(schedule_id: str, payload: dict, current_user_id:
 
 
 def complete_preventive_schedule(schedule_id: str, payload: dict, current_user_id: str, current_role: str):
-    if current_role not in {"owner", "admin"}:
+    if current_role not in {"owner", "admin", "operations_administrator", "operations_manager"}:
         raise ApiError("You do not have permission to complete preventive maintenance schedules.", status_code=403)
 
     _get_authenticated_actor_document(current_user_id, current_role)
@@ -1514,7 +1514,7 @@ def complete_preventive_schedule(schedule_id: str, payload: dict, current_user_i
 
 
 def generate_maintenance_job_from_schedule(schedule_id: str, current_user_id: str, current_role: str):
-    if current_role not in {"owner", "admin"}:
+    if current_role not in {"owner", "admin", "operations_administrator", "operations_manager"}:
         raise ApiError("You do not have permission to generate maintenance jobs from schedules.", status_code=403)
 
     actor_document = _get_authenticated_actor_document(current_user_id, current_role)
@@ -1812,7 +1812,7 @@ def list_compliance_item_types(current_role: str, active_only: bool = False):
 
 
 def create_compliance_item_type(payload: dict, current_user_id: str, current_role: str):
-    if current_role not in {"owner", "admin"}:
+    if current_role not in {"owner", "admin", "operations_administrator", "operations_manager"}:
         raise ApiError("You do not have permission to manage compliance item types.", status_code=403)
     item_name = _normalize_item_name(payload.get("item_name"), "item_name")
     normalized_name = _normalized_key(item_name)
@@ -1834,7 +1834,7 @@ def create_compliance_item_type(payload: dict, current_user_id: str, current_rol
 
 
 def update_compliance_item_type(type_id: str, payload: dict, current_user_id: str, current_role: str):
-    if current_role not in {"owner", "admin"}:
+    if current_role not in {"owner", "admin", "operations_administrator", "operations_manager"}:
         raise ApiError("You do not have permission to manage compliance item types.", status_code=403)
     del current_user_id
     type_object_id = _to_object_id(type_id, "compliance_type_id")

@@ -1,11 +1,19 @@
 import { apiRequest } from './api';
 
-export interface StockTransferItem { item_id: string; name: string; quantity: number; unit: string }
+export interface StockTransferItem { item_id: string; name: string; quantity: number; unit: string; sent_quantity?: number; expected_quantity?: number; received_quantity?: number; good_quantity?: number; damaged_quantity?: number; wrong_item_quantity?: number; missing_quantity?: number; notes?: string | null }
 export interface TransferRecipient {
+  recipient_user_id?: string | null; recipient_type?: 'fleetops_user' | 'external'; branch_id?: string | null; branch_name?: string | null;
   full_name: string; role?: string | null; primary_phone: string; secondary_phone?: string | null;
   email?: string | null; delivery_instructions?: string | null;
 }
+export interface StockTransferRecipientBranch { id: string; name: string; code?: string | null }
+export interface StockTransferRecipientOption {
+  id: string; full_name: string; role: string; role_name: string; branch_id: string; branch_name: string;
+  primary_phone: string; secondary_phone?: string | null; email?: string | null;
+}
+export interface StockTransferRecipientOptions { branches: StockTransferRecipientBranch[]; receivers: StockTransferRecipientOption[] }
 export interface ActualReceiver {
+  receiver_type?: 'fleetops_user' | 'external'; user_id?: string | null; branch_id?: string | null; branch_name?: string | null;
   full_name: string; primary_contact: string; role?: string | null; initials?: string | null;
   signature?: string | null; notes?: string | null; acknowledged?: boolean;
 }
@@ -45,6 +53,10 @@ export interface StockTransfer {
   approved_by?: string | null; approved_at?: string | null;
   vehicle_id?: string | null; driver_id?: string | null; scheduled_at?: string | null;
   vehicle?: { id: string; registration_number?: string | null; make?: string | null; model?: string | null } | null;
+  driver?: { id: string; full_name?: string | null } | null;
+  destination_branch_id?: string | null; dispatch_date?: string | null; expected_arrival?: string | null; total_quantity?: number;
+  received_by_user_id?: string | null; receiver_name?: string | null; receiver_role?: string | null; receiving_branch_id?: string | null; received_at?: string | null;
+  branch_receiving_status?: 'VERIFIED' | 'RECEIVED_WITH_VARIANCE' | null; receipt_confirmation?: Record<string, unknown> | null;
   requested_date?: string | null; purpose?: string | null; notes?: string | null;
   recipient?: TransferRecipient | null;
   actual_receiver?: ActualReceiver | null;
@@ -91,6 +103,11 @@ export async function fetchStockTransfer(id: string) {
 export async function createStockTransfer(payload: Record<string, unknown>) {
   const result = await apiRequest<{ transfer: StockTransfer }>('/stock-transfers', { method: 'POST', body: JSON.stringify(payload), componentName: 'StockTransfers', requestLabel: 'create' });
   return result.data.transfer;
+}
+export async function fetchStockTransferRecipientOptions(branchId?: string) {
+  const query = branchId ? `?branch_id=${encodeURIComponent(branchId)}` : '';
+  const result = await apiRequest<StockTransferRecipientOptions>(`/stock-transfers/recipient-options${query}`, { componentName: 'StockTransfers', requestLabel: 'recipient-options', dedupeKey: `stock-transfers:recipient-options:${branchId || 'branches'}` });
+  return result.data;
 }
 export async function mutateStockTransfer(id: string, action: string, payload: Record<string, unknown> = {}) {
   const result = await apiRequest<{ transfer: StockTransfer }>(`/stock-transfers/${id}/${action}`, { method: 'PATCH', body: JSON.stringify(payload), componentName: 'StockTransfers', requestLabel: action, replacePending: true, cancelGroup: `stock-transfer:${id}:${action}` });

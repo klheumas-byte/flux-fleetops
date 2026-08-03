@@ -24,6 +24,7 @@ import {
   Settings,
   Shield,
   ShieldAlert,
+  ShieldCheck,
   TimerReset,
   Truck,
   Users,
@@ -33,11 +34,12 @@ import {
 import type { UserRole } from '../../App';
 import { filterAccessibleModules, type AppModule } from '../../lib/role-access';
 import { SIDEBAR_COUNT_KEY_BY_MODULE, type WorkQueueModuleCount } from '../../lib/notification-count';
+import MobileBottomNav from '../shared/MobileBottomNav';
 
 const LOGO_URL = 'https://imagedelivery.net/h9fmMoa1o2c2P55TcWJGOg/42b18599-8959-49b5-c7a2-b78a9602ce00/public';
 
 interface SidebarProps {
-  userRole: Extract<UserRole, 'owner' | 'admin' | 'dispatcher' | 'customer_service'>;
+  userRole: UserRole;
   activeSection?: string;
   onNavigate: (section: string) => void;
   isOpen: boolean;
@@ -76,6 +78,13 @@ const DASHBOARD_ITEM: SidebarItem = {
 
 const SECTIONS: SidebarSection[] = [
   {
+    id: 'access-control',
+    title: 'Access Control',
+    items: [
+      { id: 'users', label: 'Access Control Center', icon: ShieldCheck },
+    ],
+  },
+  {
     id: 'fleet-management',
     title: 'Fleet Management',
     items: [
@@ -94,6 +103,7 @@ const SECTIONS: SidebarSection[] = [
     items: [
       { id: 'dispatch-requests', label: 'Dispatch Requests', icon: PackageCheck },
       { id: 'dispatch-planner', label: 'Operations Planner', icon: Calendar },
+      { id: 'smart-living-deliveries', label: 'Delivery Scheduler', icon: PackageCheck },
       { id: 'operational-requests', label: 'Operational Requests', icon: ClipboardList },
       { id: 'stock-transfers', label: 'Stock Transfers', icon: PackageCheck },
       { id: 'supplier-pickup', label: 'Supplier Pickup', icon: PackageCheck },
@@ -231,8 +241,13 @@ export default function Sidebar({
   );
 
   const canViewDashboard = Boolean(filterAccessibleModules(userRole, [DASHBOARD_ITEM]).length);
+  const mobileGroups = useMemo(() => [
+    ...(canViewDashboard ? [{ id: 'overview', title: 'Overview', items: [DASHBOARD_ITEM] }] : []),
+    ...visibleSections,
+  ], [canViewDashboard, visibleSections]);
+  const mobilePrimaryItems = useMemo(() => mobileGroups.flatMap((group) => group.items).slice(0, 5), [mobileGroups]);
   const portalLabel =
-    userRole === 'owner'
+    userRole === 'system_administrator' ? 'System Administration' : userRole === 'operations_administrator' ? 'Operations Administration' : userRole === 'operations_manager' ? 'Operations Management' : userRole === 'finance_officer' ? 'Finance Portal' : userRole === 'field_agent' ? 'Field Agent Portal' : userRole === 'issuing_receiving_officer' ? 'Issuing / Receiving' : userRole === 'owner'
       ? 'Owner Portal'
       : userRole === 'admin'
       ? 'Admin Portal'
@@ -262,7 +277,7 @@ export default function Sidebar({
         ref={sidebarRef}
         onPointerEnter={onPointerEnter}
         onPointerLeave={onPointerLeave}
-        className={`fixed left-0 top-0 z-50 flex h-screen w-72 flex-col bg-[#0F172A] transition-[width,transform] duration-300 motion-reduce:transition-none lg:translate-x-0 ${isCollapsed ? 'lg:w-20' : 'lg:w-72'} ${
+        className={`fixed left-0 top-0 z-50 flex h-dvh w-72 flex-col bg-[#0F172A] transition-[width,transform] duration-300 motion-reduce:transition-none lg:translate-x-0 ${isCollapsed ? 'lg:w-20' : 'lg:w-72'} ${
           isOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
@@ -281,7 +296,7 @@ export default function Sidebar({
           </div>
         </div>
 
-        <nav className="flex-1 overflow-y-auto px-3 py-5">
+        <nav className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain px-3 py-5">
           {canViewDashboard && (
             <div className="mb-5">
               <SidebarLink
@@ -348,6 +363,13 @@ export default function Sidebar({
           {!isCollapsed && <div className="text-center text-xs text-gray-500">(c) 2026 Flux Fleet</div>}
         </div>
       </div>
+      <MobileBottomNav
+        activeSection={activeSection}
+        primaryItems={mobilePrimaryItems}
+        groups={mobileGroups}
+        onNavigate={handleNavigate}
+        onLogout={onLogout}
+      />
     </>
   );
 }

@@ -1206,13 +1206,6 @@ class StockTransferTests(Phase1B2Base):
         with self.assertRaises(ApiError) as admin:
             stock.verify_stock_transfer_delivery(created["id"], correct, current_user_id=str(self.admin_id), current_role="admin")
         self.assertEqual(admin.exception.status_code, 403)
-        with self.assertRaises(ApiError) as legacy_admin_receipt:
-            stock.receive_stock_transfer(
-                created["id"], {"received_items": [{"item_id": "OIL", "quantity": 10}]},
-                current_user_id=str(self.admin_id), current_role="admin",
-            )
-        self.assertEqual(legacy_admin_receipt.exception.status_code, 409)
-
         completed = stock.verify_stock_transfer_delivery(created["id"], correct, current_user_id=str(self.driver_id), current_role="driver")
         repeated = stock.verify_stock_transfer_delivery(created["id"], correct, current_user_id=str(self.driver_id), current_role="driver")
         self.assertEqual(completed["status"], "completed")

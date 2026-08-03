@@ -16,6 +16,7 @@ export type WorkQueueModuleCount = {
   count: number | null;
   priority: 'critical' | 'action_required' | 'reminder' | null;
   critical_count: number | null;
+  unread_count?: number | null;
   latest_actionable?: { id: string; created_at?: string | null; priority: 'critical' | 'action_required' | 'reminder' } | null;
 };
 type WorkQueueResponse = { data?: { modules?: Record<string, WorkQueueModuleCount>; total_actionable?: number; highest_priority?: ActionableNotificationCounts['highest_priority'] } };
@@ -138,5 +139,6 @@ export function useActionableNotificationCount() {
     };
   }, [refresh]);
 
-  return { actionableCount: counts.total_actionable, actionableCounts: counts, moduleCounts, isLoading, countError, refreshActionableCount: refresh };
+  const unreadCount = Math.max(0, Number(moduleCounts.notifications?.unread_count) || 0);
+  return { actionableCount: counts.total_actionable, unreadCount, actionableCounts: counts, moduleCounts, isLoading, countError, refreshActionableCount: refresh };
 }

@@ -7,6 +7,8 @@ from models.user import serialize_user
 from services.notification_service import create_notification
 from utils.api_error import ApiError
 from utils.validators import normalize_phone
+from services.rbac_service import user_has_permission, user_role_codes
+from services.driver_scope_service import driver_ids_visible_to_branch_user, operational_scope_for_driver
 
 
 ALLOWED_DRIVER_APPROVAL_STATUSES = {"pending", "approved", "rejected"}
@@ -45,13 +47,13 @@ def get_driver_user_document(user_id: str) -> dict:
         raise ApiError("User not found.", status_code=404)
 
     user = users_collection().find_one({"_id": ObjectId(user_id)})
-    if not user or user.get("role") != "driver":
+    if not user or "driver" not in user_role_codes(user):
         raise ApiError("Driver not found.", status_code=404)
     return user
 
 
 def list_driver_user_documents():
-    return users_collection().find({"role": "driver"}).sort("created_at", 1)
+    return users_collection().find({"$or": [{"role": "driver"}, {"role_ids": "driver"}]}).sort("created_at", 1)
 
 
 def validate_non_negative_number(value, field_name: str):
@@ -368,23 +370,33 @@ def update_driver_profile_as(
 
 
 def list_drivers_for_role(current_user_id: str, current_role: str) -> list[dict]:
-    if current_role in {"owner", "admin"}:
+    actor = users_collection().find_one({"_id": ObjectId(current_user_id)}) if ObjectId.is_valid(current_user_id) else None
+    roles = set(user_role_codes(actor))
+    if roles & {"owner", "admin", "system_administrator", "operations_administrator"}:
         return [serialize_user(driver) for driver in list_driver_user_documents()]
 
-    if current_role == "driver":
+    if current_role == "driver" and not roles & {"branch_manager", "branch_warehouse_coordinator"}:
         return [serialize_user(get_driver_user_document(current_user_id))]
+
+    if actor and user_has_permission(actor, "driver.view"):
+        visible_ids = driver_ids_visible_to_branch_user(actor)
+        query = {"_id": {"$in": list(visible_ids or [])}, "$or": [{"role": "driver"}, {"role_ids": "driver"}]}
+        return [serialize_user(driver) for driver in users_collection().find(query).sort("full_name", 1) if operational_scope_for_driver(driver) != "PERSONAL_ONLY"]
 
     raise ApiError("You do not have permission to access this resource.", status_code=403)
 
 
 def get_driver_for_role(current_user_id: str, current_role: str, driver_id: str) -> dict:
-    if current_role == "driver" and current_user_id != driver_id:
-        raise ApiError("You do not have permission to access this resource.", status_code=403)
-
-    if current_role not in {"owner", "admin", "driver"}:
-        raise ApiError("You do not have permission to access this resource.", status_code=403)
-
-    return serialize_user(get_driver_user_document(driver_id))
+    actor = users_collection().find_one({"_id": ObjectId(current_user_id)}) if ObjectId.is_valid(current_user_id) else None
+    roles = set(user_role_codes(actor))
+    target = get_driver_user_document(driver_id)
+    if roles & {"owner", "admin", "system_administrator", "operations_administrator"} or current_user_id == driver_id:
+        return serialize_user(target)
+    if actor and user_has_permission(actor, "driver.view"):
+        visible_ids = driver_ids_visible_to_branch_user(actor) or set()
+        if target["_id"] in visible_ids and operational_scope_for_driver(target) != "PERSONAL_ONLY":
+            return serialize_user(target)
+    raise ApiError("You do not have permission to access this resource.", status_code=403)
 
 
 def update_driver_approval_status_as(current_role: str, driver_id: str, approval_status: str) -> dict:

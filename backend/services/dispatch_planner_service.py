@@ -127,7 +127,7 @@ LIST_JOB_PROJECTION = {
     "updated_at": 1,
 }
 DETAIL_JOB_PROJECTION = None
-USER_SUMMARY_PROJECTION = {"full_name": 1, "email": 1, "phone": 1, "role": 1, "status": 1, "driver_profile": 1}
+USER_SUMMARY_PROJECTION = {"full_name": 1, "email": 1, "phone": 1, "role": 1, "role_ids": 1, "status": 1, "driver_profile": 1, "operational_scope": 1, "home_branch_id": 1, "primary_branch_id": 1}
 VEHICLE_SUMMARY_PROJECTION = {
     "registration_number": 1,
     "vehicle_type": 1,
@@ -1030,6 +1030,7 @@ def get_dispatch_job(job_id: str, *, current_role: str) -> dict:
 
 
 def list_planner_options(*, current_role: str, current_user_id: str) -> dict:
+    from services.driver_scope_service import operational_scope_for_driver
     normalized_role = _normalize_role(current_role) or current_role
     _assert_planner_role(normalized_role)
     cache_key = build_cache_key("dispatch_planner.options", role=normalized_role, user_id=current_user_id)
@@ -1045,7 +1046,7 @@ def list_planner_options(*, current_role: str, current_user_id: str) -> dict:
     )
     drivers = list(
         users_collection().find(
-            {"role": "driver", "status": "active", "driver_profile.approval_status": "approved"},
+            {"$or": [{"role": "driver"}, {"role_ids": "driver"}], "status": "active", "driver_profile.approval_status": "approved"},
             USER_SUMMARY_PROJECTION,
         ).sort("full_name", ASCENDING)
     )
@@ -1057,15 +1058,15 @@ def list_planner_options(*, current_role: str, current_user_id: str) -> dict:
     )
     assistants = list(
         users_collection().find(
-            {"role": "driver", "status": "active"},
+            {"$or": [{"role": "driver"}, {"role_ids": "driver"}], "status": "active"},
             USER_SUMMARY_PROJECTION,
         ).sort("full_name", ASCENDING)
     )
     log_db_duration("dispatch_planner.options.lookup", started_at)
     payload = {
         "vehicles": [serialize_vehicle(item) for item in vehicles],
-        "drivers": [serialize_user(item) for item in drivers],
-        "assistants": [serialize_user(item) for item in assistants],
+        "drivers": [serialize_user(item) for item in drivers if operational_scope_for_driver(item) != "PERSONAL_ONLY"],
+        "assistants": [serialize_user(item) for item in assistants if operational_scope_for_driver(item) != "PERSONAL_ONLY"],
         "dispatchers": [serialize_user(item) for item in dispatchers],
         "job_statuses": sorted(JOB_STATUSES),
         "planning_statuses": sorted(REQUEST_PLANNING_STATUSES),

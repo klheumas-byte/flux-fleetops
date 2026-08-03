@@ -89,7 +89,12 @@ function abortRequestGroup(groupKey: string) {
   activeCancelGroups.delete(groupKey);
 }
 
-function normalizeErrorMessage(status: number, data: any, fallback?: string) {
+function normalizeErrorMessage(
+  status: number,
+  data: any,
+  fallback?: string,
+  request?: { method: string; path: string },
+) {
   const rawMessage = String(data?.error || data?.message || fallback || '').trim();
   const lowerRawMessage = rawMessage.toLowerCase();
 
@@ -101,7 +106,7 @@ function normalizeErrorMessage(status: number, data: any, fallback?: string) {
       || lowerRawMessage.includes('the requested url was not found on the server')
     )
   ) {
-    return 'This feature endpoint is unavailable on the connected backend. Restart the current Flux backend and try again.';
+    return `Backend route not found (404): ${request?.method || 'GET'} ${request?.path || 'unknown route'}.`;
   }
 
   if (lowerRawMessage.includes('vehicle id not found') || lowerRawMessage.includes('vehicle not found')) {
@@ -121,10 +126,13 @@ function normalizeErrorMessage(status: number, data: any, fallback?: string) {
     return 'Your session has expired. Please log in again.';
   }
   if (status === 403) {
-    return 'Access denied.';
+    return `Access denied (403)${request ? ` for ${request.method} ${request.path}` : ''}.`;
   }
   if (status === 404) {
-    return 'We could not find what you were looking for.';
+    return `Backend route not found (404)${request ? `: ${request.method} ${request.path}` : '.'}`;
+  }
+  if (status === 405) {
+    return `Backend rejected the request method (405)${request ? `: ${request.method} ${request.path}` : '.'}`;
   }
   if (status >= 500) {
     return 'Something went wrong on our side. Please try again.';
@@ -281,6 +289,7 @@ export async function apiRequest<T>(
         response.status,
         data,
         response.statusText || 'Unable to complete the request right now.',
+        { method, path },
       );
       if (response.status === 401) {
         console.warn('[Flux API] Session expired', {
@@ -315,7 +324,7 @@ export async function apiRequest<T>(
     }
 
     if (data?.success === false) {
-      const message = normalizeErrorMessage(response.status, data);
+      const message = normalizeErrorMessage(response.status, data, undefined, { method, path });
       console.error('[Flux API] Request returned unsuccessful payload', {
         path,
         method,

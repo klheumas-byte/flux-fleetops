@@ -34,6 +34,8 @@ from services.master_data_service import ensure_master_data_indexes
 from services.notification_service import ensure_notification_indexes, reconcile_legacy_actionable_notifications
 from services.personal_vehicle_service import ensure_personal_vehicle_indexes
 from services.stock_transfer_service import ensure_stock_transfer_indexes
+from services.driver_scope_service import ensure_driver_scope_indexes
+from services.smart_living_delivery_service import ensure_indexes as ensure_smart_living_delivery_indexes
 from services.vehicle_operation_request_service import ensure_vehicle_operation_request_indexes
 from services.preventive_maintenance_service import (
     ensure_preventive_maintenance_indexes,
@@ -41,6 +43,7 @@ from services.preventive_maintenance_service import (
     seed_preventive_schedules_for_existing_vehicles,
 )
 from services.report_service import ensure_report_indexes
+from services.rbac_service import ensure_rbac_indexes
 from services.ride_service import ensure_ride_indexes
 from services.system_settings_service import ensure_system_settings_indexes
 from services.vehicle_service import ensure_vehicle_indexes
@@ -67,6 +70,17 @@ def create_app(config_name: str | None = None) -> Flask:
         "[Flux Startup] Route registration completed in %.2fms",
         (perf_counter() - route_registration_started_at) * 1000,
     )
+    if app.config.get("ENV_NAME") == "development":
+        delivery_routes = [
+            f"{','.join(sorted(rule.methods - {'HEAD', 'OPTIONS'}))} {rule.rule}"
+            for rule in app.url_map.iter_rules()
+            if rule.rule.startswith("/api/smart-living-deliveries")
+        ]
+        app.logger.info(
+            "[Delivery Route Audit] registered=%s routes=%s",
+            len(delivery_routes),
+            " | ".join(sorted(delivery_routes)),
+        )
     register_error_handlers(app)
     register_cli_commands(app)
 
@@ -110,8 +124,11 @@ def create_app(config_name: str | None = None) -> Flask:
                     ("notifications", ensure_notification_indexes),
                     ("personal_vehicles", ensure_personal_vehicle_indexes),
                     ("stock_transfers", ensure_stock_transfer_indexes),
+                    ("driver_scope", ensure_driver_scope_indexes),
+                    ("smart_living_deliveries", ensure_smart_living_delivery_indexes),
                     ("preventive_maintenance", ensure_preventive_maintenance_indexes),
                     ("reports", ensure_report_indexes),
+                    ("rbac", ensure_rbac_indexes),
                     ("rides", ensure_ride_indexes),
                     ("system_settings", ensure_system_settings_indexes),
                     ("vehicles", ensure_vehicle_indexes),

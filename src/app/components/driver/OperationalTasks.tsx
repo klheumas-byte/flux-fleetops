@@ -163,7 +163,7 @@ export default function OperationalTasks({ onNavigate }: { onNavigate?: (page: s
                 <Info label="Destination" value={task.destination || 'Not set'} />
               </dl>
               <div className="mt-5 flex flex-wrap gap-2">
-                <button type="button" onClick={() => setSelected(task)} className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white">
+                <button type="button" onClick={() => { if (task.operation_type === 'smart_living_delivery' && onNavigate) { sessionStorage.setItem('flux_smart_living_batch', task.id); onNavigate('smart-living-deliveries'); } else setSelected(task); }} className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white">
                   {task.current_action.label}
                 </button>
                 {task.linked_waybill_id && <button type="button" onClick={() => openWaybill(task)} className="inline-flex items-center gap-2 rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700">

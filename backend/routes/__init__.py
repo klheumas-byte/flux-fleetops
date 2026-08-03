@@ -18,6 +18,7 @@ from .dispatch_planner import dispatch_planner_bp
 from .dispatch_requests import dispatch_requests_bp
 from .driver_portal import driver_portal_bp
 from .drivers import drivers_bp
+from .driver_scope import driver_scope_bp
 from .expenses import expenses_bp
 from .faults import faults_bp
 from .finance_accounts import finance_accounts_bp
@@ -33,9 +34,11 @@ from .operational_requests import operational_requests_bp
 from .personal_vehicles import personal_vehicles_bp
 from .preventive_maintenance import preventive_maintenance_bp
 from .reports import reports_bp
+from .rbac import rbac_bp
 from .rides import rides_bp
 from .system_settings import system_settings_bp
 from .stock_transfers import stock_transfers_bp
+from .smart_living_deliveries import smart_living_deliveries_bp
 from .users import users_bp
 from .vehicles import vehicles_bp
 from .vehicle_movements import vehicle_movements_bp
@@ -65,6 +68,7 @@ def register_blueprints(app: Flask) -> None:
     app.register_blueprint(dispatch_requests_bp, url_prefix="/api/dispatch-requests")
     app.register_blueprint(driver_portal_bp, url_prefix="/api/driver")
     app.register_blueprint(drivers_bp, url_prefix="/api/drivers")
+    app.register_blueprint(driver_scope_bp, url_prefix="/api/driver-branch-assignments")
     app.register_blueprint(expenses_bp, url_prefix="/api/expenses")
     app.register_blueprint(faults_bp, url_prefix="/api/faults")
     app.register_blueprint(finance_accounts_bp, url_prefix="/api/finance")
@@ -80,9 +84,11 @@ def register_blueprints(app: Flask) -> None:
     app.register_blueprint(personal_vehicles_bp, url_prefix="/api/personal-vehicles")
     app.register_blueprint(preventive_maintenance_bp, url_prefix="/api/preventive-maintenance")
     app.register_blueprint(reports_bp, url_prefix="/api/reports")
+    app.register_blueprint(rbac_bp, url_prefix="/api/rbac")
     app.register_blueprint(rides_bp, url_prefix="/api/rides")
     app.register_blueprint(system_settings_bp, url_prefix="/api/system-settings")
     app.register_blueprint(stock_transfers_bp, url_prefix="/api/stock-transfers")
+    app.register_blueprint(smart_living_deliveries_bp, url_prefix="/api/smart-living-deliveries")
     app.register_blueprint(users_bp, url_prefix="/api/users")
     app.register_blueprint(vehicles_bp, url_prefix="/api/vehicles")
     app.register_blueprint(vehicle_movements_bp, url_prefix="/api/vehicle-movements")

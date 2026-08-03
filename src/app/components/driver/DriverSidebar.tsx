@@ -30,6 +30,7 @@ import {
 import type { DriverActiveAssignment } from '../../lib/driver-api';
 import { canDriverAccessModule, filterAccessibleModules, type AppModule } from '../../lib/role-access';
 import { SIDEBAR_COUNT_KEY_BY_MODULE, type WorkQueueModuleCount } from '../../lib/notification-count';
+import MobileBottomNav from '../shared/MobileBottomNav';
 
 const LOGO_URL =
   'https://imagedelivery.net/h9fmMoa1o2c2P55TcWJGOg/42b18599-8959-49b5-c7a2-b78a9602ce00/public';
@@ -82,6 +83,7 @@ const DRIVER_SECTIONS: DriverSidebarSection[] = [
       { id: 'my-dispatch-opportunities', label: 'Dispatch Opportunities', icon: Search },
       { id: 'my-dispatches', label: 'My Dispatches', icon: Route },
       { id: 'my-operational-tasks', label: 'Operational Tasks', icon: ClipboardList },
+      { id: 'smart-living-deliveries', label: 'My Deliveries', icon: PackageCheck },
       { id: 'digital-waybills', label: 'Digital Waybill', icon: PackageCheck },
       { id: 'calendar', label: 'Scheduled Bookings', icon: Calendar },
       { id: 'create-ride', label: 'Log Trip', icon: Plus },
@@ -184,6 +186,11 @@ export default function DriverSidebar({
       onToggle();
     }
   };
+  const mobileGroups = useMemo(() => [
+    { id: 'overview', title: 'Overview', items: [DRIVER_DASHBOARD_ITEM] },
+    ...visibleSections,
+  ], [visibleSections]);
+  const mobilePrimaryItems = useMemo(() => mobileGroups.flatMap((group) => group.items).slice(0, 5), [mobileGroups]);
 
   return (
     <>
@@ -195,7 +202,7 @@ export default function DriverSidebar({
         ref={sidebarRef}
         onPointerEnter={onPointerEnter}
         onPointerLeave={onPointerLeave}
-        className={`fixed left-0 top-0 z-50 flex h-screen w-72 flex-col bg-[#0F172A] transition-[width,transform] duration-300 motion-reduce:transition-none lg:translate-x-0 ${isCollapsed ? 'lg:w-20' : 'lg:w-72'} ${
+        className={`fixed left-0 top-0 z-50 flex h-dvh w-72 flex-col bg-[#0F172A] transition-[width,transform] duration-300 motion-reduce:transition-none lg:translate-x-0 ${isCollapsed ? 'lg:w-20' : 'lg:w-72'} ${
           isOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
@@ -214,7 +221,7 @@ export default function DriverSidebar({
           </div>
         </div>
 
-        <nav className="flex-1 overflow-y-auto px-3 py-5">
+        <nav className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain px-3 py-5">
           <div className="mb-5">
             <DriverSidebarLink
               item={DRIVER_DASHBOARD_ITEM}
@@ -282,7 +289,7 @@ export default function DriverSidebar({
                   {currentUser?.full_name || 'Driver'}
                 </div>
                 <div className="text-xs capitalize text-gray-400">
-                  {currentUser?.role || 'driver'}
+                  {currentUser?.role_name || currentUser?.selected_workspace || 'driver'}
                 </div>
               </div>
             </div>
@@ -309,6 +316,13 @@ export default function DriverSidebar({
           {!isCollapsed && <div className="text-center text-xs text-gray-500">(c) 2026 Flux Fleet</div>}
         </div>
       </div>
+      <MobileBottomNav
+        activeSection={activeSection}
+        primaryItems={mobilePrimaryItems}
+        groups={mobileGroups}
+        onNavigate={handleNavigate}
+        onLogout={onLogout}
+      />
     </>
   );
 }

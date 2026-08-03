@@ -4,7 +4,7 @@ from flask_jwt_extended import get_jwt, get_jwt_identity
 from services.stock_transfer_service import (
     acknowledge_stock_transfer, approve_stock_transfer, arrive_stock_transfer, cancel_stock_transfer,
     complete_stock_transfer, create_stock_transfer, get_stock_transfer,
-    list_stock_transfers, receive_stock_transfer, release_stock_transfer,
+    list_stock_transfers, list_stock_transfer_recipient_options, receive_stock_transfer, release_stock_transfer,
     review_stock_transfer_variance,
     confirm_supplier_pickup,
     record_supplier_pickup_handover,
@@ -41,6 +41,15 @@ def create_route():
     if request.headers.get("Idempotency-Key") and not payload.get("idempotency_key"):
         payload["idempotency_key"] = request.headers["Idempotency-Key"]
     return success_response(data={"transfer": create_stock_transfer(payload, current_user_id=user_id, current_role=role)}, status_code=201)
+
+
+@stock_transfers_bp.get("/recipient-options")
+@role_required("owner", "admin")
+def recipient_options_route():
+    user_id, role = _identity()
+    return success_response(data=list_stock_transfer_recipient_options(
+        branch_id=request.args.get("branch_id"), current_user_id=user_id, current_role=role,
+    ))
 
 
 @stock_transfers_bp.get("/<transfer_id>")
@@ -152,7 +161,7 @@ def investigation_action_complete_route(transfer_id, action_id):
 
 
 @stock_transfers_bp.patch("/<transfer_id>/receive")
-@role_required("owner", "admin")
+@role_required("owner", "admin", "branch_manager", "branch_warehouse_coordinator")
 def receive_route(transfer_id): return _action(transfer_id, receive_stock_transfer, payload=True)
 
 

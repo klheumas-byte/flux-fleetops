@@ -5,6 +5,7 @@ import { getStoredSessionUser } from '../../lib/auth-session';
 import { fetchOperationOptions, type OperationOptions } from '../../lib/operational-request-api';
 import {
   createStockTransfer,
+  fetchStockTransferRecipientOptions,
   fetchStockTransfer,
   fetchStockTransfers,
   type CaseClosureSummary,
@@ -13,19 +14,23 @@ import {
   type StockTransfer,
   type StockTransferItem,
   type TransferRecipient,
+  type StockTransferRecipientBranch,
+  type StockTransferRecipientOption,
 } from '../../lib/stock-transfer-api';
 import { searchWaybillProducts, type WaybillProduct } from '../../lib/waybill-api';
+import { SearchableSelect } from '../ui/searchable-select';
 
 const WORKFLOW = ['Draft', 'Submitted', 'Approved', 'Assigned', 'Driver Confirmed', 'Loaded', 'In Transit', 'Delivered', 'Received', 'Variance Review', 'Completed'];
 
 const emptyItem = (): StockTransferItem => ({ item_id: '', name: '', quantity: 1, unit: 'unit' });
 const emptyRecipient = (): TransferRecipient => ({ full_name: '', role: '', primary_phone: '', secondary_phone: '', email: '', delivery_instructions: '' });
-const emptyForm = () => ({ sending_location: '', receiving_location: '', requested_date: '', purpose: '', notes: '', recipient: emptyRecipient() });
+const emptyForm = () => ({ sending_location: '', receiving_location: '', receiving_location_id: '', requested_date: '', purpose: '', notes: '', recipient: emptyRecipient() });
 const message = (error: unknown) => error instanceof ApiRequestError || error instanceof Error
   ? error.message
   : 'Unable to update stock transfer.';
 const RECIPIENT_LOCKED_STATUSES = new Set(['released', 'in_transit', 'awaiting_receipt', 'completed', 'cancelled']);
 const canEditRecipient = (record: StockTransfer) => !record.acknowledged_at && !RECIPIENT_LOCKED_STATUSES.has(record.status);
+type ReceiptDraft = Record<string, { received: string; good: string; damaged: string; wrong: string; notes: string }>;
 
 function displayStage(record: StockTransfer) {
   if (record.operation_type === 'supplier_pickup') {
@@ -46,6 +51,9 @@ function displayStage(record: StockTransfer) {
 }
 
 export default function StockTransfers({ driverMode = false, onNavigate, taskId }: { driverMode?: boolean; onNavigate?: (page: string) => void; taskId?: string }) {
+  const sessionUser = getStoredSessionUser();
+  const activeWorkspace = String(sessionUser?.selected_workspace || sessionUser?.role || '').toLowerCase();
+  const branchReceiverMode = ['branch_manager', 'branch_warehouse_coordinator'].includes(activeWorkspace);
   const [records, setRecords] = useState<StockTransfer[]>([]);
   const [options, setOptions] = useState<OperationOptions | null>(null);
   const [loading, setLoading] = useState(true);
@@ -55,7 +63,11 @@ export default function StockTransfers({ driverMode = false, onNavigate, taskId 
   const [creating, setCreating] = useState(false);
   const [scheduling, setScheduling] = useState({ id: '', vehicle_id: '', driver_id: '', scheduled_at: '' });
   const [receiving, setReceiving] = useState<StockTransfer | null>(null);
-  const [receivedQuantities, setReceivedQuantities] = useState<Record<string, string>>({});
+  const [receiptDraft, setReceiptDraft] = useState<ReceiptDraft>({});
+  const [receiptConfirmed, setReceiptConfirmed] = useState(false);
+  const [receiverInitials, setReceiverInitials] = useState('');
+  const [receiptNotes, setReceiptNotes] = useState('');
+  const [externalReceiver, setExternalReceiver] = useState({ full_name: '', role: '', primary_contact: '' });
   const [loadingTransfer, setLoadingTransfer] = useState<StockTransfer | null>(null);
   const [loadedQuantities, setLoadedQuantities] = useState<Record<string, string>>({});
   const [handover, setHandover] = useState({ id: '', supplier_representative: '', phone: '', notes: '' });
@@ -70,7 +82,7 @@ export default function StockTransfers({ driverMode = false, onNavigate, taskId 
       if (taskId) {
         setRecords([await fetchStockTransfer(taskId)]);
       } else {
-        const [items, opts] = await Promise.all([fetchStockTransfers({ operation_type: 'stock_transfer' }), fetchOperationOptions()]);
+        const [items, opts] = await Promise.all([fetchStockTransfers({ operation_type: 'stock_transfer' }), branchReceiverMode ? Promise.resolve(null) : fetchOperationOptions()]);
         setRecords(items);
         setOptions(opts);
       }
@@ -104,6 +116,7 @@ export default function StockTransfers({ driverMode = false, onNavigate, taskId 
 
   const openLoading = async (record: StockTransfer) => {
     setBusy(record.id);
+    setError('');
     try {
       const detail = await fetchStockTransfer(record.id);
       setLoadingTransfer(detail);
@@ -121,7 +134,10 @@ export default function StockTransfers({ driverMode = false, onNavigate, taskId 
       item_id: item.item_id,
       quantity: Number(loadedQuantities[item.item_id] || 0),
     }));
-    if (await run(loadingTransfer, 'release', { loaded_quantities: quantities })) setLoadingTransfer(null);
+    if (await run(loadingTransfer, 'release', { loaded_quantities: quantities })) {
+      setLoadingTransfer(null);
+      await load();
+    }
   };
 
   const openReceipt = async (record: StockTransfer) => {
@@ -129,7 +145,13 @@ export default function StockTransfers({ driverMode = false, onNavigate, taskId 
     try {
       const detail = await fetchStockTransfer(record.id);
       setReceiving(detail);
-      setReceivedQuantities(Object.fromEntries((detail.transfer_items || []).map((item) => [item.item_id, String(item.quantity)])));
+      setReceiptDraft(Object.fromEntries((detail.transfer_items || []).map((item) => [item.item_id, { received: String(item.quantity), good: String(item.quantity), damaged: '0', wrong: '0', notes: '' }])));
+      setReceiptConfirmed(false); setReceiverInitials(''); setReceiptNotes('');
+      setExternalReceiver({
+        full_name: detail.recipient?.recipient_type === 'external' ? detail.recipient.full_name : '',
+        role: detail.recipient?.recipient_type === 'external' ? detail.recipient.role || '' : '',
+        primary_contact: detail.recipient?.recipient_type === 'external' ? detail.recipient.primary_phone : '',
+      });
     } catch (value) {
       setError(message(value));
     } finally {
@@ -139,11 +161,15 @@ export default function StockTransfers({ driverMode = false, onNavigate, taskId 
 
   const saveReceipt = async () => {
     if (!receiving) return;
-    const items = (receiving.transfer_items || []).map((item) => ({
-      ...item,
-      quantity: Number(receivedQuantities[item.item_id] || 0),
+    const items = (receiving.transfer_items || []).map((item) => ({ ...item,
+      received_quantity: Number(receiptDraft[item.item_id]?.received || 0), good_quantity: Number(receiptDraft[item.item_id]?.good || 0),
+      damaged_quantity: Number(receiptDraft[item.item_id]?.damaged || 0), wrong_item_quantity: Number(receiptDraft[item.item_id]?.wrong || 0),
+      notes: receiptDraft[item.item_id]?.notes || undefined,
     }));
-    if (await run(receiving, 'receive', { received_items: items })) setReceiving(null);
+    const externalActualReceiver = receiving.recipient?.recipient_type === 'external' && !branchReceiverMode
+      ? { receiver_type: 'external', ...externalReceiver, notes: receiptNotes || undefined }
+      : undefined;
+    if (await run(receiving, 'receive', { received_items: items, confirmed: receiptConfirmed, receiver_initials: receiverInitials || undefined, notes: receiptNotes || undefined, actual_receiver: externalActualReceiver })) setReceiving(null);
   };
 
   const openAssignedWaybill = (record: StockTransfer) => {
@@ -160,12 +186,12 @@ export default function StockTransfers({ driverMode = false, onNavigate, taskId 
     <div className="mx-auto max-w-7xl space-y-5">
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold text-slate-900">{driverMode ? 'Assigned Stock Transfers' : 'Stock Transfers'}</h1>
-          <p className="text-sm text-slate-500">Create and track items being transferred between locations.</p>
+          <h1 className="text-2xl font-semibold text-slate-900">{driverMode ? 'Assigned Stock Transfers' : branchReceiverMode ? 'Incoming Stock' : 'Stock Transfers'}</h1>
+          <p className="text-sm text-slate-500">{branchReceiverMode ? 'Receive and verify transfers addressed to your authorized branches.' : 'Create and track items being transferred between locations.'}</p>
         </div>
         <div className="flex gap-2">
           <button type="button" onClick={() => void load()} className="rounded-lg border bg-white p-2.5" aria-label="Refresh transfers"><RefreshCw className="h-4 w-4" /></button>
-          {!driverMode && <button type="button" onClick={() => setCreating(true)} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm text-white"><Plus className="h-4 w-4" />New Transfer</button>}
+          {!driverMode && !branchReceiverMode && <button type="button" onClick={() => setCreating(true)} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm text-white"><Plus className="h-4 w-4" />New Transfer</button>}
         </div>
       </header>
 
@@ -181,7 +207,7 @@ export default function StockTransfers({ driverMode = false, onNavigate, taskId 
       {error && <div className="flex gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700"><AlertCircle className="h-4 w-4 shrink-0" />{error}</div>}
       {notice && <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700">{notice}</div>}
 
-      {creating && !driverMode && <CreateTransferPanel
+      {creating && !driverMode && !branchReceiverMode && <CreateTransferPanel
         busy={busy === 'create'}
         onCancel={() => setCreating(false)}
         onError={setError}
@@ -206,10 +232,17 @@ export default function StockTransfers({ driverMode = false, onNavigate, taskId 
               <h2 className="mt-1 font-semibold text-slate-900">{record.operation_type === 'supplier_pickup' ? `${record.supplier?.supplier_name || 'Supplier'} → ${record.receiving_location}` : `${record.sending_location} → ${record.receiving_location}`}</h2>
               <p className="mt-1 text-sm text-slate-500">{record.item_count} item(s){record.requested_date ? ` · Requested ${new Date(`${record.requested_date}T00:00:00`).toLocaleDateString()}` : ''}</p>
               {record.purpose && <p className="mt-2 text-sm text-slate-700">{record.purpose}</p>}
+              {branchReceiverMode && <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-xs text-slate-600 sm:grid-cols-3">
+                <p><b>Driver:</b> {record.driver?.full_name || 'Unassigned'}</p><p><b>Vehicle:</b> {record.vehicle?.registration_number || 'Unassigned'}</p>
+                <p><b>Dispatch:</b> {record.dispatch_date ? new Date(record.dispatch_date).toLocaleString() : 'Not dispatched'}</p><p><b>Expected:</b> {record.expected_arrival ? new Date(record.expected_arrival).toLocaleString() : 'Not scheduled'}</p>
+                <p><b>Items:</b> {record.item_count}</p><p><b>Quantity:</b> {record.total_quantity ?? 0}</p>
+              </div>}
+              {branchReceiverMode && Boolean(record.transfer_items?.length) && <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700"><p className="font-medium text-slate-900">Product lines</p>{record.transfer_items?.map((item) => <p key={item.item_id} className="mt-1 flex justify-between gap-3"><span>{item.name}</span><span className="shrink-0 font-medium">{item.quantity} {item.unit}</span></p>)}</div>}
             </div>
             <span className="h-fit rounded-full bg-blue-100 px-2.5 py-1 text-xs text-blue-800">{displayStage(record)}</span>
           </div>
           <RecipientDetails recipient={record.recipient} />
+          {record.receiver_name && <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900"><p className="font-medium">Received by: {record.receiver_name} — {record.receiver_role}</p><p>{record.receiving_location}{record.received_at ? ` · ${new Date(record.received_at).toLocaleString()}` : ''}</p></div>}
           {record.actual_receiver && <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900"><p className="font-medium">Actual receiver: {record.actual_receiver.full_name}</p><p>{record.actual_receiver.primary_contact}{record.actual_receiver.role ? ` · ${record.actual_receiver.role}` : ''}</p></div>}
           {record.linked_delivery_exception_id && <div className={`mt-3 rounded-lg border p-3 text-sm ${record.delivery_exception_status === 'resolved' ? 'border-emerald-200 bg-emerald-50 text-emerald-900' : 'border-amber-200 bg-amber-50 text-amber-900'}`}><div className="flex flex-wrap justify-between gap-2"><p className="font-medium">Delivery Exception {record.delivery_exception_status === 'resolved' ? 'Resolved' : 'Open'}</p><span className="text-xs">{record.delivery_exception_summary?.exception_number}</span></div><p className="mt-1">{record.delivery_exception_summary?.affected_item_count ?? record.quantity_variance?.length ?? 0} affected item(s) · {(record.delivery_exception_summary?.exception_types || []).map((value) => value.replaceAll('_', ' ')).join(', ')}</p><p className="mt-1">{record.delivery_exception_status === 'resolved' ? 'Linked replacement completed successfully.' : 'Verification and completion are blocked.'}</p>{record.delivery_exception_summary?.investigation_status && <p className="mt-1 font-medium">Investigation: {titleCase(record.delivery_exception_summary.investigation_status)}</p>}<button type="button" onClick={() => void openException(record)} className="mt-3 rounded-lg border bg-white px-3 py-2 font-medium">{record.delivery_exception_status === 'resolved' ? 'View Investigation' : 'Next Action'}</button></div>}
           <div className="mt-4 flex flex-wrap items-end gap-2">
@@ -221,6 +254,12 @@ export default function StockTransfers({ driverMode = false, onNavigate, taskId 
               {record.operation_type === 'supplier_pickup' && record.status === 'scheduled' && record.supplier_handover && <Button busy={busy === record.id} onClick={() => void openLoading(record)}>Confirm Loaded</Button>}
               {record.status === 'released' && <Button busy={busy === record.id} onClick={() => run(record, 'start')}>Start Journey</Button>}
               {record.status === 'in_transit' && record.operation_type !== 'supplier_pickup' && <Button busy={busy === record.id} onClick={() => run(record, 'arrive')}>Arrived / Delivered</Button>}
+            </> : branchReceiverMode ? <>
+              {record.status === 'awaiting_receipt' && record.receiving_status !== 'received' && <Button busy={busy === record.id} onClick={() => void openReceipt(record)}>Receive Stock</Button>}
+              {record.workflow_stage === 'variance' && !record.variance_review && <>
+                <Input label="Variance report" value={varianceResolution[record.id] || ''} onChange={(value) => setVarianceResolution({ ...varianceResolution, [record.id]: value })} />
+                <Button busy={busy === record.id} onClick={() => run(record, 'variance', { resolution: varianceResolution[record.id] })}>Report Variance</Button>
+              </>}
             </> : <>
               {canEditRecipient(record) && <button type="button" onClick={() => setEditingRecipient(record)} className="rounded-lg border px-3 py-2 text-sm font-medium text-slate-700">Edit Recipient</button>}
               {record.status === 'draft' && <Button busy={busy === record.id} onClick={() => run(record, 'submit')}>Submit for Approval</Button>}
@@ -228,7 +267,7 @@ export default function StockTransfers({ driverMode = false, onNavigate, taskId 
               {record.status === 'approved' && <Button busy={false} onClick={() => setScheduling({ id: record.id, vehicle_id: '', driver_id: '', scheduled_at: '' })}>Assign Driver</Button>}
               {record.status === 'scheduled' && record.acknowledged_at && <Button busy={busy === record.id} onClick={() => void openLoading(record)}>Confirm Loading</Button>}
               {record.status === 'scheduled' && !record.acknowledged_at && <span className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">Awaiting Driver Acceptance</span>}
-              {record.status === 'awaiting_receipt' && record.receiving_status !== 'received' && !record.recipient && <Button busy={busy === record.id} onClick={() => void openReceipt(record)}>Confirm Legacy Receipt</Button>}
+              {record.status === 'awaiting_receipt' && record.receiving_status !== 'received' && <Button busy={busy === record.id} onClick={() => void openReceipt(record)}>Confirm Receipt</Button>}
               {record.workflow_stage === 'variance' && !record.variance_review && <>
                 <Input label="Variance resolution" value={varianceResolution[record.id] || ''} onChange={(value) => setVarianceResolution({ ...varianceResolution, [record.id]: value })} />
                 <Button busy={busy === record.id} onClick={() => run(record, 'variance', { resolution: varianceResolution[record.id] })}>Review Variance</Button>
@@ -263,20 +302,11 @@ export default function StockTransfers({ driverMode = false, onNavigate, taskId 
       quantities={loadedQuantities}
       setQuantities={setLoadedQuantities}
       busy={busy === loadingTransfer.id}
+      backendError={error}
       onCancel={() => setLoadingTransfer(null)}
       onSave={saveLoading}
     />}
-    {receiving && <QuantityModal
-      title="Confirm received quantities"
-      action="Save Receipt"
-      transfer={receiving}
-      quantities={receivedQuantities}
-      setQuantities={setReceivedQuantities}
-      busy={busy === receiving.id}
-      onCancel={() => setReceiving(null)}
-      onSave={saveReceipt}
-      icon={<PackageCheck className="h-5 w-5 text-blue-600" />}
-    />}
+    {receiving && <ReceivingModal transfer={receiving} draft={receiptDraft} setDraft={setReceiptDraft} confirmed={receiptConfirmed} setConfirmed={setReceiptConfirmed} initials={receiverInitials} setInitials={setReceiverInitials} notes={receiptNotes} setNotes={setReceiptNotes} externalReceiver={externalReceiver} setExternalReceiver={setExternalReceiver} externalMode={receiving.recipient?.recipient_type === 'external' && !branchReceiverMode} busy={busy === receiving.id} onCancel={() => setReceiving(null)} onSave={saveReceipt} />}
     {editingRecipient && <RecipientEditor
       transfer={editingRecipient}
       busy={busy === editingRecipient.id}
@@ -404,10 +434,61 @@ function CreateTransferPanel({ busy, onCancel, onCreated, onError, setBusy }: {
   const [searching, setSearching] = useState(false);
   const [products, setProducts] = useState<WaybillProduct[]>([]);
   const [validation, setValidation] = useState('');
+  const [receiverType, setReceiverType] = useState<'fleetops_user' | 'external'>('fleetops_user');
+  const [selectedRecipientId, setSelectedRecipientId] = useState('');
+  const [branches, setBranches] = useState<StockTransferRecipientBranch[]>([]);
+  const [receivers, setReceivers] = useState<StockTransferRecipientOption[]>([]);
+  const [recipientOptionsBusy, setRecipientOptionsBusy] = useState(true);
   const totals = useMemo(() => ({
     items: items.length,
     quantity: items.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0),
   }), [items]);
+
+  useEffect(() => {
+    let active = true;
+    onError('');
+    fetchStockTransferRecipientOptions().then((result) => {
+      if (active) {
+        setBranches(result.branches);
+        onError('');
+      }
+    }).catch((value) => onError(message(value))).finally(() => {
+      if (active) setRecipientOptionsBusy(false);
+    });
+    return () => { active = false; };
+  }, []);
+
+  const selectReceivingBranch = async (branchId: string) => {
+    const branch = branches.find((item) => item.id === branchId);
+    setForm((current) => ({ ...current, receiving_location_id: branchId, receiving_location: branch?.name || '', recipient: { ...emptyRecipient(), delivery_instructions: current.recipient.delivery_instructions } }));
+    setSelectedRecipientId('');
+    setReceivers([]);
+    setValidation('');
+    if (!branchId) return;
+    setRecipientOptionsBusy(true);
+    try {
+      const result = await fetchStockTransferRecipientOptions(branchId);
+      setReceivers(result.receivers);
+      onError('');
+    } catch (value) {
+      onError(message(value));
+    } finally {
+      setRecipientOptionsBusy(false);
+    }
+  };
+
+  const selectRecipient = (recipientId: string) => {
+    const recipient = receivers.find((item) => item.id === recipientId);
+    setSelectedRecipientId(recipientId);
+    if (!recipient) return;
+    setForm((current) => ({ ...current, recipient: {
+      recipient_user_id: recipient.id, recipient_type: 'fleetops_user', full_name: recipient.full_name,
+      role: recipient.role_name, primary_phone: recipient.primary_phone, secondary_phone: recipient.secondary_phone,
+      email: recipient.email, branch_id: recipient.branch_id, branch_name: recipient.branch_name,
+      delivery_instructions: current.recipient.delivery_instructions,
+    } }));
+    setValidation('');
+  };
 
   const runSearch = async () => {
     if (search.trim().length < 2) {
@@ -467,11 +548,15 @@ function CreateTransferPanel({ busy, onCancel, onCreated, onError, setBusy }: {
   const save = async (submitForApproval: boolean) => {
     const sending = form.sending_location.trim();
     const receiving = form.receiving_location.trim();
-    if (!sending || !receiving || !form.requested_date) {
+    if (!sending || !receiving || !form.receiving_location_id || !form.requested_date) {
       setValidation('Sending location, receiving location, and requested date are required.');
       return;
     }
-    if (!form.recipient.full_name.trim() || !form.recipient.primary_phone.trim()) {
+    if (receiverType === 'fleetops_user' && !selectedRecipientId) {
+      setValidation('Select an eligible FleetOps receiver for the receiving branch.');
+      return;
+    }
+    if (receiverType === 'external' && (!form.recipient.full_name.trim() || !form.recipient.primary_phone.trim())) {
       setValidation('Recipient full name and primary phone are required.');
       return;
     }
@@ -495,10 +580,13 @@ function CreateTransferPanel({ busy, onCancel, onCreated, onError, setBusy }: {
         idempotency_key: idempotencyKey.current,
         sending_location: sending,
         receiving_location: receiving,
+        receiving_location_id: form.receiving_location_id,
         requested_date: form.requested_date,
         purpose: form.purpose.trim() || undefined,
         notes: form.notes.trim() || undefined,
         recipient: {
+          recipient_user_id: receiverType === 'fleetops_user' ? selectedRecipientId : null,
+          recipient_type: receiverType,
           full_name: form.recipient.full_name.trim(),
           role: form.recipient.role?.trim() || undefined,
           primary_phone: form.recipient.primary_phone.trim(),
@@ -531,23 +619,29 @@ function CreateTransferPanel({ busy, onCancel, onCreated, onError, setBusy }: {
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <Input label="Transfer number" value="Auto-generated on save" onChange={() => undefined} disabled />
         <Input label="Sending location" value={form.sending_location} onChange={(value) => setForm({ ...form, sending_location: value })} required />
-        <Input label="Receiving location" value={form.receiving_location} onChange={(value) => setForm({ ...form, receiving_location: value })} required />
+        <div><label className="block text-sm text-slate-700">Receiving location <span className="text-red-500">*</span></label><SearchableSelect value={form.receiving_location_id} options={branches.map((branch) => ({ value: branch.id, label: branch.name, description: branch.code }))} onChange={(value) => void selectReceivingBranch(value)} placeholder={recipientOptionsBusy ? 'Loading branches...' : 'Select receiving branch'} searchPlaceholder="Search branches..." disabled={recipientOptionsBusy && !branches.length} triggerClassName="mt-1" /></div>
         <Input label="Requested date" type="date" value={form.requested_date} onChange={(value) => setForm({ ...form, requested_date: value })} required />
         <Input label="Purpose" value={form.purpose} onChange={(value) => setForm({ ...form, purpose: value })} />
         <Textarea label="Notes" value={form.notes} onChange={(value) => setForm({ ...form, notes: value })} />
       </div>
 
       <div className="rounded-xl border p-4">
-        <h3 className="font-medium text-slate-900">Recipient details</h3>
-        <p className="mt-1 text-sm text-slate-500">The assigned driver can view these planned destination contact details.</p>
-        <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <h3 className="font-medium text-slate-900">Planned recipient</h3>
+        <p className="mt-1 text-sm text-slate-500">This delivery contact remains separate from the final logged-in branch receiver.</p>
+        <div className="mt-4 flex flex-wrap gap-2" role="group" aria-label="Receiver type">
+          {([['fleetops_user', 'FleetOps User'], ['external', 'External Recipient']] as const).map(([value, label]) => <button key={value} type="button" onClick={() => { setReceiverType(value); setSelectedRecipientId(''); setForm((current) => ({ ...current, recipient: emptyRecipient() })); setValidation(''); }} className={`min-h-11 rounded-lg border px-4 py-2 text-sm font-medium ${receiverType === value ? 'border-blue-600 bg-blue-50 text-blue-700' : 'text-slate-700'}`}>{label}</button>)}
+        </div>
+        {receiverType === 'fleetops_user' ? <div className="mt-4 space-y-4">
+          <div><label className="block text-sm text-slate-700">Receiver <span className="text-red-500">*</span></label><SearchableSelect value={selectedRecipientId} options={receivers.map((recipient) => ({ value: recipient.id, label: recipient.full_name, description: `${recipient.role_name} · ${recipient.primary_phone}`, keywords: [recipient.email || '', recipient.primary_phone] }))} onChange={selectRecipient} placeholder={!form.receiving_location_id ? 'Select receiving branch first' : recipientOptionsBusy ? 'Loading eligible receivers...' : 'Search eligible receiver'} searchPlaceholder="Search name, role, phone, or email..." emptyLabel="No eligible branch receivers found." disabled={!form.receiving_location_id || recipientOptionsBusy} triggerClassName="mt-1" /></div>
+          {selectedRecipientId && <div className="grid gap-2 rounded-lg bg-slate-50 p-3 text-sm text-slate-700 sm:grid-cols-2 lg:grid-cols-3"><p><b>Name:</b> {form.recipient.full_name}</p><p><b>Role:</b> {form.recipient.role}</p><p><b>Branch:</b> {form.recipient.branch_name}</p><p><b>Phone:</b> {form.recipient.primary_phone}</p><p><b>Email:</b> {form.recipient.email || 'Not provided'}</p></div>}
+        </div> : <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <Input label="Recipient full name" value={form.recipient.full_name} onChange={(value) => setForm({ ...form, recipient: { ...form.recipient, full_name: value } })} required />
           <Input label="Role" value={form.recipient.role || ''} onChange={(value) => setForm({ ...form, recipient: { ...form.recipient, role: value } })} />
           <Input label="Primary phone" type="tel" value={form.recipient.primary_phone} onChange={(value) => setForm({ ...form, recipient: { ...form.recipient, primary_phone: value } })} required />
           <Input label="Secondary phone" type="tel" value={form.recipient.secondary_phone || ''} onChange={(value) => setForm({ ...form, recipient: { ...form.recipient, secondary_phone: value } })} />
           <Input label="Email" type="email" value={form.recipient.email || ''} onChange={(value) => setForm({ ...form, recipient: { ...form.recipient, email: value } })} />
-          <Textarea label="Delivery instructions" value={form.recipient.delivery_instructions || ''} onChange={(value) => setForm({ ...form, recipient: { ...form.recipient, delivery_instructions: value } })} />
-        </div>
+        </div>}
+        <div className="mt-4"><Textarea label="Delivery instructions" value={form.recipient.delivery_instructions || ''} onChange={(value) => setForm({ ...form, recipient: { ...form.recipient, delivery_instructions: value } })} /></div>
       </div>
 
       <div className="rounded-xl border bg-slate-50 p-4">
@@ -593,7 +687,7 @@ function CreateTransferPanel({ busy, onCancel, onCreated, onError, setBusy }: {
 function RecipientDetails({ recipient }: { recipient?: TransferRecipient | null }) {
   if (!recipient) return <div className="mt-4 rounded-lg border border-dashed p-3 text-sm text-slate-500">Recipient details were not captured for this legacy transfer.</div>;
   return <div className="mt-4 rounded-lg bg-slate-50 p-3 text-sm text-slate-700">
-    <p className="font-medium text-slate-900">Recipient: {recipient.full_name}{recipient.role ? ` · ${recipient.role}` : ''}</p>
+    <p className="font-medium text-slate-900">Planned receiver: {recipient.full_name}{recipient.role ? ` · ${recipient.role}` : ''}</p>
     <p className="mt-1">{recipient.primary_phone}{recipient.secondary_phone ? ` · ${recipient.secondary_phone}` : ''}{recipient.email ? ` · ${recipient.email}` : ''}</p>
     {recipient.delivery_instructions && <p className="mt-2 text-slate-600">Delivery instructions: {recipient.delivery_instructions}</p>}
   </div>;
@@ -638,18 +732,71 @@ function RecipientEditor({ transfer, busy, onCancel, onSave }: {
   </div></div>;
 }
 
-function QuantityModal({ title, action, transfer, quantities, setQuantities, busy, onCancel, onSave, icon }: {
+function ReceivingModal({ transfer, draft, setDraft, confirmed, setConfirmed, initials, setInitials, notes, setNotes, externalReceiver, setExternalReceiver, externalMode, busy, onCancel, onSave }: {
+  transfer: StockTransfer; draft: ReceiptDraft; setDraft: (value: ReceiptDraft) => void; confirmed: boolean;
+  setConfirmed: (value: boolean) => void; initials: string; setInitials: (value: string) => void;
+  notes: string; setNotes: (value: string) => void;
+  externalReceiver: { full_name: string; role: string; primary_contact: string };
+  setExternalReceiver: (value: { full_name: string; role: string; primary_contact: string }) => void;
+  externalMode: boolean;
+  busy: boolean; onCancel: () => void; onSave: () => void | Promise<void>;
+}) {
+  const sessionUser = getStoredSessionUser();
+  const receiverRole = sessionUser?.role_name || String(sessionUser?.selected_workspace || sessionUser?.role || '').replaceAll('_', ' ').replace(/\b\w/g, letter => letter.toUpperCase());
+  const update = (id: string, field: keyof ReceiptDraft[string], value: string) => setDraft({ ...draft, [id]: { ...draft[id], [field]: value } });
+  const receiveAll = () => setDraft(Object.fromEntries((transfer.transfer_items || []).map(item => [item.item_id, { received: String(item.quantity), good: String(item.quantity), damaged: '0', wrong: '0', notes: '' }])));
+  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-3"><div className="max-h-[94vh] w-full max-w-5xl overflow-y-auto rounded-xl bg-white p-4 sm:p-5">
+    <div className="flex flex-wrap items-start justify-between gap-3"><div><div className="flex items-center gap-2"><PackageCheck className="h-5 w-5 text-blue-600" /><h2 className="font-semibold">Confirm branch receipt</h2></div><p className="mt-1 text-sm text-slate-500">{transfer.transfer_id} · {transfer.sending_location} → {transfer.receiving_location}</p></div><button type="button" onClick={receiveAll} className="rounded-lg border border-blue-300 px-3 py-2 text-sm font-medium text-blue-700">Receive All as Sent</button></div>
+    <div className="mt-4 overflow-x-auto"><table className="w-full min-w-[820px] text-sm"><thead className="bg-slate-50 text-left text-xs uppercase text-slate-500"><tr>{['Item','Sent','Expected','Received','Good','Damaged','Wrong item','Missing','Notes'].map(label => <th key={label} className="px-2 py-2">{label}</th>)}</tr></thead><tbody>{(transfer.transfer_items || []).map(item => { const row = draft[item.item_id] || { received: '', good: '', damaged: '0', wrong: '0', notes: '' }; const missing = Math.max(Number(item.quantity) - Number(row.received || 0), 0); return <tr key={item.item_id} className="border-t"><td className="px-2 py-2 font-medium">{item.name}<span className="block text-xs font-normal text-slate-500">{item.unit}</span></td><td className="px-2 py-2">{item.quantity}</td><td className="px-2 py-2">{item.quantity}</td>{(['received','good','damaged','wrong'] as const).map(field => <td key={field} className="px-2 py-2"><input type="number" min="0" step="any" value={row[field]} onChange={event => update(item.item_id, field, event.target.value)} className="w-20 rounded border px-2 py-1.5" /></td>)}<td className={`px-2 py-2 font-medium ${missing ? 'text-amber-700' : 'text-slate-600'}`}>{missing}</td><td className="px-2 py-2"><input value={row.notes} onChange={event => update(item.item_id, 'notes', event.target.value)} className="w-36 rounded border px-2 py-1.5" /></td></tr>; })}</tbody></table></div>
+    <div className="mt-4 rounded-lg bg-slate-50 p-3">
+      <p className="text-sm font-medium text-slate-900">Actual receiver</p>
+      {externalMode ? <div className="mt-3 grid gap-3 sm:grid-cols-3"><Input label="Receiver name" value={externalReceiver.full_name} onChange={value => setExternalReceiver({ ...externalReceiver, full_name: value })} required /><Input label="Role" value={externalReceiver.role} onChange={value => setExternalReceiver({ ...externalReceiver, role: value })} /><Input label="Contact" value={externalReceiver.primary_contact} onChange={value => setExternalReceiver({ ...externalReceiver, primary_contact: value })} required /></div> : <div className="mt-2 grid gap-2 text-sm text-slate-700 sm:grid-cols-2 lg:grid-cols-4"><p><b>Name:</b> {sessionUser?.full_name || 'Current user'}</p><p><b>Role:</b> {receiverRole}</p><p><b>Contact:</b> {sessionUser?.phone || sessionUser?.email || 'Not provided'}</p><p><b>Branch:</b> {sessionUser?.branch || transfer.receiving_location}</p></div>}
+      <div className="mt-3 grid gap-3 sm:grid-cols-2"><Input label="Receiver initials (optional)" value={initials} onChange={setInitials} /><Textarea label="Receipt notes" value={notes} onChange={setNotes} /></div>
+      <label className="mt-3 flex items-center gap-2 rounded-lg border bg-white px-3 py-2.5 text-sm"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />I confirm these quantities and conditions are final.</label>
+    </div>
+    <p className="mt-3 text-xs text-slate-500">Quantity or condition differences will remain open as a delivery exception.</p>
+    <div className="mt-5 flex justify-end gap-2"><button type="button" onClick={onCancel} className="rounded-lg border px-3 py-2 text-sm">Cancel</button><button type="button" disabled={busy || !confirmed || (externalMode && (!externalReceiver.full_name.trim() || !externalReceiver.primary_contact.trim()))} onClick={() => void onSave()} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50">{busy && <Loader2 className="h-4 w-4 animate-spin" />}Confirm Receipt</button></div>
+  </div></div>;
+}
+
+function QuantityModal({ title, action, transfer, quantities, setQuantities, busy, backendError, onCancel, onSave, icon }: {
   title: string;
   action: string;
   transfer: StockTransfer;
   quantities: Record<string, string>;
   setQuantities: (value: Record<string, string>) => void;
   busy: boolean;
+  backendError?: string;
   onCancel: () => void;
   onSave: () => void | Promise<void>;
   icon?: ReactNode;
 }) {
-  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"><div className="w-full max-w-lg rounded-xl bg-white p-5"><div className="flex items-center gap-2">{icon}<h2 className="font-semibold">{title}</h2></div><div className="mt-4 space-y-3">{(transfer.transfer_items || []).map((item) => <Input key={item.item_id} label={`${item.name} (expected ${item.quantity})`} type="number" value={quantities[item.item_id] || ''} onChange={(value) => setQuantities({ ...quantities, [item.item_id]: value })} />)}</div><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={onCancel} className="rounded-lg border px-3 py-2 text-sm">Cancel</button><Button busy={busy} onClick={onSave}>{action}</Button></div></div></div>;
+  const [attempted, setAttempted] = useState(false);
+  const submitLock = useRef(false);
+  const validation = Object.fromEntries((transfer.transfer_items || []).map(item => {
+    const raw = quantities[item.item_id]; const numeric = Number(raw);
+    const error = raw === undefined || raw.trim() === '' ? 'Enter the actual loaded quantity.' : !Number.isFinite(numeric) ? 'Enter a valid number.' : numeric < 0 ? 'Quantity cannot be negative.' : '';
+    return [item.item_id, error];
+  }));
+  const hasErrors = Object.values(validation).some(Boolean);
+  const confirmAll = () => { setQuantities(Object.fromEntries((transfer.transfer_items || []).map(item => [item.item_id, String(item.quantity)]))); setAttempted(false); };
+  const submit = async () => { setAttempted(true); if (hasErrors || busy || submitLock.current) return; submitLock.current = true; try { await onSave(); } finally { submitLock.current = false; } };
+  return <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/50 p-0 sm:items-center sm:p-4">
+    <div role="dialog" aria-modal="true" aria-labelledby="confirm-loading-title" className="flex h-[100dvh] max-h-[100dvh] w-full flex-col overflow-hidden bg-white shadow-xl sm:h-auto sm:max-h-[85vh] sm:max-w-lg sm:rounded-xl">
+      <header className="sticky top-0 z-10 flex shrink-0 items-start justify-between gap-3 border-b bg-white px-4 py-4 sm:px-5">
+        <div><div className="flex items-center gap-2">{icon}<h2 id="confirm-loading-title" className="font-semibold">{title}</h2></div><p className="mt-1 text-xs text-slate-500">{transfer.transfer_id} · {transfer.transfer_items?.length || 0} item(s)</p></div>
+        <button type="button" disabled={busy} onClick={confirmAll} className="min-h-11 rounded-lg border border-blue-300 px-3 py-2 text-sm font-medium text-blue-700 disabled:opacity-50">Confirm All as Expected</button>
+      </header>
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3 sm:px-5">
+        <div className="space-y-2">{(transfer.transfer_items || []).map(item => { const itemError = validation[item.item_id]; return <label key={item.item_id} className="block rounded-lg border border-slate-200 p-3"><span className="block text-sm font-medium text-slate-900">{item.name}</span><span className="mt-0.5 block text-xs text-slate-500">Expected: {item.quantity} {item.unit}</span><span className="mt-2 block text-xs font-medium text-slate-700">Actual Loaded</span><input type="number" min="0" step="any" inputMode="decimal" value={quantities[item.item_id] ?? ''} disabled={busy} onChange={event => setQuantities({ ...quantities, [item.item_id]: event.target.value })} aria-invalid={attempted && Boolean(itemError)} aria-describedby={attempted && itemError ? `loading-error-${item.item_id}` : undefined} className={`mt-1 min-h-11 w-full rounded-lg border px-3 py-2 text-base outline-none focus:ring-2 focus:ring-blue-100 ${attempted && itemError ? 'border-red-400' : 'border-slate-300'}`} />{attempted && itemError && <span id={`loading-error-${item.item_id}`} className="mt-1 block text-xs text-red-600">{itemError}</span>}</label>; })}</div>
+      </div>
+      {backendError && <div role="alert" className="shrink-0 border-t border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700 sm:px-5">{backendError}</div>}
+      <footer className="sticky bottom-0 z-10 grid shrink-0 grid-cols-2 gap-3 border-t bg-white px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:flex sm:justify-end sm:px-5">
+        <button type="button" disabled={busy} onClick={onCancel} className="min-h-12 rounded-lg border px-4 py-3 text-sm font-medium text-slate-700 disabled:opacity-50 sm:min-w-28">Cancel</button>
+        <button type="button" disabled={busy} onClick={() => void submit()} className="inline-flex min-h-12 items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-3 text-sm font-medium text-white disabled:opacity-60 sm:min-w-40">{busy && <Loader2 className="h-4 w-4 animate-spin" />}{action}</button>
+      </footer>
+    </div>
+  </div>;
 }
 
 function Button({ children, onClick, busy }: { children: ReactNode; onClick: () => void | Promise<void>; busy: boolean }) {

@@ -22,6 +22,9 @@ from services.vehicle_service import (
 from services.preventive_maintenance_service import generate_default_preventive_schedules_for_vehicle
 from utils.decorators import role_required
 from utils.responses import success_response
+from extensions import get_collection
+from services.rbac_service import user_has_permission
+from bson import ObjectId
 
 
 vehicles_bp = Blueprint("vehicles", __name__)
@@ -58,7 +61,7 @@ def create_fleet_owner_route():
 @role_required("owner", "admin")
 def get_vehicles():
     started_at = perf_counter()
-    vehicles = list_vehicles(current_role=get_jwt().get("role"))
+    vehicles = list_vehicles(current_role=get_jwt().get("role"), current_user_id=get_jwt_identity())
     current_app.logger.info(
         "[Flux Performance] GET /api/vehicles returned %s records in %.2fms",
         len(vehicles),
@@ -71,7 +74,9 @@ def get_vehicles():
 @role_required("owner", "admin")
 def get_vehicle(vehicle_id: str):
     started_at = perf_counter()
-    include_economics = request.args.get("include_economics", "false").strip().lower() in {"1", "true", "yes"}
+    actor_id = get_jwt_identity()
+    actor = get_collection("users").find_one({"_id": ObjectId(str(actor_id))}) if ObjectId.is_valid(str(actor_id)) else None
+    include_economics = request.args.get("include_economics", "false").strip().lower() in {"1", "true", "yes"} and user_has_permission(actor, "finance.view")
     current_app.logger.info(
         "[Flux Performance] vehicle details request received vehicle_id=%s include_economics=%s",
         vehicle_id,
@@ -80,6 +85,7 @@ def get_vehicle(vehicle_id: str):
     vehicle = get_vehicle_by_id(
         vehicle_id,
         current_role=get_jwt().get("role"),
+        current_user_id=actor_id,
         include_economics=include_economics,
     )
     current_app.logger.info(

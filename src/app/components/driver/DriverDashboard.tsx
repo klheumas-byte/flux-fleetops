@@ -837,41 +837,41 @@ export default function DriverDashboard({
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-6 md:grid-cols-4">
-        <div className="rounded-lg border border-gray-200 bg-white p-6">
-          <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-lg bg-blue-100">
+      <div className="grid grid-cols-2 gap-3 min-[480px]:grid-cols-3 md:grid-cols-4 md:gap-4">
+        <div className="min-w-0 rounded-lg border border-gray-200 bg-white p-3 sm:p-4">
+          <div className="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-blue-100 sm:h-10 sm:w-10">
             <Target className="h-6 w-6 text-blue-600" />
           </div>
-          <div className="mb-2 text-3xl font-semibold text-gray-900">{formatCurrency(stats.weeklyTarget)}</div>
-          <div className="text-sm text-gray-600">Weekly Target</div>
-          <div className="mt-2 text-xs text-gray-500">From your active assignment</div>
+          <div className="mb-1 truncate text-lg font-semibold text-gray-900 sm:text-2xl">{formatCurrency(stats.weeklyTarget)}</div>
+          <div className="text-xs text-gray-600 sm:text-sm">Weekly Target</div>
+          <div className="mt-1 hidden text-xs text-gray-500 sm:block">From your active assignment</div>
         </div>
 
-        <div className="rounded-lg border border-gray-200 bg-white p-6">
-          <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-lg bg-green-100">
+        <div className="min-w-0 rounded-lg border border-gray-200 bg-white p-3 sm:p-4">
+          <div className="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-green-100 sm:h-10 sm:w-10">
             <Wallet className="h-6 w-6 text-green-600" />
           </div>
-          <div className="mb-2 text-3xl font-semibold text-green-600">{formatCurrency(stats.amountPaid)}</div>
-          <div className="text-sm text-gray-600">Approved Total</div>
-          <div className="mt-2 text-xs text-gray-500">{dashboardSummary?.total_collections_this_week || 0} collections this week</div>
+          <div className="mb-1 truncate text-lg font-semibold text-green-600 sm:text-2xl">{formatCurrency(stats.amountPaid)}</div>
+          <div className="text-xs text-gray-600 sm:text-sm">Approved Total</div>
+          <div className="mt-1 hidden text-xs text-gray-500 sm:block">{dashboardSummary?.total_collections_this_week || 0} collections this week</div>
         </div>
 
-        <div className="rounded-lg border border-gray-200 bg-white p-6">
-          <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-lg bg-red-100">
+        <div className="min-w-0 rounded-lg border border-gray-200 bg-white p-3 sm:p-4">
+          <div className="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-red-100 sm:h-10 sm:w-10">
             <AlertCircle className="h-6 w-6 text-red-600" />
           </div>
-          <div className="mb-2 text-3xl font-semibold text-red-600">{formatCurrency(stats.outstandingBalance)}</div>
-          <div className="text-sm text-gray-600">Outstanding Balance</div>
-          <div className="mt-2 text-xs text-gray-500">Weekly target minus payments this week</div>
+          <div className="mb-1 truncate text-lg font-semibold text-red-600 sm:text-2xl">{formatCurrency(stats.outstandingBalance)}</div>
+          <div className="text-xs text-gray-600 sm:text-sm">Outstanding</div>
+          <div className="mt-1 hidden text-xs text-gray-500 sm:block">Weekly target minus payments</div>
         </div>
 
-        <div className="rounded-lg border border-gray-200 bg-white p-6">
-          <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-lg bg-purple-100">
+        <div className="min-w-0 rounded-lg border border-gray-200 bg-white p-3 sm:p-4">
+          <div className="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-purple-100 sm:h-10 sm:w-10">
             <CarFront className="h-6 w-6 text-purple-600" />
           </div>
-          <div className="mb-2 text-3xl font-semibold text-gray-900">{formatCurrency(stats.todaysCollections)}</div>
-          <div className="text-sm text-gray-600">Today&apos;s Collections</div>
-          <div className="mt-2 text-xs text-gray-500">0 when nothing has been recorded today</div>
+          <div className="mb-1 truncate text-lg font-semibold text-gray-900 sm:text-2xl">{formatCurrency(stats.todaysCollections)}</div>
+          <div className="text-xs text-gray-600 sm:text-sm">Today</div>
+          <div className="mt-1 hidden text-xs text-gray-500 sm:block">Collections recorded today</div>
         </div>
       </div>
 
@@ -1084,7 +1084,7 @@ export default function DriverDashboard({
           {quickActionGroups.map((group) => (
             <div key={group.title}>
               <div className="mb-3 text-sm font-semibold uppercase tracking-[0.16em] text-gray-500">{group.title}</div>
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+              <div className="grid grid-cols-2 gap-3 xl:grid-cols-4 xl:gap-4">
                 {group.actions.map((action) => {
                   const Icon = action.icon;
                   return (
@@ -1094,7 +1094,7 @@ export default function DriverDashboard({
                       title={action.description}
                       onClick={action.onClick}
                       disabled={action.disabled}
-                      className="flex min-h-[144px] flex-col items-start gap-3 rounded-xl border border-gray-200 bg-gray-50 p-5 text-left transition-colors hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
+                      className="flex min-h-[144px] min-w-0 flex-col items-start gap-3 rounded-xl border border-gray-200 bg-gray-50 p-3 text-left transition-colors hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60 sm:p-5"
                     >
                       <div className={`flex h-11 w-11 items-center justify-center rounded-xl ${action.color}`}>
                         <Icon className="h-5 w-5 text-white" />

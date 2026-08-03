@@ -6,6 +6,7 @@ from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
 from utils.responses import error_response
 from extensions import get_collection
 from bson import ObjectId
+from services.rbac_service import user_has_permission, user_role_codes, write_audit
 
 
 PASSWORD_CHANGE_EXEMPT_PATHS = {
@@ -83,7 +84,12 @@ def role_required(*allowed_roles: str):
             def protected():
                 current_role = _normalize_role(get_jwt().get("role"))
                 current_user_id = get_jwt_identity()
-                if current_role not in normalized_allowed_roles:
+                permission = permission_for_request(request.path, request.method)
+                current_user = None
+                if current_app.config.get("MONGO_URI") and ObjectId.is_valid(str(current_user_id)):
+                    current_user = get_collection("users").find_one({"_id": ObjectId(str(current_user_id))})
+                role_allowed = current_role in normalized_allowed_roles or bool(set(user_role_codes(current_user)) & set(normalized_allowed_roles))
+                if not role_allowed and not (permission and user_has_permission(current_user, permission)):
                     current_app.logger.warning(
                         "[Flux Auth] authorized endpoint=%s method=%s user_id=%s role=%s decision=reject reason=role_not_allowed allowed_roles=%s",
                         request.path,
@@ -92,6 +98,10 @@ def role_required(*allowed_roles: str):
                         current_role or "unknown",
                         ",".join(normalized_allowed_roles),
                     )
+                    try:
+                        write_audit("failed_access", current_user_id, "route", request.path, {"method": request.method, "required_roles": list(normalized_allowed_roles)})
+                    except Exception:
+                        pass
                     return error_response(
                         "You do not have permission to access this resource.",
                         status_code=403,
@@ -114,6 +124,78 @@ def role_required(*allowed_roles: str):
         return wrapper
 
     return decorator
+
+
+def permission_required(permission: str):
+    """Authorize against the current database policy, never JWT permission snapshots."""
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            if request.method == "OPTIONS":
+                return "", 200
+
+            @jwt_required()
+            def protected():
+                denial = _current_account_denial()
+                if denial is not None:
+                    return denial
+                current_user_id = get_jwt_identity()
+                if not ObjectId.is_valid(str(current_user_id)):
+                    return error_response("Invalid user identity.", status_code=401)
+                user = get_collection("users").find_one({"_id": ObjectId(str(current_user_id))})
+                if not user_has_permission(user, permission):
+                    current_app.logger.warning(
+                        "[Flux RBAC] endpoint=%s method=%s user_id=%s permission=%s decision=reject",
+                        request.path, request.method, current_user_id, permission,
+                    )
+                    try:
+                        write_audit("failed_access", current_user_id, "route", request.path, {"method": request.method, "required_permission": permission})
+                    except Exception:
+                        pass
+                    return error_response("You do not have permission to access this resource.", status_code=403)
+                return fn(*args, **kwargs)
+            return protected()
+        return wrapper
+    return decorator
+
+
+def permission_for_request(path: str, method: str) -> str | None:
+    """Compatibility bridge for existing endpoints while routes migrate to explicit permissions."""
+    normalized = path.rstrip("/")
+    method = method.upper()
+    if normalized.startswith("/api/stock-transfers"):
+        if method == "GET":
+            return "stock_transfers.view_incoming"
+        if method == "PATCH" and normalized.endswith("/receive"):
+            return "stock_transfers.receive"
+        if method == "PATCH" and normalized.endswith("/variance"):
+            return "stock_transfers.report_variance"
+        return None
+    if normalized.startswith("/api/users"):
+        return "users.manage" if method != "GET" else "users.manage_operational"
+    if normalized.startswith("/api/drivers") or normalized.startswith("/api/driver-branch-assignments"):
+        return "driver.view" if method == "GET" else "driver.assign"
+    if normalized.startswith("/api/system-settings"):
+        return "system.configure"
+    if normalized.startswith("/api/finance") or normalized.startswith("/api/company-funds"):
+        return "finance.view"
+    if normalized.startswith("/api/expenses"):
+        return "expenses.manage"
+    if normalized.startswith("/api/maintenance") or normalized.startswith("/api/preventive-maintenance"):
+        return "maintenance.manage" if method != "GET" else "maintenance.view"
+    if normalized.startswith("/api/faults"):
+        return "fault.report" if method == "POST" else "fault.view"
+    if normalized.startswith("/api/vehicles") or normalized.startswith("/api/vehicle-movements"):
+        return "vehicle.manage" if method != "GET" else "vehicle.view"
+    if normalized.startswith("/api/assignments"):
+        return "driver.assign" if method != "GET" else "driver.view"
+    if normalized.startswith(("/api/dispatch", "/api/rides", "/api/operational-requests")):
+        return "delivery.update" if method != "GET" else "operations.view"
+    if normalized.startswith("/api/reports") or normalized.startswith("/api/analytics"):
+        return "operations.reports"
+    if normalized.startswith("/api/notifications"):
+        return "notifications.view"
+    return None
 
 
 def driver_mode_required(capability: str):

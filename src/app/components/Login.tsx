@@ -88,7 +88,7 @@ export default function Login({ onLogin }: LoginProps) {
             {/* Email or Phone */}
             <div>
               <label htmlFor="emailOrPhone" className="block text-sm font-medium text-gray-700 mb-2">
-                Email or Phone Number
+                Username, Email or Phone Number
               </label>
               <div className="relative">
                 <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
@@ -100,7 +100,7 @@ export default function Login({ onLogin }: LoginProps) {
                   value={emailOrPhone}
                   onChange={(e) => setEmailOrPhone(e.target.value)}
                   className="block w-full pl-10 pr-3 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#2563EB] focus:border-transparent transition-all bg-white"
-                  placeholder="Enter your email or phone number"
+                  placeholder="Enter your username, email or phone"
                   required
                 />
               </div>
@@ -174,7 +174,7 @@ export default function Login({ onLogin }: LoginProps) {
           <div className="mt-4 rounded-xl bg-[#EFF6FF] border border-[#BFDBFE] px-4 py-3">
             <p className="text-sm font-medium text-[#1D4ED8]">Single login flow</p>
             <p className="text-xs text-[#475569] mt-1">
-              The system now detects whether the account is an owner, admin, or driver and opens the right dashboard automatically.
+              FleetOps detects your role and opens the permitted dashboard, navigation, and data automatically.
             </p>
           </div>
 

@@ -31,7 +31,7 @@ export default function DriverLayout({
   onBack,
 }: DriverLayoutProps) {
   const sidebar = useResponsiveSidebar();
-  const { actionableCount, actionableCounts, moduleCounts } = useActionableNotificationCount();
+  const { actionableCount, unreadCount, actionableCounts, moduleCounts } = useActionableNotificationCount();
   const handleNavigate = (section: string) => {
     onNavigate(section);
     if (typeof window !== 'undefined' && window.innerWidth < 1024) {
@@ -40,7 +40,7 @@ export default function DriverLayout({
   };
 
   return (
-    <div className="flex min-h-screen overflow-x-hidden bg-[#F8FAFC]">
+    <div className="flex h-dvh overflow-hidden bg-[#F8FAFC]">
       <DriverSidebar
         currentUser={currentUser}
         activeAssignment={activeAssignment}
@@ -58,7 +58,7 @@ export default function DriverLayout({
         onPointerEnter={sidebar.pointerEnter}
         onPointerLeave={sidebar.pointerLeave}
       />
-      <div className={`flex min-w-0 flex-1 flex-col overflow-x-hidden transition-all duration-300 ${
+      <div className={`flex h-dvh min-w-0 flex-1 flex-col overflow-hidden transition-all duration-300 ${
         sidebar.pinned ? 'lg:ml-72' : 'lg:ml-20'
       }`}>
         <DriverTopNav
@@ -66,9 +66,10 @@ export default function DriverLayout({
           activeAssignment={activeAssignment}
           onMenuToggle={sidebar.toggle}
           onNavigate={handleNavigate}
-          actionableCount={actionableCount}
+          activeSection={activeSection}
+          unreadCount={unreadCount}
         />
-        <main className="flex-1 overflow-x-hidden overflow-y-auto">
+        <main className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain pb-[calc(4rem+env(safe-area-inset-bottom))] lg:pb-0">
           {showBackButton && onBack ? <PortalBackButton label={backLabel} onClick={onBack} /> : null}
           {children}
         </main>

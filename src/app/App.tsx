@@ -6,6 +6,7 @@ import { ApiRequestError, resetAuthExpirySignal } from './lib/api';
 import {
   clearStoredSession,
   fetchAuthenticatedUser,
+  getWorkspaceLandingPage,
   getStoredSessionUser,
   setStoredSessionUser,
   type SessionUser,
@@ -82,15 +83,16 @@ const VehicleDetails = lazy(() => import('./components/admin/VehicleDetails'));
 const FleetOwners = lazy(() => import('./components/admin/FleetOwners'));
 const FleetOwnerPortal = lazy(() => import('./components/fleet-owner/FleetOwnerPortal'));
 const PersonalVehiclePortal = lazy(() => import('./components/personal/PersonalVehiclePortal'));
+const RbacConsole = lazy(() => import('./components/admin/RbacConsole'));
+const RoleDashboard = lazy(() => import('./components/admin/RoleDashboard'));
+const SmartLivingDeliveries = lazy(() => import('./components/shared/SmartLivingDeliveries'));
+const BranchManagement = lazy(() => import('./components/admin/BranchManagement'));
 
 export type UserRole = SessionUserRole;
 export type AuthUser = SessionUser;
 
 function getDefaultPageForRole(role: UserRole | null | undefined) {
-  if (role === 'dispatcher' || role === 'customer_service') {
-    return 'dispatch-requests';
-  }
-  return 'dashboard';
+  return getWorkspaceLandingPage(role);
 }
 
 export default function App() {
@@ -104,7 +106,7 @@ export default function App() {
   const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
 
-  const loadingFallback = <div className="p-6 text-sm text-gray-500">Loading page...</div>;
+  const loadingFallback = <><div className="fixed inset-x-0 top-0 z-[100] h-1 overflow-hidden bg-blue-100"><div className="h-full w-1/2 animate-pulse bg-blue-600" /></div><div className="p-6 text-sm text-gray-500">Loading page...</div></>;
 
   const navigateToPage = (page: string, options?: { vehicleId?: string | null; replaceHistory?: boolean }) => {
     const nextVehicleId = options?.vehicleId ?? (page === 'vehicle-details' ? selectedVehicleId : null);
@@ -176,11 +178,12 @@ export default function App() {
           return;
         }
 
+        const activeWorkspace = (verifiedUser.selected_workspace || verifiedUser.role) as UserRole;
         setCurrentUser(verifiedUser);
-        setUserRole(verifiedUser.role);
+        setUserRole(activeWorkspace);
         setIsLoggedIn(true);
         resetAuthExpirySignal();
-        navigateToPage(getDefaultPageForRole(verifiedUser.role), { replaceHistory: true, vehicleId: null });
+        navigateToPage(getWorkspaceLandingPage(activeWorkspace, verifiedUser.dashboard), { replaceHistory: true, vehicleId: null });
       } catch (error) {
         if (error instanceof ApiRequestError && error.status === 401) {
           clearAuthState();
@@ -193,6 +196,18 @@ export default function App() {
     };
 
     void verifySession();
+  }, []);
+
+  useEffect(() => {
+    const handleWorkspaceChange = (event: Event) => {
+      const detail = (event as CustomEvent<{ role?: string; user?: AuthUser; dashboard?: string }>).detail;
+      if (!detail?.role || !detail.user) return;
+      setCurrentUser(detail.user);
+      setUserRole(detail.role as UserRole);
+      navigateToPage(detail.dashboard || getDefaultPageForRole(detail.role as UserRole), { replaceHistory: true, vehicleId: null });
+    };
+    window.addEventListener('flux-workspace-changed', handleWorkspaceChange);
+    return () => window.removeEventListener('flux-workspace-changed', handleWorkspaceChange);
   }, []);
 
   useEffect(() => {
@@ -225,11 +240,11 @@ export default function App() {
   const handleLogin = (user: AuthUser) => {
     setStoredSessionUser(user);
     resetAuthExpirySignal();
-    const normalizedRole = String(user.role || '').trim().toLowerCase() as UserRole;
-    setCurrentUser({ ...user, role: normalizedRole });
+    const normalizedRole = String(user.selected_workspace || user.role || '').trim().toLowerCase() as UserRole;
+    setCurrentUser(user);
     setUserRole(normalizedRole);
     setIsLoggedIn(true);
-    navigateToPage(getDefaultPageForRole(normalizedRole), { replaceHistory: true, vehicleId: null });
+    navigateToPage(getWorkspaceLandingPage(normalizedRole, user.dashboard), { replaceHistory: true, vehicleId: null });
   };
 
   const handleOpenVehicleDetails = (vehicleId: string) => {
@@ -354,7 +369,7 @@ export default function App() {
         return 'Back to Drivers';
       case 'customers':
       case 'calendar':
-        return currentUser?.role === 'driver' ? 'Back to Driver Dashboard' : 'Back to Customers';
+        return userRole === 'driver' ? 'Back to Driver Dashboard' : 'Back to Customers';
       case 'incidents':
         return 'Back to Incidents';
       case 'maintenance':
@@ -400,7 +415,20 @@ export default function App() {
   };
 
   if (!isAuthReady) {
-    return null;
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-slate-50 p-6" aria-live="polite">
+        <section className="text-center">
+          <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-600 text-2xl font-bold text-white shadow-lg shadow-blue-200">
+            F
+          </div>
+          <h1 className="text-lg font-semibold text-slate-900">Flux FleetOps</h1>
+          <p className="mt-2 text-sm text-slate-500">Checking your session...</p>
+          <div className="mx-auto mt-5 h-1.5 w-40 overflow-hidden rounded-full bg-slate-200">
+            <div className="h-full w-1/2 animate-pulse rounded-full bg-blue-600" />
+          </div>
+        </section>
+      </main>
+    );
   }
 
   if (!isLoggedIn) {
@@ -411,17 +439,18 @@ export default function App() {
     return <ChangePassword onLogout={handleLogout} onChanged={(user) => {
       setStoredSessionUser(user);
       setCurrentUser(user);
-      setUserRole(String(user.role).trim().toLowerCase() as UserRole);
+      setUserRole(String(user.selected_workspace || user.role).trim().toLowerCase() as UserRole);
     }} />;
   }
 
-  if (userRole === 'owner' || userRole === 'admin' || userRole === 'dispatcher' || userRole === 'customer_service') {
+  if (userRole !== 'driver' && userRole !== 'fleet_owner' && userRole !== 'personal_vehicle_owner') {
     return (
       <>
         <Toaster position="bottom-right" richColors closeButton />
         <NotificationSoundController />
         <AdminLayout
           userRole={userRole}
+          currentUser={currentUser}
           activeSection={currentPage}
           onNavigate={navigateToPage}
           onLogout={handleLogout}
@@ -431,6 +460,12 @@ export default function App() {
         >
           <Suspense fallback={loadingFallback}>
           {currentPage === 'dashboard' && (userRole === 'owner' || userRole === 'admin') && renderProtectedPage('dashboard', <Dashboard onNavigate={navigateToPage} userRole={userRole} />)}
+          {currentPage === 'dashboard' && !['owner','admin','dispatcher','customer_service'].includes(userRole) && currentUser && renderProtectedPage('dashboard', <RoleDashboard user={currentUser} onNavigate={navigateToPage} />)}
+          {currentPage === 'users' && renderProtectedPage('users', <RbacConsole view="users" />)}
+          {currentPage === 'roles-permissions' && renderProtectedPage('roles-permissions', <RbacConsole view="roles-permissions" />)}
+          {currentPage === 'branches' && renderProtectedPage('branches', <BranchManagement />)}
+          {currentPage === 'audit-logs' && renderProtectedPage('audit-logs', <RbacConsole view="audit-logs" />)}
+          {currentPage === 'smart-living-deliveries' && renderProtectedPage('smart-living-deliveries', <SmartLivingDeliveries />)}
           {currentPage === 'fleet-tracking' && renderProtectedPage('fleet-tracking', <FleetTracking />)}
           {currentPage === 'vehicles' && renderProtectedPage('vehicles', <Vehicles onOpenVehicleDetails={handleOpenVehicleDetails} />)}
           {currentPage === 'fleet-owners' && renderProtectedPage('fleet-owners', <FleetOwners />)}
@@ -519,6 +554,7 @@ export default function App() {
             {currentPage === 'my-dispatch-opportunities' && renderProtectedPage('my-dispatch-opportunities', <DispatchOpportunities />)}
             {currentPage === 'my-dispatches' && renderProtectedPage('my-dispatches', <MyDispatches />)}
             {currentPage === 'my-operational-tasks' && renderProtectedPage('my-operational-tasks', <OperationalTasks onNavigate={navigateToPage} />)}
+            {currentPage === 'smart-living-deliveries' && renderProtectedPage('smart-living-deliveries', <SmartLivingDeliveries />)}
             {currentPage === 'digital-waybills' && renderProtectedPage('digital-waybills', <DigitalWaybills driverMode />)}
             {currentPage === 'create-ride' && renderProtectedPage('create-ride', <CreateRide />)}
             {currentPage === 'ride-history' && renderProtectedPage('ride-history', <RideHistory />)}

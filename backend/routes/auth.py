@@ -11,6 +11,7 @@ from services.auth_service import (
     revoke_token,
     change_own_password,
 )
+from services.rbac_service import write_audit
 from utils.decorators import login_required
 from utils.api_error import ApiError
 from utils.responses import error_response, success_response
@@ -102,4 +103,8 @@ def change_password():
 def logout():
     token_payload = get_jwt()
     revoke_token(token_payload["jti"], token_payload["exp"])
+    try:
+        write_audit("logout", get_jwt_identity(), "user", get_jwt_identity())
+    except Exception:
+        current_app.logger.exception("[Flux Audit] Logout audit write failed.")
     return success_response(message="Logout successful.")

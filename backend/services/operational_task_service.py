@@ -10,6 +10,7 @@ from utils.api_error import ApiError
 
 TRANSFER_ACTIVE_STATUSES = ["scheduled", "released", "in_transit", "awaiting_receipt"]
 REQUEST_ACTIVE_STATUSES = ["scheduled", "movement_in_progress", "awaiting_verification"]
+DELIVERY_ACTIVE_STATUSES = ["scheduled", "awaiting_issue", "issued", "accepted", "in_progress", "returning", "awaiting_reconciliation"]
 
 TRANSFER_PROJECTION = {
     "transfer_id": 1,
@@ -219,6 +220,12 @@ def _request_summary(document: dict, vehicles: dict) -> dict:
     }
 
 
+def _delivery_summary(document: dict, vehicles: dict) -> dict:
+    status = _text(document.get("status"), "scheduled")
+    action = {"scheduled": {"key":"view","label":"View Schedule"}, "awaiting_issue":{"key":"acknowledge","label":"Acknowledge Items"}, "issued":{"key":"accept","label":"Accept Batch"}, "accepted":{"key":"start","label":"Start Trip"}, "in_progress":{"key":"continue","label":"Continue Deliveries"}, "returning":{"key":"return","label":"Return Products"}, "awaiting_reconciliation":{"key":"view","label":"Await Reconciliation"}}.get(status,{"key":"view","label":"View Batch"})
+    return {"id":str(document["_id"]),"task_key":f"smart_living_delivery:{document['_id']}","operation_type":"smart_living_delivery","operation_label":"Smart Living Delivery","reference":document.get("batch_number"),"title":f"{len(document.get('delivery_order_ids') or [])} customer delivery batch","schedule":document.get("delivery_date"),"origin":"Assigned branch","destination":"Delivery route","vehicle":_vehicle_payload(document,vehicles),"status":status,"status_label":_label(status),"current_action":action,"linked_waybill_id":None,"updated_at":_value(document.get("updated_at"))}
+
+
 def _sort_value(task: dict) -> tuple:
     raw = task.get("schedule") or task.get("updated_at")
     try:
@@ -243,9 +250,11 @@ def list_driver_operational_tasks(current_user_id: str) -> dict:
             REQUEST_PROJECTION,
         )
     )
-    vehicles = _vehicle_map([*transfers, *requests])
+    deliveries = list(get_collection("delivery_batches").find({"driver_id":{"$in":driver_values},"status":{"$in":DELIVERY_ACTIVE_STATUSES}}))
+    vehicles = _vehicle_map([*transfers, *requests, *deliveries])
     tasks = [_transfer_summary(item, vehicles) for item in transfers]
     tasks.extend(_request_summary(item, vehicles) for item in requests)
+    tasks.extend(_delivery_summary(item, vehicles) for item in deliveries)
 
     # Source IDs are canonical task IDs, so retries or duplicate assignment records
     # cannot create a second queue entry.

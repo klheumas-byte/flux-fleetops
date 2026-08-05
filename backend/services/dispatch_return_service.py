@@ -659,29 +659,28 @@ def confirm_dispatch_return(job_id: str, payload: dict, *, current_user_id: str,
         "closing_odometer": recorded_closing_odometer,
         "closing_fuel_level": closing_fuel_level,
     }
+    from services.vehicle_movement_service import return_vehicle_movement
+
+    returned_movement = return_vehicle_movement(
+        str(movement_document["_id"]),
+        {
+            "actual_return_time": actual_return_at,
+            "closing_odometer": recorded_closing_odometer,
+            "closing_fuel_level": closing_fuel_level,
+            "notes": notes,
+        },
+        current_user_id=current_user_id,
+        current_role=normalized_role,
+    )
     movement_update_fields = {
-        "status": "returned",
         "actual_departure_at": actual_departure_at,
         "actual_return_at": actual_return_at,
-        "actual_return_time": actual_return_at,
-        "closing_odometer": recorded_closing_odometer,
-        "closing_fuel_level": closing_fuel_level,
-        "closing_fuel_recorded_at": timestamp,
-        "closing_fuel_recorded_by": _to_object_id(current_user_id, "current_user_id"),
         "return_note": notes,
         "fuel_summary_status": "closing_confirmed",
         "return_checklist": return_checklist,
-        "notes": notes,
-        "returned_by": _to_object_id(current_user_id, "current_user_id"),
-        "returned_at": timestamp,
         "updated_at": timestamp,
     }
-    movement_update_result = vehicle_movements_collection().update_one(
-        {"_id": movement_document["_id"], "status": {"$in": ["checked_out", "in_progress"]}},
-        {"$set": movement_update_fields},
-    )
-    if movement_update_result.matched_count != 1:
-        raise ApiError("This dispatch return has already been confirmed.", status_code=409)
+    vehicle_movements_collection().update_one({"_id": movement_document["_id"]}, {"$set": movement_update_fields})
     _release_job_reservations(job_document, reason="dispatch vehicle returned")
     if isinstance(job_document.get("vehicle_id"), ObjectId):
         _set_vehicle_status(job_document["vehicle_id"], next_status="available")
@@ -707,6 +706,7 @@ def confirm_dispatch_return(job_id: str, payload: dict, *, current_user_id: str,
     }
     dispatch_jobs_collection().update_one({"_id": job_document["_id"]}, {"$set": job_update_fields})
     job_document.update(job_update_fields)
+    movement_document.update(returned_movement)
     movement_document.update(movement_update_fields)
     from services.movement_custody_service import return_movement_custody
 

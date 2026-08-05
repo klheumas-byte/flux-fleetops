@@ -109,6 +109,7 @@ export interface VehicleMovementRecord {
   dispatch_job_id?: string | null;
   reservation_id?: string | null;
   movement_type: VehicleMovementType;
+  movement_category?: string | null;
   status: VehicleMovementStatus;
   requested_departure_time?: string | null;
   departure_time?: string | null;
@@ -185,6 +186,7 @@ export interface VehicleMovementListResponse {
   filters: {
     vehicle_id?: string | null;
     driver_id?: string | null;
+    branch_id?: string | null;
     status?: string | null;
     movement_type?: string | null;
     q?: string | null;
@@ -203,6 +205,7 @@ export interface VehicleMovementOptionsResponse {
   drivers: UserSummary[];
   vehicles: VehicleSummary[];
   assignments: AssignmentSummary[];
+  branches?: Array<{ id: string; name: string; code?: string | null }>;
 }
 
 interface VehicleMovementListEnvelope {
@@ -238,6 +241,7 @@ export async function fetchVehicleMovements(params: {
   q?: string;
   vehicle_id?: string;
   driver_id?: string;
+  branch_id?: string;
   status?: string;
   movement_type?: string;
   date_from?: string;
@@ -261,9 +265,9 @@ export async function fetchVehicleMovements(params: {
   return response.data;
 }
 
-export async function fetchVehicleMovementById(movementId: string) {
+export async function fetchVehicleMovementById(movementId: string, options: { fresh?: boolean } = {}) {
   const response = await apiRequest<VehicleMovementEnvelope>(`/vehicle-movements/${movementId}`, {
-    cacheTtlMs: 5000,
+    cacheTtlMs: options.fresh ? 0 : 5000,
     dedupeKey: `vehicle-movement-detail:${movementId}`,
     componentName: 'VehicleMovements',
     requestLabel: 'detail',

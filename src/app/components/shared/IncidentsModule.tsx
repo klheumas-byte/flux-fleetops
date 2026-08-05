@@ -661,6 +661,7 @@ export default function IncidentsModule({
     try {
       const response = await apiRequest<IncidentMutationResponse>(`/incidents/${selectedIncident.id}`, {
         method: 'PATCH',
+        timeoutMs: 60_000,
         body: JSON.stringify({
           status: updateForm.status,
           investigation_note: updateForm.investigation_note || undefined,

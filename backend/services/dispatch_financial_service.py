@@ -101,6 +101,11 @@ LIST_PROJECTION = {
     "dispatch_financial_type": 1,
     "partner_organization_reference": 1,
     "partner_billing_method": 1,
+    "contribution_amount": 1,
+    "contribution_purpose": 1,
+    "contribution_payment_method": 1,
+    "contribution_collected_by": 1,
+    "contribution_reconciliation_status": 1,
     "driver_compensation_type": 1,
     "driver_compensation_value": 1,
     "driver_compensation_amount": 1,
@@ -390,6 +395,11 @@ def _create_financial_record(job_document: dict) -> dict:
         "dispatch_financial_type_is_legacy": is_legacy,
         "partner_organization_reference": classification_source.get("partner_organization_reference"),
         "partner_billing_method": billing_method,
+        "contribution_amount": round(float(classification_source.get("contribution_amount") or 0), 2),
+        "contribution_purpose": classification_source.get("contribution_purpose"),
+        "contribution_payment_method": classification_source.get("contribution_payment_method"),
+        "contribution_collected_by": classification_source.get("contribution_collected_by"),
+        "contribution_reconciliation_status": classification_source.get("contribution_reconciliation_status"),
         "driver_compensation_type": compensation_type,
         "driver_compensation_value": compensation_value,
         "driver_compensation_amount": compensation_amount,
@@ -679,6 +689,7 @@ def _build_dashboard_summary(records: list[dict], incidents: list[dict]) -> dict
     internal_records = [item for item in records if resolve_dispatch_financial_type(item)[0] == "internal_company"]
     partner_records = [item for item in records if resolve_dispatch_financial_type(item)[0] == "partner_contract"]
     complimentary_records = [item for item in records if resolve_dispatch_financial_type(item)[0] == "complimentary"]
+    contribution_records = [item for item in records if resolve_dispatch_financial_type(item)[0] == "cost_contribution"]
     dispatch_revenue = round(sum(float(item.get("amount_submitted_by_driver") or 0) for item in external_records), 2)
     outstanding_dispatch_payments = round(sum(float(item.get("outstanding_balance") or 0) for item in records), 2)
     driver_liabilities = round(sum(float(item.get("driver_liability_total") or 0) for item in records), 2)
@@ -709,6 +720,8 @@ def _build_dashboard_summary(records: list[dict], incidents: list[dict]) -> dict
         "partner_contract_revenue": round(sum(float(item.get("approved_charge") or 0) for item in partner_records), 2),
         "partner_contract_costs": round(sum(float(item.get("company_operational_cost") or 0) for item in partner_records), 2),
         "complimentary_dispatch_costs": round(sum(float(item.get("company_operational_cost") or 0) for item in complimentary_records), 2),
+        "cost_contribution_dispatches": len(contribution_records),
+        "cost_contribution_total": round(sum(float(item.get("contribution_amount") or 0) for item in contribution_records), 2),
         "driver_dispatch_compensation": driver_dispatch_compensation,
         "outstanding_dispatch_payments": outstanding_dispatch_payments,
         "driver_liabilities": driver_liabilities,

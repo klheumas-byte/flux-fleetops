@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 from uuid import uuid4
 
@@ -13,6 +13,7 @@ from extensions import get_collection
 from models.smart_living_delivery import serialize_batch, serialize_custody, serialize_delivery
 from services.branch_access_service import assert_branch_access, assert_user_in_branch, branch_query, current_user, object_id
 from services.notification_service import create_notification
+from services.driver_scope_service import driver_ids_visible_to_branch_user
 from services.rbac_service import user_has_permission, user_role_codes, write_audit
 from utils.api_error import ApiError
 from utils.file_validation import validate_attachment_list
@@ -22,6 +23,7 @@ ORDER_STATUSES = {"draft", "ready_for_planning", "scheduled", "issued", "in_prog
 BATCH_STATUSES = {"draft", "scheduled", "awaiting_issue", "issued", "accepted", "in_progress", "returning", "awaiting_reconciliation", "reconciled", "cancelled"}
 FINAL_BATCH_STATUSES = {"reconciled", "cancelled"}
 AGENT_ROLE_CODES = {"field_agent", "sales_agent", "responsible_agent", "agent"}
+TRANSPORT_METHODS = {"VEHICLE", "KAYA", "OTHER_MANUAL"}
 
 
 def now_utc(): return datetime.now(timezone.utc)
@@ -81,6 +83,21 @@ def ensure_indexes():
     get_collection("audit_logs").create_index([("branch_id", ASCENDING), ("created_at", DESCENDING)])
 
 
+def reconcile_tomorrow_delivery_notifications() -> dict:
+    tomorrow = (now_utc().date() + timedelta(days=1)).isoformat(); sent = 0
+    for run in batches().find({"delivery_date": tomorrow, "status": {"$nin": ["CANCELLED", "COMPLETED", "CLOSED"]}}):
+        recipients = {item for item in [run.get("driver_id"), *(run.get("assigned_agent_ids") or [])] if item} | _branch_manager_ids(run["branch_id"])
+        readiness = review_run(run)["readiness"]
+        for recipient in recipients:
+            create_notification(recipient, "Tomorrow delivery reminder", f"{run.get('run_number') or run.get('batch_number')} is planned for tomorrow. Readiness: {readiness.replace('_', ' ').title()}.", category="operations", module="smart-living-deliveries", priority="high" if readiness != "READY" else "medium", reference_type="delivery_run", reference_id=run["_id"], action_url="smart-living-deliveries", action_label="Review tomorrow plan", dedupe_key=f"tomorrow-delivery:{tomorrow}:{run['_id']}:{recipient}")
+            sent += 1
+    for order in orders().find({"requested_delivery_date": tomorrow, "status": {"$in": ["CERTIFIED", "WAITING_SCHEDULING", "ready_for_planning"]}, "$or": [{"batch_id": None}, {"batch_id": {"$exists": False}}]}):
+        for recipient in _branch_manager_ids(order["branch_id"]):
+            create_notification(recipient, "Tomorrow delivery needs planning", f"{order.get('customer_name') or 'A branch delivery'} is due tomorrow and has no daily run.", category="operations", module="smart-living-deliveries", priority="high", reference_type="delivery_order", reference_id=order["_id"], action_url="branch-operations", action_label="Plan delivery", dedupe_key=f"tomorrow-unplanned:{tomorrow}:{order['_id']}:{recipient}")
+            sent += 1
+    return {"date": tomorrow, "notifications_reconciled": sent}
+
+
 def _line(payload: dict, index: int) -> dict:
     name = str(payload.get("product_name") or "").strip()
     quantity = int(payload.get("quantity_requested") or 0)
@@ -90,6 +107,23 @@ def _line(payload: dict, index: int) -> dict:
 
 def _audit(action, actor, entity, entity_id, branch_id, old=None, new=None, reason=None):
     write_audit(action, actor, entity, entity_id, {"old": old or {}, "new": new or {}, "reason": reason}, {"branch_id": str(branch_id)})
+
+
+def _branch_manager_ids(branch_id):
+    result = set()
+    query = {"status": "active", "$or": [{"role": "branch_manager"}, {"role_ids": "branch_manager"}]}
+    for user in users().find(query):
+        try:
+            assert_branch_access(user, branch_id)
+        except ApiError:
+            continue
+        result.add(user["_id"])
+    return result
+
+
+def _notify_branch_managers(branch_id, title, message, event, reference_id, *, priority="medium"):
+    for recipient in _branch_manager_ids(branch_id):
+        create_notification(recipient, title, message, category="operations", module="smart-living-deliveries", priority=priority, reference_type="delivery_order", reference_id=reference_id, action_url="branch-operations", action_label="Open Branch Operations", dedupe_key=f"branch-delivery:{reference_id}:{event}:{recipient}")
 
 
 def create_order(payload: dict, actor_id: str) -> dict:
@@ -106,6 +140,7 @@ def create_order(payload: dict, actor_id: str) -> dict:
     try: result = orders().insert_one(document)
     except DuplicateKeyError: raise ApiError("A Smart Living delivery already exists for this external reference.", status_code=409) from None
     document["_id"] = result.inserted_id; _audit("delivery_created", actor_id, "delivery_order", result.inserted_id, branch_id, new=document)
+    _notify_branch_managers(branch_id, "New branch delivery", f"{document['customer_name']} is ready for branch planning.", "created", result.inserted_id)
     return serialize_delivery(document)
 
 
@@ -273,6 +308,8 @@ def record_delivery(order_id: str, payload: dict, actor_id: str) -> dict:
     status="delivered" if delivered==issued and issued>0 else "partially_delivered" if delivered>0 else "undelivered"
     timestamp=now_utc(); updates={"product_lines":product_lines,"status":status,"delivered_at":timestamp,"delivery_note":payload.get("note"),"delivery_exception_type":payload.get("exception_type"),"updated_at":timestamp}
     orders().update_one({"_id":order["_id"]},{"$set":updates}); order.update(updates); _audit("delivery_quantities_recorded",actor_id,"delivery_order",order["_id"],order["branch_id"],new=updates,reason=payload.get("exception_type"))
+    if status in {"partially_delivered", "undelivered"}:
+        _notify_branch_managers(order["branch_id"], "Delivery requires attention", f"{order.get('customer_name') or 'A branch delivery'} was {status.replace('_', ' ')}.", status, order["_id"], priority="high")
     return serialize_delivery(order)
 
 
@@ -412,6 +449,7 @@ def create_certified_order(payload: dict, actor_id: str) -> dict:
         raise ApiError("A delivery order already exists for this reference number.", status_code=409) from None
     document["_id"] = result.inserted_id
     _audit("certified_delivery_created", actor_id, "delivery_order", result.inserted_id, branch_id, new=document)
+    _notify_branch_managers(branch_id, "New branch delivery", f"{document['customer_name']} was added to the branch delivery queue.", "certified-created", result.inserted_id)
     return serialize_delivery(document)
 
 
@@ -466,7 +504,15 @@ def scheduler_metadata(actor_id: str, branch_id=None) -> dict:
         return branch_names.get(value) or "Unassigned"
     all_driver_rows = [item for item in all_users if "driver" in user_role_codes(item) or bool(item.get("driver_profile"))]
     active_driver_rows = [item for item in active_users if item in all_driver_rows]
+    try:
+        visible_driver_ids = driver_ids_visible_to_branch_user(actor)
+    except (KeyError, RuntimeError):
+        # Lightweight service tests and migration utilities may not initialize
+        # the application-level driver-scope database connection.
+        visible_driver_ids = None
     driver_rows = [item for item in scoped_users if item in all_driver_rows]
+    if visible_driver_ids is not None:
+        driver_rows = [item for item in active_driver_rows if item.get("_id") in visible_driver_ids]
     all_agent_rows = [item for item in all_users if set(user_role_codes(item)) & AGENT_ROLE_CODES or any(item.get(key) for key in ("agent_profile", "sales_agent_profile", "field_agent_profile"))]
     active_agent_rows = [item for item in active_users if item in all_agent_rows]
     agent_rows = [item for item in scoped_users if item in all_agent_rows]
@@ -546,6 +592,44 @@ def _validate_vehicle(vehicle_id, branch_id, driver_id=None):
     return vehicle
 
 
+def _transport_method(document: dict) -> str:
+    value = str(document.get("transport_method") or "VEHICLE").strip().upper()
+    return value if value in TRANSPORT_METHODS else "VEHICLE"
+
+
+def _manual_transport(payload: dict, actor_id=None, existing=None) -> dict | None:
+    method = _transport_method(payload)
+    if method == "VEHICLE":
+        return None
+    source = payload.get("manual_transport") or existing or {}
+    name = str(source.get("provider_name") or source.get("handler_name") or "").strip()
+    phone = str(source.get("phone") or source.get("handler_phone") or "").strip()
+    raw_cost = source.get("agreed_cost")
+    try: cost = float(raw_cost) if raw_cost not in (None, "") else None
+    except (TypeError, ValueError): raise ApiError("Agreed cost must be numeric.", status_code=400) from None
+    if cost is not None and cost < 0: raise ApiError("Agreed cost cannot be negative.", status_code=400)
+    assigned_by = source.get("assigned_by")
+    return {
+        "provider_name": name or None, "handler_name": name or None,
+        "phone": phone or None, "handler_phone": phone or None,
+        "agreed_cost": cost,
+        "assigned_by": object_id(assigned_by, "assigned_by") if assigned_by else (object_id(actor_id) if actor_id else None),
+        "notes": str(source.get("notes") or "").strip() or None,
+    }
+
+
+def _assert_driver_for_branch(actor: dict, driver_id, branch_id):
+    try:
+        return assert_user_in_branch(driver_id, branch_id, {"driver"})
+    except ApiError as error:
+        visible = driver_ids_visible_to_branch_user(actor)
+        if error.status_code == 409 and visible is not None and driver_id in visible:
+            driver = users().find_one({"_id": driver_id})
+            if driver and "driver" in user_role_codes(driver) and str(driver.get("status") or "").lower() == "active":
+                return driver
+        raise
+
+
 def create_daily_run(payload: dict, actor_id: str) -> dict:
     actor = current_user(actor_id); branch_id = assert_branch_access(actor, payload.get("branch_id"), require_active=True)
     delivery_ids = list(dict.fromkeys(object_id(value, "delivery_order_id") for value in payload.get("delivery_order_ids") or []))
@@ -555,10 +639,14 @@ def create_daily_run(payload: dict, actor_id: str) -> dict:
     if len(delivery_rows) != len(delivery_ids):
         raise ApiError("Every selected delivery must be certified, unscheduled, and in the selected branch.", status_code=409)
     order_by_id = {item["_id"]: item for item in delivery_rows}; delivery_rows = [order_by_id[item] for item in delivery_ids]
-    driver_id = object_id(payload.get("driver_id"), "driver_id") if payload.get("driver_id") else None
-    vehicle_id = object_id(payload.get("vehicle_id"), "vehicle_id") if payload.get("vehicle_id") else None
-    if driver_id: assert_user_in_branch(driver_id, branch_id, {"driver"})
+    transport_method = _transport_method(payload)
+    if str(payload.get("transport_method") or "VEHICLE").strip().upper() not in TRANSPORT_METHODS:
+        raise ApiError("Invalid transport_method.", status_code=400)
+    driver_id = object_id(payload.get("driver_id"), "driver_id") if transport_method == "VEHICLE" and payload.get("driver_id") else None
+    vehicle_id = object_id(payload.get("vehicle_id"), "vehicle_id") if transport_method == "VEHICLE" and payload.get("vehicle_id") else None
+    if driver_id: _assert_driver_for_branch(actor, driver_id, branch_id)
     if vehicle_id: _validate_vehicle(vehicle_id, branch_id, driver_id)
+    manual_transport = _manual_transport({**payload, "transport_method": transport_method}, actor_id)
     stops = _make_stops(delivery_rows, payload.get("stops"))
     agent_ids = list(dict.fromkeys(stop["agent_id"] for stop in stops if stop.get("agent_id")))
     for agent_id in agent_ids:
@@ -572,6 +660,7 @@ def create_daily_run(payload: dict, actor_id: str) -> dict:
         "run_number": number, "batch_number": number, "branch_id": branch_id,
         "delivery_date": str(payload.get("delivery_date") or "").strip() or None,
         "planned_departure_time": str(payload.get("planned_departure_time") or "").strip() or None,
+        "transport_method": transport_method, "manual_transport": manual_transport,
         "driver_id": driver_id, "vehicle_id": vehicle_id, "assigned_agent_ids": agent_ids, "field_agent_id": agent_ids[0] if agent_ids else None,
         "delivery_order_ids": delivery_ids, "route_sequence": delivery_ids, "stops": stops,
         "notes": str(payload.get("notes") or "").strip() or None, "status": "DRAFT", "version": 1,
@@ -601,8 +690,14 @@ def _conflicts(run: dict) -> list[dict]:
 
 def review_run(run: dict) -> dict:
     errors = []; warnings = []
-    if not run.get("driver_id"): errors.append("Assign a driver.")
-    if not run.get("vehicle_id"): errors.append("Assign a vehicle.")
+    method = _transport_method(run)
+    if method == "VEHICLE":
+        if not run.get("driver_id"): errors.append("Assign a driver.")
+        if not run.get("vehicle_id"): errors.append("Assign a vehicle.")
+    else:
+        manual = run.get("manual_transport") or {}
+        if not manual.get("provider_name") and not manual.get("handler_name"): errors.append("Add a handler or provider name.")
+        if not manual.get("phone") and not manual.get("handler_phone"): errors.append("Add a handler or provider phone.")
     if not run.get("delivery_date"): errors.append("Set a delivery date.")
     if not run.get("planned_departure_time"): errors.append("Set a departure time.")
     if not run.get("delivery_order_ids"): errors.append("Add at least one certified delivery.")
@@ -617,7 +712,10 @@ def review_run(run: dict) -> dict:
         if stop.get("stop_type") == "CUSTOMER_DELIVERY" and not stop.get("agent_id"): errors.append(f"Stop {stop.get('sequence_number')} has no responsible agent.")
         if not stop.get("expected_arrival_time"): warnings.append(f"Stop {stop.get('sequence_number')} has no expected arrival time.")
     for conflict in _conflicts(run): errors.append(f"The selected {conflict['type']} conflicts with {conflict['run_number']}.")
-    return {"valid": not errors, "errors": list(dict.fromkeys(errors)), "warnings": list(dict.fromkeys(warnings))}
+    errors = list(dict.fromkeys(errors)); warnings = list(dict.fromkeys(warnings))
+    requirement_count = 5 if method == "VEHICLE" else 5
+    readiness = "READY" if not errors else "PLANNING_REQUIRED" if len(errors) >= requirement_count else "PARTIALLY_PLANNED"
+    return {"valid": not errors, "readiness": readiness, "errors": errors, "missing_requirements": errors, "warnings": warnings}
 
 
 def _person(person_id):
@@ -636,7 +734,8 @@ def _enrich_run(document: dict) -> dict:
     enriched_stops = []
     for stop in sorted(document.get("stops", []), key=lambda item: item.get("sequence_number", 0)):
         order = order_map.get(stop.get("delivery_order_id")); enriched_stops.append({**stop, "agent": _person(stop.get("agent_id")), "phone": order.get("phone") or order.get("customer_phone") if order else None, "products": order.get("product_lines", []) if order else []})
-    result["stops"] = enriched_stops; result["review"] = review_run(document)
+    result["transport_method"] = _transport_method(document)
+    result["stops"] = enriched_stops; result["review"] = review_run(document); result["readiness"] = result["review"]["readiness"]
     return serialize_batch(result)
 
 
@@ -675,7 +774,7 @@ def list_daily_runs(actor_id: str, filters: dict, assigned_only=False, loading_o
 
 
 def _notify_run(run: dict, title: str, message: str, event: str, previous_recipients=None):
-    recipients = {item for item in [run.get("driver_id"), *(run.get("assigned_agent_ids") or []), *(previous_recipients or [])] if item}
+    recipients = {item for item in [run.get("driver_id"), *(run.get("assigned_agent_ids") or []), *(previous_recipients or [])] if item} | _branch_manager_ids(run["branch_id"])
     for recipient in recipients:
         create_notification(recipient, title, f"{message} Current version: v{run.get('version', 1)}.", category="operations", module="smart-living-deliveries", priority="high", reference_type="delivery_run", reference_id=run["_id"], action_url="smart-living-deliveries", action_label="View Schedule", dedupe_key=f"delivery-run:{run['_id']}:{event}:v{run.get('version', 1)}:{recipient}")
 
@@ -698,7 +797,7 @@ def update_daily_run(run_id: str, payload: dict, actor_id: str) -> dict:
     actor = current_user(actor_id); run = batches().find_one({"_id": object_id(run_id, "run_id"), **branch_query(actor)})
     if not run: raise ApiError("Delivery run not found.", status_code=404)
     if run.get("status") in {"EXECUTION_COMPLETED", "AWAITING_RECONCILIATION", "AWAITING_RETURN_RECONCILIATION", "COMPLETED", "CANCELLED"}: raise ApiError("This delivery run can no longer be edited.", status_code=409)
-    allowed = {"delivery_date", "planned_departure_time", "driver_id", "vehicle_id", "notes", "stops", "stop_order", "status"}
+    allowed = {"delivery_date", "planned_departure_time", "transport_method", "manual_transport", "driver_id", "vehicle_id", "notes", "stops", "stop_order", "status"}
     material = {key for key in payload if key in allowed}
     reason = str(payload.get("reason") or "").strip()
     if run.get("status") == "LOCKED" and material and (not reason or not user_has_permission(actor, "delivery_runs.override_lock")):
@@ -713,12 +812,24 @@ def update_daily_run(run_id: str, payload: dict, actor_id: str) -> dict:
     if "delivery_date" in payload: updates["delivery_date"] = str(payload.get("delivery_date") or "").strip() or None
     if "planned_departure_time" in payload: updates["planned_departure_time"] = str(payload.get("planned_departure_time") or "").strip() or None
     if "notes" in payload: updates["notes"] = str(payload.get("notes") or "").strip() or None
-    driver_id = object_id(payload.get("driver_id"), "driver_id") if payload.get("driver_id") else run.get("driver_id")
-    vehicle_id = object_id(payload.get("vehicle_id"), "vehicle_id") if payload.get("vehicle_id") else run.get("vehicle_id")
+    method = _transport_method({"transport_method": payload.get("transport_method", run.get("transport_method"))})
+    if "transport_method" in payload:
+        raw_method = str(payload.get("transport_method") or "").strip().upper()
+        if raw_method not in TRANSPORT_METHODS: raise ApiError("Invalid transport_method.", status_code=400)
+        updates["transport_method"] = method
+        if method != "VEHICLE": updates.update({"driver_id": None, "vehicle_id": None})
+    if "manual_transport" in payload or "transport_method" in payload:
+        updates["manual_transport"] = _manual_transport({"transport_method": method, "manual_transport": payload.get("manual_transport")}, actor_id, run.get("manual_transport"))
+    driver_id = object_id(payload.get("driver_id"), "driver_id") if payload.get("driver_id") else (None if "driver_id" in payload else run.get("driver_id"))
+    vehicle_id = object_id(payload.get("vehicle_id"), "vehicle_id") if payload.get("vehicle_id") else (None if "vehicle_id" in payload else run.get("vehicle_id"))
     if "driver_id" in payload:
-        assert_user_in_branch(driver_id, run["branch_id"], {"driver"}); updates["driver_id"] = driver_id
+        if method != "VEHICLE" and driver_id: raise ApiError("Manual transport does not use a company driver.", status_code=400)
+        if driver_id: _assert_driver_for_branch(actor, driver_id, run["branch_id"])
+        updates["driver_id"] = driver_id
     if "vehicle_id" in payload:
-        _validate_vehicle(vehicle_id, run["branch_id"], driver_id); updates["vehicle_id"] = vehicle_id
+        if method != "VEHICLE" and vehicle_id: raise ApiError("Manual transport does not use a company vehicle.", status_code=400)
+        if vehicle_id: _validate_vehicle(vehicle_id, run["branch_id"], driver_id)
+        updates["vehicle_id"] = vehicle_id
     stops = [dict(item) for item in run.get("stops", [])]
     if payload.get("stops"):
         existing = {item["stop_id"]: item for item in stops}; next_stops = []
@@ -812,7 +923,9 @@ def _scheduler_run(run_id: str, actor_id: str, driver_only=False) -> tuple[dict,
     if not run or not run.get("run_number"):
         raise ApiError("Delivery run not found.", status_code=404)
     if driver_only and run.get("driver_id") != object_id(actor_id):
-        raise ApiError("Only the assigned driver can perform this action.", status_code=403)
+        manual_agent = _transport_method(run) != "VEHICLE" and object_id(actor_id) in (run.get("assigned_agent_ids") or [])
+        if not manual_agent:
+            raise ApiError("Only the assigned driver or manual-transport Field Agent can perform this action.", status_code=403)
     return actor, run
 
 
@@ -933,7 +1046,8 @@ def respond_to_custody(run_id: str, payload: dict, actor_id: str) -> dict:
     if decision == "DISPUTE" and not (reason or discrepancies):
         raise ApiError("Describe the custody discrepancy.", status_code=400)
     timestamp = now_utc(); status = "ACCEPTED" if decision == "ACCEPT" else "DISPUTED"
-    updates = {"custody_status": status, "acknowledgement_status": status, "status": status, "custody_responded_at": timestamp, "acknowledged_at": timestamp if status == "ACCEPTED" else None, "custody_responded_by": object_id(actor_id), "driver_id": object_id(actor_id), "driver_note": str(payload.get("note") or "").strip() or None, "discrepancy_reason": reason or None, "discrepancy": discrepancies or reason or None, "discrepancies": discrepancies}
+    updates = {"custody_status": status, "acknowledgement_status": status, "status": status, "custody_responded_at": timestamp, "acknowledged_at": timestamp if status == "ACCEPTED" else None, "custody_responded_by": object_id(actor_id), "custody_holder_id": object_id(actor_id), "driver_note": str(payload.get("note") or "").strip() or None, "discrepancy_reason": reason or None, "discrepancy": discrepancies or reason or None, "discrepancies": discrepancies}
+    if _transport_method(run) == "VEHICLE": updates["driver_id"] = object_id(actor_id)
     with _transaction() as session:
         issues().update_one({"_id": issue["_id"]}, {"$set": updates}, **_session(session))
         batches().update_one({"_id": run["_id"]}, {"$set": {"custody_status": status, "updated_at": timestamp}}, **_session(session))

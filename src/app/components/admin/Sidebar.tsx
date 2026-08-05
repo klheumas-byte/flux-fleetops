@@ -101,6 +101,8 @@ const SECTIONS: SidebarSection[] = [
     id: 'fleet-operations',
     title: 'Operations',
     items: [
+      { id: 'branch-operations', label: 'Branch Operations', icon: LayoutDashboard },
+      { id: 'branch-team', label: 'Branch Team', icon: Users },
       { id: 'dispatch-requests', label: 'Dispatch Requests', icon: PackageCheck },
       { id: 'dispatch-planner', label: 'Operations Planner', icon: Calendar },
       { id: 'smart-living-deliveries', label: 'Delivery Scheduler', icon: PackageCheck },

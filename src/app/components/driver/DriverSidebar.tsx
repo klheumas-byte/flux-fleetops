@@ -83,6 +83,7 @@ const DRIVER_SECTIONS: DriverSidebarSection[] = [
       { id: 'my-dispatch-opportunities', label: 'Dispatch Opportunities', icon: Search },
       { id: 'my-dispatches', label: 'My Dispatches', icon: Route },
       { id: 'my-operational-tasks', label: 'Operational Tasks', icon: ClipboardList },
+      { id: 'personal-vehicle-use', label: 'Personal Vehicle Use', icon: UserCircle },
       { id: 'smart-living-deliveries', label: 'My Deliveries', icon: PackageCheck },
       { id: 'digital-waybills', label: 'Digital Waybill', icon: PackageCheck },
       { id: 'calendar', label: 'Scheduled Bookings', icon: Calendar },

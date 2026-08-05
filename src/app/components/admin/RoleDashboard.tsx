@@ -9,7 +9,7 @@ export default function RoleDashboard({ user, onNavigate }: { user: SessionUser;
     operations_manager: [{label:'Delivery Scheduler',page:'smart-living-deliveries'},{label:'Daily Delivery Runs',page:'smart-living-deliveries'},{label:'Drivers',page:'drivers'},{label:'Vehicles',page:'vehicles'},{label:'Maintenance',page:'maintenance'},{label:'Notifications',page:'notifications'}],
     field_agent: [{label:"Today's Deliveries",page:'smart-living-deliveries'},{label:'Upcoming Deliveries',page:'smart-living-deliveries'},{label:'Notifications',page:'notifications'},{label:'Customer Notes',page:'smart-living-deliveries'}],
     issuing_receiving_officer: [{label:'Upcoming Loading Schedule',page:'smart-living-deliveries'},{label:'Items Waiting for Issue',page:'smart-living-deliveries'},{label:'Drivers Waiting',page:'smart-living-deliveries'},{label:'Item History',page:'smart-living-deliveries'}],
-    branch_manager: [{label:'Incoming Stock',page:'stock-transfers'},{label:'Notifications',page:'notifications'}],
+    branch_manager: [{label:'Branch Operations',page:'branch-operations'},{label:'Branch Team',page:'branch-team'},{label:'Incoming Stock',page:'stock-transfers'},{label:'Notifications',page:'notifications'}],
     branch_warehouse_coordinator: [{label:'Incoming Stock',page:'stock-transfers'}],
     finance_officer: [{label:'Operational Expenses',page:'expenses'},{label:'Fuel',page:'fuel'},{label:'Repairs',page:'expenses'},{label:'Reports',page:'reports'}],
   };

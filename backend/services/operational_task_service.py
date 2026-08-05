@@ -26,7 +26,9 @@ TRANSFER_PROJECTION = {
     "supplier_arrived_at": 1,
     "pickup_confirmation": 1,
     "actual_receiver": 1,
+    "receiving_status": 1,
     "linked_delivery_exception_id": 1,
+    "delivery_exception_status": 1,
     "linked_waybill_id": 1,
     "updated_at": 1,
 }
@@ -115,8 +117,14 @@ def _transfer_action(document: dict) -> dict:
         return {"key": "start", "label": "Start Journey"}
     if status == "in_transit":
         return {"key": "arrive", "label": "Mark Delivered"}
-    if status == "awaiting_receipt" and document.get("linked_delivery_exception_id"):
+    if (
+        status == "awaiting_receipt"
+        and document.get("linked_delivery_exception_id")
+        and document.get("delivery_exception_status") != "resolved"
+    ):
         return {"key": "review_exception", "label": "Review Delivery Exception"}
+    if status == "awaiting_receipt" and document.get("receiving_status") == "received":
+        return {"key": "awaiting_completion", "label": "Await Final Completion"}
     if status == "awaiting_receipt":
         return {"key": "confirm_delivery", "label": "Confirm Delivery"}
     return {"key": "view", "label": "View Task"}

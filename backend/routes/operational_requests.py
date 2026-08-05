@@ -8,6 +8,7 @@ from services.vehicle_operation_request_service import (
     confirm_operational_task,
     create_operational_request,
     get_operational_request,
+    get_personal_use_analytics,
     list_operational_request_options,
     list_operational_requests,
     open_operational_movement,
@@ -31,35 +32,56 @@ def _identity():
 
 
 @operational_requests_bp.get("")
-@role_required("owner", "admin", "driver")
+@role_required("owner", "admin", "operations_administrator", "operations_manager", "driver")
 def list_route():
     user_id, role = _identity()
     return success_response(data=list_operational_requests(current_user_id=user_id, current_role=role, page=request.args.get("page", 1, type=int), page_size=request.args.get("page_size", 25, type=int), status=request.args.get("status"), operation_type=request.args.get("operation_type")))
 
 
 @operational_requests_bp.get("/options")
-@role_required("owner", "admin", "driver")
+@role_required("owner", "admin", "operations_administrator", "operations_manager", "driver")
 def options_route():
-    _user_id, role = _identity()
-    return success_response(data=list_operational_request_options(current_role=role))
+    user_id, role = _identity()
+    return success_response(data=list_operational_request_options(
+        current_role=role,
+        current_user_id=user_id,
+        planned_departure_at=request.args.get("planned_departure_at"),
+        expected_return_at=request.args.get("expected_return_at"),
+    ))
+
+
+@operational_requests_bp.get("/personal-use/analytics")
+@role_required("owner", "admin", "operations_administrator", "operations_manager", "driver")
+def personal_use_analytics_route():
+    user_id, role = _identity()
+    return success_response(data=get_personal_use_analytics(
+        current_user_id=user_id,
+        current_role=role,
+        driver_id=request.args.get("driver_id"),
+        vehicle_id=request.args.get("vehicle_id"),
+        date_from=request.args.get("date_from"),
+        date_to=request.args.get("date_to"),
+        branch_id=request.args.get("branch_id"),
+        status=request.args.get("status"),
+    ))
 
 
 @operational_requests_bp.post("")
-@role_required("owner", "admin")
+@role_required("owner", "admin", "operations_administrator", "operations_manager", "driver")
 def create_route():
     user_id, role = _identity()
     return success_response(data={"request": create_operational_request(request.get_json(silent=True) or {}, current_user_id=user_id, current_role=role)}, message="Operational request created.", status_code=201)
 
 
 @operational_requests_bp.get("/<request_id>")
-@role_required("owner", "admin", "driver")
+@role_required("owner", "admin", "operations_administrator", "operations_manager", "driver")
 def detail_route(request_id):
     user_id, role = _identity()
     return success_response(data={"request": get_operational_request(request_id, current_user_id=user_id, current_role=role)})
 
 
 @operational_requests_bp.patch("/<request_id>")
-@role_required("owner", "admin")
+@role_required("owner", "admin", "operations_administrator", "operations_manager", "driver")
 def update_route(request_id):
     user_id, role = _identity()
     return success_response(data={"request": update_operational_request(request_id, request.get_json(silent=True) or {}, current_user_id=user_id, current_role=role)})
@@ -73,24 +95,24 @@ def _action(request_id, handler, *, payload=False):
 
 
 @operational_requests_bp.patch("/<request_id>/submit")
-@role_required("owner", "admin")
+@role_required("owner", "admin", "operations_administrator", "operations_manager", "driver")
 def submit_route(request_id): return _action(request_id, submit_operational_request)
 
 
 @operational_requests_bp.patch("/<request_id>/approve")
-@role_required("owner", "admin")
-def approve_route(request_id): return _action(request_id, approve_operational_request)
+@role_required("owner", "admin", "operations_administrator", "operations_manager")
+def approve_route(request_id): return _action(request_id, approve_operational_request, payload=True)
 
 
 @operational_requests_bp.patch("/<request_id>/reject")
-@role_required("owner", "admin")
+@role_required("owner", "admin", "operations_administrator", "operations_manager")
 def reject_route(request_id):
     user_id, role = _identity(); payload = request.get_json(silent=True) or {}
     return success_response(data={"request": reject_operational_request(request_id, payload.get("reason"), current_user_id=user_id, current_role=role)})
 
 
 @operational_requests_bp.patch("/<request_id>/schedule")
-@role_required("owner", "admin")
+@role_required("owner", "admin", "operations_administrator", "operations_manager")
 def schedule_route(request_id): return _action(request_id, schedule_operational_request, payload=True)
 
 
@@ -100,30 +122,30 @@ def acknowledge_route(request_id): return _action(request_id, acknowledge_operat
 
 
 @operational_requests_bp.patch("/<request_id>/opening-check")
-@role_required("owner", "admin", "driver")
+@role_required("owner", "admin", "operations_administrator", "operations_manager", "driver")
 def opening_route(request_id): return _action(request_id, open_operational_movement, payload=True)
 
 
 @operational_requests_bp.patch("/<request_id>/start")
-@role_required("owner", "admin", "driver")
+@role_required("owner", "admin", "operations_administrator", "operations_manager", "driver")
 def start_route(request_id): return _action(request_id, start_operational_request, payload=True)
 
 
 @operational_requests_bp.patch("/<request_id>/confirm-task")
-@role_required("owner", "admin", "driver")
+@role_required("owner", "admin", "operations_administrator", "operations_manager", "driver")
 def confirm_route(request_id): return _action(request_id, confirm_operational_task, payload=True)
 
 
 @operational_requests_bp.patch("/<request_id>/return")
-@role_required("owner", "admin", "driver")
+@role_required("owner", "admin", "operations_administrator", "operations_manager", "driver")
 def return_route(request_id): return _action(request_id, return_operational_request, payload=True)
 
 
 @operational_requests_bp.patch("/<request_id>/verify")
-@role_required("owner", "admin")
+@role_required("owner", "admin", "operations_administrator", "operations_manager")
 def verify_route(request_id): return _action(request_id, verify_operational_request, payload=True)
 
 
 @operational_requests_bp.patch("/<request_id>/cancel")
-@role_required("owner", "admin")
+@role_required("owner", "admin", "operations_administrator", "operations_manager", "driver")
 def cancel_route(request_id): return _action(request_id, cancel_operational_request, payload=True)

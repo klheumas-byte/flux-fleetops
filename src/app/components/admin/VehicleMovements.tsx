@@ -234,6 +234,7 @@ export default function VehicleMovements() {
   const [statusFilter, setStatusFilter] = useState('');
   const [vehicleFilter, setVehicleFilter] = useState('');
   const [driverFilter, setDriverFilter] = useState('');
+  const [branchFilter, setBranchFilter] = useState('');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
@@ -286,6 +287,7 @@ export default function VehicleMovements() {
         q: debouncedSearchQuery || undefined,
         vehicle_id: vehicleFilter || undefined,
         driver_id: driverFilter || undefined,
+        branch_id: branchFilter || undefined,
         status: statusFilter || undefined,
         movement_type: movementTypeFilter || undefined,
         date_from: dateFrom || undefined,
@@ -586,6 +588,14 @@ export default function VehicleMovements() {
               ))}
             </select>
             <select
+              value={branchFilter}
+              onChange={(event) => { setBranchFilter(event.target.value); setCurrentPage(1); }}
+              className="rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:border-transparent focus:ring-2 focus:ring-[#2563EB]"
+            >
+              <option value="">All Branches</option>
+              {(options?.branches || []).map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
+            </select>
+            <select
               value={driverFilter}
               onChange={(event) => {
                 setDriverFilter(event.target.value);
@@ -687,7 +697,7 @@ export default function VehicleMovements() {
                         <div className="font-medium text-[#0F172A]">{movement.driver?.full_name || 'Unassigned'}</div>
                         <div className="text-xs text-gray-500">{movement.driver?.phone || 'No phone'}</div>
                       </td>
-                      <td className="px-6 py-4 text-sm text-gray-700">{MOVEMENT_TYPE_LABELS[movement.movement_type]}</td>
+                      <td className="px-6 py-4 text-sm text-gray-700">{movement.movement_category?.replaceAll('_', ' ') || MOVEMENT_TYPE_LABELS[movement.movement_type]}</td>
                       <td className="px-6 py-4">
                         <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${STATUS_BADGES[movement.status]}`}>
                           {STATUS_LABELS[movement.status]}
@@ -871,7 +881,7 @@ export default function VehicleMovements() {
                     <DetailRow label="Movement ID" value={detailMovement.movement_id} />
                     <DetailRow label="Vehicle" value={detailMovement.vehicle?.registration_number || 'Unknown vehicle'} />
                     <DetailRow label="Driver" value={detailMovement.driver?.full_name || 'Unassigned'} />
-                    <DetailRow label="Movement Type" value={MOVEMENT_TYPE_LABELS[detailMovement.movement_type]} />
+                    <DetailRow label="Movement Type" value={detailMovement.movement_category?.replaceAll('_', ' ') || MOVEMENT_TYPE_LABELS[detailMovement.movement_type]} />
                     <DetailRow label="Status" value={STATUS_LABELS[detailMovement.status]} />
                     <DetailRow label="Purpose" value={detailMovement.purpose || 'Not provided'} />
                     <DetailRow label="Origin" value={detailMovement.origin || 'Not provided'} />

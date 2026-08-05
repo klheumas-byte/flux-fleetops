@@ -74,7 +74,10 @@ LIST_PROJECTION = {
     "customer_phone": 1,
     "customer_company": 1,
     "pickup_location": 1,
+    "pickup_landmark": 1,
     "destination": 1,
+    "destination_landmark": 1,
+    "trip_purpose": 1,
     "vehicle_type_needed": 1,
     "load_type": 1,
     "load_weight_category": 1,
@@ -97,6 +100,11 @@ LIST_PROJECTION = {
     "payment_method": 1,
     "amount_paid": 1,
     "outstanding_balance": 1,
+    "contribution_amount": 1,
+    "contribution_purpose": 1,
+    "contribution_payment_method": 1,
+    "contribution_collected_by": 1,
+    "contribution_reconciliation_status": 1,
     "driver_compensation_type": 1,
     "driver_compensation_value": 1,
     "driver_compensation_amount": 1,
@@ -147,7 +155,10 @@ EDITOR_PATCHABLE_FIELDS = {
     "customer_phone",
     "customer_company",
     "pickup_location",
+    "pickup_landmark",
     "destination",
+    "destination_landmark",
+    "trip_purpose",
     "vehicle_type_needed",
     "load_type",
     "load_weight_category",
@@ -164,6 +175,10 @@ EDITOR_PATCHABLE_FIELDS = {
     "partner_billing_method",
     "payment_method",
     "amount_paid",
+    "contribution_amount",
+    "contribution_purpose",
+    "contribution_payment_method",
+    "contribution_reconciliation_status",
     "driver_compensation_type",
     "driver_compensation_value",
     "notes",
@@ -393,9 +408,13 @@ def _validate_financial_classification(document: dict, *, require_explicit: bool
         raise ApiError("Partner billing fields are only valid for partner contract dispatches.", status_code=400)
 
     immediate_payment = requires_immediate_customer_payment(financial_type, billing_method)
-    if financial_type in {"internal_company", "complimentary"}:
+    if financial_type in {"internal_company", "complimentary", "cost_contribution"}:
         if charge != 0 or amount_paid != 0 or payment_method:
             raise ApiError(f"{financial_type} dispatches cannot record a customer charge or payment.", status_code=400)
+        if financial_type == "cost_contribution":
+            contribution_amount = float(document.get("contribution_amount") or 0)
+            if contribution_amount <= 0 or not _normalize_text(document.get("contribution_purpose")):
+                raise ApiError("Cost contribution dispatches require a contribution amount and purpose.", status_code=400)
     elif immediate_payment and charge <= 0:
         raise ApiError("A customer charge greater than zero is required for this dispatch classification.", status_code=400)
     if amount_paid < 0 or amount_paid > charge:
@@ -420,6 +439,11 @@ def _validate_financial_classification(document: dict, *, require_explicit: bool
         "driver_compensation_type": compensation_type,
         "driver_compensation_value": round(compensation_value, 2),
         "driver_compensation_amount": compensation_amount,
+        "contribution_amount": round(float(document.get("contribution_amount") or 0), 2) if financial_type == "cost_contribution" else 0.0,
+        "contribution_purpose": _normalize_text(document.get("contribution_purpose")) if financial_type == "cost_contribution" else None,
+        "contribution_payment_method": _normalize_text(document.get("contribution_payment_method")) if financial_type == "cost_contribution" else None,
+        "contribution_collected_by": document.get("contribution_collected_by") if financial_type == "cost_contribution" else None,
+        "contribution_reconciliation_status": document.get("contribution_reconciliation_status") or ("pending" if financial_type == "cost_contribution" else None),
     }
 
 
@@ -529,11 +553,7 @@ def _normalize_dispatch_request_payload(payload: dict, *, partial: bool = False,
     if "customer_company" in payload or not partial:
         normalized["customer_company"] = _normalize_text(payload.get("customer_company"))
     if "pickup_location" in payload or not partial:
-        normalized["pickup_location"] = _validate_master_data_value(
-            payload.get("pickup_location"),
-            "pickup_location",
-            required=not partial,
-        )
+        normalized["pickup_location"] = _normalize_text(payload.get("pickup_location"))
         if not normalized["pickup_location"]:
             raise ApiError("pickup_location is required.", status_code=400)
     if "destination" in payload or not partial:
@@ -621,6 +641,11 @@ def _normalize_dispatch_request_payload(payload: dict, *, partial: bool = False,
         normalized["partner_billing_method"] = normalize_key(payload.get("partner_billing_method"))
     if "amount_paid" in payload or not partial:
         normalized["amount_paid"] = _validate_non_negative_number(payload.get("amount_paid"), "amount_paid") or 0.0
+    if "contribution_amount" in payload or not partial:
+        normalized["contribution_amount"] = _validate_non_negative_number(payload.get("contribution_amount"), "contribution_amount") or 0.0
+    for field_name in ("contribution_purpose", "contribution_payment_method", "contribution_reconciliation_status", "pickup_landmark", "destination_landmark", "trip_purpose"):
+        if field_name in payload or not partial:
+            normalized[field_name] = _normalize_text(payload.get(field_name))
     if "driver_compensation_type" in payload or not partial:
         compensation_type = normalize_key(payload.get("driver_compensation_type")) or "none"
         if compensation_type not in DRIVER_COMPENSATION_TYPES:
@@ -1213,6 +1238,8 @@ def create_dispatch_request_from_opportunity(opportunity_document: dict, *, curr
     if existing is not None:
         return existing
 
+    classification = opportunity_document.get("dispatch_classification") or "COMMERCIAL"
+    financial_type = {"COMMERCIAL": "external_paid", "COMPLIMENTARY": "complimentary", "COST_CONTRIBUTION": "cost_contribution"}.get(classification, "external_paid")
     normalized_payload = _normalize_dispatch_request_payload(
         {
             "request_type": _resolve_default_dispatch_request_type(),
@@ -1220,7 +1247,10 @@ def create_dispatch_request_from_opportunity(opportunity_document: dict, *, curr
             "customer_phone": opportunity_document.get("customer_phone"),
             "customer_company": opportunity_document.get("customer_company"),
             "pickup_location": opportunity_document.get("pickup_location"),
+            "pickup_landmark": opportunity_document.get("pickup_landmark"),
             "destination": opportunity_document.get("destination"),
+            "destination_landmark": opportunity_document.get("destination_landmark"),
+            "trip_purpose": opportunity_document.get("trip_purpose") or "GOODS",
             "vehicle_type_needed": opportunity_document.get("vehicle_type_needed"),
             "load_type": opportunity_document.get("load_type"),
             "load_weight_category": opportunity_document.get("load_weight_category"),
@@ -1229,7 +1259,11 @@ def create_dispatch_request_from_opportunity(opportunity_document: dict, *, curr
             "preferred_pickup_date": opportunity_document.get("preferred_pickup_date"),
             "preferred_pickup_time": opportunity_document.get("preferred_pickup_time"),
             "proposed_charge": opportunity_document.get("proposed_charge"),
-            "dispatch_financial_type": "external_paid",
+            "dispatch_financial_type": financial_type,
+            "contribution_amount": opportunity_document.get("contribution_amount"),
+            "contribution_purpose": opportunity_document.get("contribution_purpose"),
+            "contribution_payment_method": opportunity_document.get("contribution_payment_method"),
+            "contribution_reconciliation_status": opportunity_document.get("contribution_reconciliation_status"),
             "amount_paid": 0,
             "driver_compensation_type": "none",
             "driver_compensation_value": 0,
@@ -1241,6 +1275,7 @@ def create_dispatch_request_from_opportunity(opportunity_document: dict, *, curr
         current_role=normalized_role,
     )
     normalized_payload["approved_charge"] = opportunity_document.get("approved_charge")
+    normalized_payload["contribution_collected_by"] = opportunity_document.get("contribution_collected_by")
     normalized_payload["pricing_notes"] = opportunity_document.get("review_notes")
     normalized_payload["expected_net_revenue"] = _compute_expected_net_revenue(
         approved_charge=normalized_payload.get("approved_charge"),

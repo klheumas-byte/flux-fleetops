@@ -19,6 +19,7 @@ import {
 } from '../../lib/stock-transfer-api';
 import { searchWaybillProducts, type WaybillProduct } from '../../lib/waybill-api';
 import { SearchableSelect } from '../ui/searchable-select';
+import { MovementFuelDialog, type MovementFuelDraft } from './MovementFuelDialog';
 
 const WORKFLOW = ['Draft', 'Submitted', 'Approved', 'Assigned', 'Driver Confirmed', 'Loaded', 'In Transit', 'Delivered', 'Received', 'Variance Review', 'Completed'];
 
@@ -74,6 +75,7 @@ export default function StockTransfers({ driverMode = false, onNavigate, taskId 
   const [varianceResolution, setVarianceResolution] = useState<Record<string, string>>({});
   const [editingRecipient, setEditingRecipient] = useState<StockTransfer | null>(null);
   const [exceptionDetail, setExceptionDetail] = useState<StockTransfer | null>(null);
+  const [movementAction, setMovementAction] = useState<{ record: StockTransfer; mode: 'start' | 'return'; draft: MovementFuelDraft } | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -112,6 +114,22 @@ export default function StockTransfers({ driverMode = false, onNavigate, taskId 
     } finally {
       setBusy('');
     }
+  };
+
+  const submitMovement = async () => {
+    if (!movementAction || movementAction.draft.fuel == null) return;
+    const { record, mode, draft } = movementAction;
+    const payload: Record<string, unknown> = {
+      [mode === 'start' ? 'opening_fuel_level' : 'closing_fuel_level']: draft.fuel,
+      notes: draft.notes.trim() || undefined,
+    };
+    if (draft.odometer.trim()) payload[mode === 'start' ? 'opening_odometer' : 'closing_odometer'] = Number(draft.odometer);
+    if (await run(record, mode === 'start' ? 'start' : 'arrive', payload)) setMovementAction(null);
+  };
+
+  const openMovement = (record: StockTransfer, mode: 'start' | 'return') => {
+    setError('');
+    setMovementAction({ record, mode, draft: { fuel: null, odometer: '', notes: '' } });
   };
 
   const openLoading = async (record: StockTransfer) => {
@@ -252,8 +270,8 @@ export default function StockTransfers({ driverMode = false, onNavigate, taskId 
               {record.operation_type === 'supplier_pickup' && record.status === 'scheduled' && record.acknowledged_at && !record.supplier_arrived_at && <Button busy={busy === record.id} onClick={() => run(record, 'arrive')}>Arrived at Supplier</Button>}
               {record.operation_type === 'supplier_pickup' && record.status === 'scheduled' && record.supplier_arrived_at && !record.supplier_handover && <Button busy={false} onClick={() => setHandover({ id: record.id, supplier_representative: '', phone: '', notes: '' })}>Record Handover</Button>}
               {record.operation_type === 'supplier_pickup' && record.status === 'scheduled' && record.supplier_handover && <Button busy={busy === record.id} onClick={() => void openLoading(record)}>Confirm Loaded</Button>}
-              {record.status === 'released' && <Button busy={busy === record.id} onClick={() => run(record, 'start')}>Start Journey</Button>}
-              {record.status === 'in_transit' && record.operation_type !== 'supplier_pickup' && <Button busy={busy === record.id} onClick={() => run(record, 'arrive')}>Arrived / Delivered</Button>}
+              {record.status === 'released' && <Button busy={busy === record.id} onClick={() => openMovement(record, 'start')}>Start Journey</Button>}
+              {record.status === 'in_transit' && record.operation_type !== 'supplier_pickup' && <Button busy={busy === record.id} onClick={() => openMovement(record, 'return')}>Arrived / Delivered</Button>}
             </> : branchReceiverMode ? <>
               {record.status === 'awaiting_receipt' && record.receiving_status !== 'received' && <Button busy={busy === record.id} onClick={() => void openReceipt(record)}>Receive Stock</Button>}
               {record.workflow_stage === 'variance' && !record.variance_review && <>
@@ -316,6 +334,7 @@ export default function StockTransfers({ driverMode = false, onNavigate, taskId 
       }}
     />}
     {exceptionDetail?.delivery_exception && <ExceptionActionPanel transfer={exceptionDetail} driverMode={driverMode} options={options} busy={busy === exceptionDetail.id} onClose={() => setExceptionDetail(null)} onAction={async (action, payload = {}) => { const updated = await run(exceptionDetail, action, payload); if (updated) setExceptionDetail(updated); }} />}
+    {movementAction && <MovementFuelDialog mode={movementAction.mode} vehicleLabel={movementAction.record.vehicle?.registration_number} draft={movementAction.draft} busy={busy === movementAction.record.id} error={error} onChange={(draft) => setMovementAction((current) => current ? { ...current, draft } : null)} onClose={() => setMovementAction(null)} onConfirm={() => void submitMovement()} />}
   </div>;
 }
 

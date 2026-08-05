@@ -5,6 +5,7 @@ from .admins import admins_bp
 from .assignments import assignments_bp
 from .auth import auth_bp
 from .bookings import bookings_bp
+from .branch_operations import branch_operations_bp
 from .calendar import calendar_bp
 from .collections import collections_bp
 from .company_funds import company_funds_bp
@@ -54,6 +55,7 @@ def register_blueprints(app: Flask) -> None:
     app.register_blueprint(assignments_bp, url_prefix="/api/assignments")
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(bookings_bp, url_prefix="/api/bookings")
+    app.register_blueprint(branch_operations_bp, url_prefix="/api/branch-operations")
     app.register_blueprint(calendar_bp, url_prefix="/api/calendar")
     app.register_blueprint(collections_bp, url_prefix="/api/collections")
     app.register_blueprint(company_funds_bp, url_prefix="/api/company-funds")

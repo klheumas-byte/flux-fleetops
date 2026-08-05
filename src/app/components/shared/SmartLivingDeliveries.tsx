@@ -107,6 +107,9 @@ type Run = {
   branch_id: string;
   delivery_date?: string;
   planned_departure_time?: string;
+  transport_method?: "VEHICLE" | "KAYA" | "OTHER_MANUAL";
+  manual_transport?: { provider_name?: string; handler_name?: string; phone?: string; handler_phone?: string; agreed_cost?: number | null; notes?: string } | null;
+  readiness?: "PLANNING_REQUIRED" | "PARTIALLY_PLANNED" | "READY";
   driver_id?: string;
   vehicle_id?: string;
   assigned_agent_ids?: string[];
@@ -277,6 +280,8 @@ export default function SmartLivingDeliveries() {
     branch_id: "",
     delivery_date: "",
     planned_departure_time: "",
+    transport_method: "VEHICLE" as "VEHICLE" | "KAYA" | "OTHER_MANUAL",
+    manual_transport: { provider_name: "", phone: "", agreed_cost: "", notes: "" },
     driver_id: "",
     vehicle_id: "",
     notes: "",
@@ -419,6 +424,8 @@ export default function SmartLivingDeliveries() {
           .filter(Boolean)
           .sort()[0] || "",
       planned_departure_time: "08:00",
+      transport_method: "VEHICLE",
+      manual_transport: { provider_name: "", phone: "", agreed_cost: "", notes: "" },
       driver_id: "",
       vehicle_id: "",
       notes: "",
@@ -474,11 +481,11 @@ export default function SmartLivingDeliveries() {
     if (
       !builder.delivery_date ||
       !builder.planned_departure_time ||
-      !builder.driver_id ||
-      !builder.vehicle_id
+      (builder.transport_method === "VEHICLE" && (!builder.driver_id || !builder.vehicle_id)) ||
+      (builder.transport_method !== "VEHICLE" && (!builder.manual_transport.provider_name || !builder.manual_transport.phone))
     )
       return setFormError(
-        "Assign a date, departure time, driver, and vehicle.",
+        builder.transport_method === "VEHICLE" ? "Assign a date, departure time, driver, and vehicle." : "Assign a date, departure time, and manual transport handler with phone.",
       );
     if (builder.stops.some((stop) => !stop.agent_id))
       return setFormError("Every customer stop needs a responsible agent.");
@@ -577,6 +584,8 @@ export default function SmartLivingDeliveries() {
           body: JSON.stringify({
             delivery_date: activeRun.delivery_date,
             planned_departure_time: activeRun.planned_departure_time,
+            transport_method: activeRun.transport_method || "VEHICLE",
+            manual_transport: activeRun.manual_transport,
             driver_id: activeRun.driver_id,
             vehicle_id: activeRun.vehicle_id,
             notes: activeRun.notes,
@@ -1514,6 +1523,12 @@ export default function SmartLivingDeliveries() {
                   }
                 />
               </Field>
+              <Field label="Transport method" required>
+                <select className={fieldClass} value={builder.transport_method} onChange={(e) => setBuilder({...builder, transport_method:e.target.value as "VEHICLE" | "KAYA" | "OTHER_MANUAL", driver_id:"", vehicle_id:""})}>
+                  <option value="VEHICLE">Company vehicle</option><option value="KAYA">Kaya</option><option value="OTHER_MANUAL">Other manual</option>
+                </select>
+              </Field>
+              {builder.transport_method === "VEHICLE" ? <>
               <Field label="Driver" required>
                 <select
                   className={fieldClass}
@@ -1562,6 +1577,12 @@ export default function SmartLivingDeliveries() {
                   ))}
                 </select>
               </Field>
+              </> : <>
+                <Field label="Handler / provider" required><input className={fieldClass} value={builder.manual_transport.provider_name} onChange={(e)=>setBuilder({...builder,manual_transport:{...builder.manual_transport,provider_name:e.target.value}})}/></Field>
+                <Field label="Handler phone" required><input className={fieldClass} value={builder.manual_transport.phone} onChange={(e)=>setBuilder({...builder,manual_transport:{...builder.manual_transport,phone:e.target.value}})}/></Field>
+                <Field label="Agreed cost"><input type="number" min="0" className={fieldClass} value={builder.manual_transport.agreed_cost} onChange={(e)=>setBuilder({...builder,manual_transport:{...builder.manual_transport,agreed_cost:e.target.value}})}/></Field>
+                <Field label="Transport notes"><input className={fieldClass} value={builder.manual_transport.notes} onChange={(e)=>setBuilder({...builder,manual_transport:{...builder.manual_transport,notes:e.target.value}})}/></Field>
+              </>}
             </div>
             <StopEditor
               stops={builder.stops}
@@ -1664,6 +1685,8 @@ export default function SmartLivingDeliveries() {
                     }
                   />
                 </Field>
+                <Field label="Transport method"><select className={fieldClass} value={activeRun.transport_method || "VEHICLE"} onChange={(e)=>setActiveRun({...activeRun,transport_method:e.target.value as Run["transport_method"],driver_id:"",vehicle_id:"",manual_transport:activeRun.manual_transport || {provider_name:"",phone:"",agreed_cost:null,notes:""}})}><option value="VEHICLE">Company vehicle</option><option value="KAYA">Kaya</option><option value="OTHER_MANUAL">Other manual</option></select></Field>
+                {(activeRun.transport_method || "VEHICLE") === "VEHICLE" ? <>
                 <Field label="Driver">
                   <select
                     className={fieldClass}
@@ -1707,6 +1730,12 @@ export default function SmartLivingDeliveries() {
                     ))}
                   </select>
                 </Field>
+                </> : <>
+                  <Field label="Handler / provider"><input className={fieldClass} value={activeRun.manual_transport?.provider_name || activeRun.manual_transport?.handler_name || ""} onChange={(e)=>setActiveRun({...activeRun,manual_transport:{...(activeRun.manual_transport || {}),provider_name:e.target.value}})}/></Field>
+                  <Field label="Handler phone"><input className={fieldClass} value={activeRun.manual_transport?.phone || activeRun.manual_transport?.handler_phone || ""} onChange={(e)=>setActiveRun({...activeRun,manual_transport:{...(activeRun.manual_transport || {}),phone:e.target.value}})}/></Field>
+                  <Field label="Agreed cost"><input type="number" min="0" className={fieldClass} value={activeRun.manual_transport?.agreed_cost ?? ""} onChange={(e)=>setActiveRun({...activeRun,manual_transport:{...(activeRun.manual_transport || {}),agreed_cost:e.target.value ? Number(e.target.value) : null}})}/></Field>
+                  <Field label="Transport notes"><input className={fieldClass} value={activeRun.manual_transport?.notes || ""} onChange={(e)=>setActiveRun({...activeRun,manual_transport:{...(activeRun.manual_transport || {}),notes:e.target.value}})}/></Field>
+                </>}
               </div>
               )}
               {planningEditable ? (
@@ -2091,7 +2120,7 @@ function RunCards({
               <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
                 <Metric
                   icon={Truck}
-                  label={run.vehicle?.name || "Vehicle needed"}
+                  label={(run.transport_method || "VEHICLE") === "VEHICLE" ? run.vehicle?.name || "Vehicle needed" : run.manual_transport?.provider_name || run.manual_transport?.handler_name || "Handler needed"}
                 />
                 <Metric
                   icon={Users}
@@ -2142,8 +2171,8 @@ function RunSummary({ run }: { run: Run }) {
   return (
     <section className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6" aria-label="Run summary">
       {[
-        ["Driver", run.driver?.name || "Unassigned"],
-        ["Vehicle", run.vehicle?.name || "Unassigned"],
+        ["Transport", (run.transport_method || "VEHICLE").replaceAll("_", " ")],
+        [(run.transport_method || "VEHICLE") === "VEHICLE" ? "Driver" : "Handler", (run.transport_method || "VEHICLE") === "VEHICLE" ? run.driver?.name || "Unassigned" : run.manual_transport?.provider_name || run.manual_transport?.handler_name || "Unassigned"],
         ["Departure", run.planned_departure_time || "Not set"],
         ["Customers", String(run.stops?.length || 0)],
         ["Products", String(productCount)],
@@ -2187,8 +2216,8 @@ function RunStatusPanel({
       `${gpsWarnings} stop(s) have no GPS. Continue with the area, address, and landmark.`,
     );
   const completed = [
-    run.driver_id ? "Driver assigned" : null,
-    run.vehicle_id ? "Vehicle assigned" : null,
+    (run.transport_method || "VEHICLE") === "VEHICLE" ? (run.driver_id ? "Driver assigned" : null) : (run.manual_transport?.provider_name ? "Manual handler assigned" : null),
+    (run.transport_method || "VEHICLE") === "VEHICLE" ? (run.vehicle_id ? "Vehicle assigned" : null) : "No company vehicle required",
     run.stops.length && run.stops.every((stop) => Boolean(stop.agent_id))
       ? "Responsible agents assigned"
       : null,
@@ -2461,6 +2490,7 @@ function ExecutionPanel({
   const [reason, setReason] = useState("");
   const [recipientName, setRecipientName] = useState("");
   const isDriver = run.driver_id === userId;
+  const isExecutor = isDriver || ((run.transport_method || "VEHICLE") !== "VEHICLE" && Boolean(run.assigned_agent_ids?.includes(userId || "")));
   const isBusy = (key: string) => busyAction === key;
   const terminal = ["COMPLETED", "PARTIAL", "PARTIALLY_COMPLETED", "FAILED", "SKIPPED"];
   const nextStop = [...run.stops]
@@ -2481,7 +2511,7 @@ function ExecutionPanel({
   if (
     !canIssue &&
     !canComplete &&
-    !(isDriver && (canAccept || canCustody || canStart || canUpdateStops))
+    !(isExecutor && (canAccept || canCustody || canStart || canUpdateStops))
   )
     return null;
 
@@ -2516,7 +2546,7 @@ function ExecutionPanel({
         </p>
       </div>
       <div className="flex flex-wrap gap-2">
-        {isDriver && canAccept && ["PUBLISHED", "LOCKED"].includes(run.status) && (
+        {isExecutor && canAccept && ["PUBLISHED", "LOCKED"].includes(run.status) && (
           <button disabled={isBusy("accept")} onClick={() => void action("accept", undefined, "Run assignment accepted.")} className="flex min-h-11 items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50">
             {isBusy("accept") && <Loader2 className="h-4 w-4 animate-spin" />} {isBusy("accept") ? "Accepting…" : "Accept assignment"}
           </button>
@@ -2526,7 +2556,7 @@ function ExecutionPanel({
             {isBusy("issue") && <Loader2 className="h-4 w-4 animate-spin" />} {isBusy("issue") ? "Issuing…" : "Issue ready items"}
           </button>
         )}
-        {isDriver && canCustody && run.status === "ITEMS_ISSUED" && run.custody_status !== "ACCEPTED" && (
+        {isExecutor && canCustody && run.status === "ITEMS_ISSUED" && run.custody_status !== "ACCEPTED" && (
           <>
             <button disabled={isBusy("custody")} onClick={() => void action("custody", { decision: "ACCEPT" }, "Issued-item custody accepted.")} className="flex min-h-11 items-center justify-center gap-2 rounded-lg bg-emerald-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50">
               {isBusy("custody") && <Loader2 className="h-4 w-4 animate-spin" />} {isBusy("custody") ? "Acknowledging…" : "Accept custody"}
@@ -2537,13 +2567,13 @@ function ExecutionPanel({
             </button>
           </>
         )}
-        {isDriver && canStart && run.status === "ITEMS_ISSUED" && run.custody_status === "ACCEPTED" && (
+        {isExecutor && canStart && run.status === "ITEMS_ISSUED" && run.custody_status === "ACCEPTED" && (
           <button disabled={isBusy("start")} onClick={() => void action("start", {}, "Delivery route started.")} className="flex min-h-11 items-center justify-center gap-2 rounded-lg bg-slate-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-50">
             {isBusy("start") && <Loader2 className="h-4 w-4 animate-spin" />} {isBusy("start") ? "Starting…" : "Start route"}
           </button>
         )}
       </div>
-      {isDriver && canUpdateStops && run.status === "IN_PROGRESS" && nextStop && (
+      {isExecutor && canUpdateStops && run.status === "IN_PROGRESS" && nextStop && (
         <div className="space-y-3 rounded-lg bg-white p-3">
           <div>
             <span className="text-xs font-semibold text-blue-700">NEXT · STOP {nextStop.sequence_number}</span>
@@ -2588,7 +2618,7 @@ function ExecutionPanel({
           )}
         </div>
       )}
-      {isDriver && canComplete && run.status === "IN_PROGRESS" && allFinished && (
+      {isExecutor && canComplete && run.status === "IN_PROGRESS" && allFinished && (
         <button disabled={isBusy("complete-execution")} onClick={() => void action("complete-execution", undefined, "Route execution completed and frozen for return handoff.")} className="flex min-h-11 items-center justify-center gap-2 rounded-lg bg-emerald-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-50">
           {isBusy("complete-execution") && <Loader2 className="h-4 w-4 animate-spin" />} {isBusy("complete-execution") ? "Confirming completion…" : "Complete route execution"}
         </button>
@@ -2610,6 +2640,7 @@ function AssignedStops({ run, userId }: { run: Run; userId?: string }) {
     : run.stops;
   return (
     <div className="space-y-3">
+      <div className="rounded-lg bg-slate-50 p-3 text-sm text-slate-700"><strong>{(run.transport_method || "VEHICLE").replaceAll("_", " ")}</strong> · {(run.transport_method || "VEHICLE") === "VEHICLE" ? `${run.driver?.name || "Driver pending"} · ${run.vehicle?.name || "Vehicle pending"}` : `${run.manual_transport?.provider_name || run.manual_transport?.handler_name || "Handler pending"} · ${run.manual_transport?.phone || run.manual_transport?.handler_phone || "Phone pending"}`}</div>
       <h3 className="font-semibold text-slate-900">
         {isAgent ? "Your customer stops" : "Ordered stops"}
       </h3>

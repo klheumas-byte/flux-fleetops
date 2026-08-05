@@ -35,7 +35,7 @@ from services.notification_service import ensure_notification_indexes, reconcile
 from services.personal_vehicle_service import ensure_personal_vehicle_indexes
 from services.stock_transfer_service import ensure_stock_transfer_indexes
 from services.driver_scope_service import ensure_driver_scope_indexes
-from services.smart_living_delivery_service import ensure_indexes as ensure_smart_living_delivery_indexes
+from services.smart_living_delivery_service import ensure_indexes as ensure_smart_living_delivery_indexes, reconcile_tomorrow_delivery_notifications
 from services.vehicle_operation_request_service import ensure_vehicle_operation_request_indexes
 from services.preventive_maintenance_service import (
     ensure_preventive_maintenance_indexes,
@@ -148,8 +148,9 @@ def create_app(config_name: str | None = None) -> Flask:
 
             try:
                 reconcile_legacy_actionable_notifications()
+                reconcile_tomorrow_delivery_notifications()
             except Exception:
-                app.logger.exception("[Flux Startup] Legacy notification reconciliation failed.")
+                app.logger.exception("[Flux Startup] Notification reconciliation failed.")
 
             seed_started_at = perf_counter()
             try:

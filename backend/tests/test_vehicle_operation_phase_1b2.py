@@ -51,6 +51,7 @@ class Phase1B2Base(unittest.TestCase):
             patch.object(operations, "resolve_vehicle_availability", return_value={"is_available": True, "blocking_reasons": []}),
             patch.object(stock, "resolve_vehicle_availability", return_value={"is_available": True, "blocking_reasons": []}),
             patch.object(movement_service, "resolve_vehicle_availability", return_value={"is_available": True, "blocking_reasons": []}),
+            patch.object(movement_service, "resolve_driver_availability", return_value={"is_available": True, "blocking_reasons": []}),
             patch("services.movement_custody_service.transfer_movement_custody"),
             patch("services.movement_custody_service.accept_movement_custody"),
             patch("services.movement_custody_service.return_movement_custody"),
@@ -470,8 +471,8 @@ class StockTransferTests(Phase1B2Base):
         )
         stock.acknowledge_stock_transfer(created["id"], current_user_id=str(self.driver_id), current_role="driver")
         stock.release_stock_transfer(created["id"], {}, current_user_id=str(self.admin_id), current_role="admin")
-        stock.start_stock_transfer(created["id"], {}, current_user_id=str(self.driver_id), current_role="driver")
-        stock.arrive_stock_transfer(created["id"], {}, current_user_id=str(self.driver_id), current_role="driver")
+        stock.start_stock_transfer(created["id"], {"opening_fuel_level": 6}, current_user_id=str(self.driver_id), current_role="driver")
+        stock.arrive_stock_transfer(created["id"], {"closing_fuel_level": 5}, current_user_id=str(self.driver_id), current_role="driver")
         return created, scheduled
 
     def report_single_exception(self, exception_type):
@@ -581,10 +582,10 @@ class StockTransferTests(Phase1B2Base):
         self.assertEqual(self.db.waybills.find_one({"_id": ObjectId(loaded["linked_waybill_id"])})["status"], "loaded")
         custody = self.db.stock_transfers.find_one({"_id": ObjectId(created["id"])})["custody_history"]
         self.assertEqual(custody[0]["event"], "supplier_to_driver")
-        started = stock.start_stock_transfer(created["id"], {}, current_user_id=str(self.driver_id), current_role="driver")
+        started = stock.start_stock_transfer(created["id"], {"opening_fuel_level": 6}, current_user_id=str(self.driver_id), current_role="driver")
         self.assertEqual(started["workflow_stage"], "in_transit")
         self.assertEqual(self.db.operation_assignments.find_one({"source_type": "supplier_pickup"})["status"], "in_transit")
-        delivered = stock.arrive_stock_transfer(created["id"], {}, current_user_id=str(self.driver_id), current_role="driver")
+        delivered = stock.arrive_stock_transfer(created["id"], {"closing_fuel_level": 5}, current_user_id=str(self.driver_id), current_role="driver")
         self.assertEqual(delivered["workflow_stage"], "delivered")
         self.assertEqual(self.db.operation_assignments.find_one({"source_type": "supplier_pickup"})["status"], "delivered")
         repeated_supplier_arrival = stock.mark_supplier_pickup_arrived(
@@ -781,7 +782,7 @@ class StockTransferTests(Phase1B2Base):
         self.assertEqual(admin_loaded.exception.status_code, 403)
         loaded = stock.release_stock_transfer(created["id"], {}, current_user_id=str(self.driver_id), current_role="driver")
         self.assertEqual(loaded["loaded_quantities"][0]["quantity"], 2)
-        started = stock.start_stock_transfer(created["id"], {}, current_user_id=str(self.driver_id), current_role="driver")
+        started = stock.start_stock_transfer(created["id"], {"opening_fuel_level": 6}, current_user_id=str(self.driver_id), current_role="driver")
         self.assertEqual(started["workflow_stage"], "in_transit")
 
     def test_supplier_pickup_validation_and_duplicate_prevention(self):
@@ -887,6 +888,43 @@ class StockTransferTests(Phase1B2Base):
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(self.db.stock_transfers.find_one({"_id": transfer_oid})["inventory_posting_status"], "awaiting_external_inventory_posting")
 
+    def test_resolved_delivery_exception_does_not_block_final_completion(self):
+        transfer_id = ObjectId()
+        exception_id = ObjectId()
+        movement_id = ObjectId()
+        self.db.delivery_exceptions.insert_one({
+            "_id": exception_id,
+            "stock_transfer_id": transfer_id,
+            "status": "resolved",
+            "operational_status": "resolved",
+        })
+        self.db.vehicle_movements.insert_one({
+            "_id": movement_id,
+            "status": "returned",
+            "vehicle_id": self.vehicle_id,
+        })
+        self.db.stock_transfers.insert_one({
+            "_id": transfer_id,
+            "transfer_id": "ST-RESOLVED",
+            "status": "awaiting_receipt",
+            "receiving_status": "received",
+            "actual_receiver": {"full_name": "Branch Receiver"},
+            "linked_delivery_exception_id": exception_id,
+            "delivery_exception_status": "resolved",
+            "linked_vehicle_movement_id": movement_id,
+            "version": 1,
+        })
+
+        with patch("services.vehicle_movement_service.close_vehicle_movement"):
+            completed = stock.complete_stock_transfer(
+                str(transfer_id), {},
+                current_user_id=str(self.admin_id), current_role="admin",
+            )
+
+        persisted = self.db.stock_transfers.find_one({"_id": transfer_id})
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(persisted["linked_delivery_exception_id"], exception_id)
+
     def test_stock_transfer_lifecycle_keeps_linked_waybill_in_sync(self):
         created = self.create_transfer(); self.approve_transfer(created["id"])
         scheduled = stock.schedule_stock_transfer(
@@ -902,8 +940,8 @@ class StockTransferTests(Phase1B2Base):
             patch("services.vehicle_movement_service.close_vehicle_movement"),
         ):
             stock.release_stock_transfer(created["id"], {}, current_user_id=str(self.admin_id), current_role="admin")
-            stock.start_stock_transfer(created["id"], {}, current_user_id=str(self.driver_id), current_role="driver")
-            stock.arrive_stock_transfer(created["id"], {}, current_user_id=str(self.driver_id), current_role="driver")
+            stock.start_stock_transfer(created["id"], {"opening_fuel_level": 6}, current_user_id=str(self.driver_id), current_role="driver")
+            stock.arrive_stock_transfer(created["id"], {"closing_fuel_level": 5}, current_user_id=str(self.driver_id), current_role="driver")
             self.db.stock_transfers.update_one({"_id": ObjectId(created["id"])}, {"$set": {"recipient": None}})
             stock.receive_stock_transfer(created["id"], {"received_items": [{"item_id": "OIL", "quantity": 8}], "receiver": "Warehouse Clerk"}, current_user_id=str(self.admin_id), current_role="admin")
             stock.complete_stock_transfer(created["id"], {"variance_resolution": "Shortage accepted"}, current_user_id=str(self.admin_id), current_role="admin")
@@ -978,8 +1016,8 @@ class StockTransferTests(Phase1B2Base):
             patch("services.vehicle_movement_service.return_vehicle_movement"),
         ):
             stock.release_stock_transfer(created["id"], {}, current_user_id=str(self.admin_id), current_role="admin")
-            stock.start_stock_transfer(created["id"], {}, current_user_id=str(self.driver_id), current_role="driver")
-            stock.arrive_stock_transfer(created["id"], {}, current_user_id=str(self.driver_id), current_role="driver")
+            stock.start_stock_transfer(created["id"], {"opening_fuel_level": 6}, current_user_id=str(self.driver_id), current_role="driver")
+            stock.arrive_stock_transfer(created["id"], {"closing_fuel_level": 5}, current_user_id=str(self.driver_id), current_role="driver")
         self.db.stock_transfers.update_one({"_id": ObjectId(created["id"])}, {"$set": {"recipient": None}})
         received = stock.receive_stock_transfer(created["id"], {
             "received_items": [{"item_id": "OIL", "quantity": 8}], "receiver": "Warehouse Clerk",
@@ -1125,7 +1163,7 @@ class StockTransferTests(Phase1B2Base):
         self.assertEqual(locked.exception.status_code, 409)
         self.assertEqual(self.db.stock_transfers.find_one({"_id": ObjectId(created["id"])})["recipient"]["full_name"], "New Recipient")
         stock.release_stock_transfer(created["id"], {}, current_user_id=str(self.admin_id), current_role="admin")
-        stock.start_stock_transfer(created["id"], {}, current_user_id=str(self.driver_id), current_role="driver")
+        stock.start_stock_transfer(created["id"], {"opening_fuel_level": 6}, current_user_id=str(self.driver_id), current_role="driver")
         after_departure = {**changed, "primary_phone": "+233 55 555 5555"}
         with self.assertRaises(ApiError):
             stock.update_stock_transfer_recipient(
@@ -1147,22 +1185,22 @@ class StockTransferTests(Phase1B2Base):
             current_user_id=str(self.admin_id), current_role="admin",
         )
         with self.assertRaises(ApiError):
-            stock.start_stock_transfer(created["id"], {}, current_user_id=str(self.driver_id), current_role="driver")
+            stock.start_stock_transfer(created["id"], {"opening_fuel_level": 6}, current_user_id=str(self.driver_id), current_role="driver")
         stock.acknowledge_stock_transfer(created["id"], current_user_id=str(self.driver_id), current_role="driver")
         loaded = stock.release_stock_transfer(created["id"], {}, current_user_id=str(self.admin_id), current_role="admin")
         self.assertEqual(loaded["workflow_stage"], "loaded")
         self.assertEqual(self.db.waybills.find_one({"_id": ObjectId(assigned["linked_waybill_id"])})["status"], "loaded")
-        self.assertEqual(self.db.vehicle_movements.find_one({"_id": ObjectId(assigned["linked_vehicle_movement_id"])})["status"], "checked_out")
+        self.assertEqual(self.db.vehicle_movements.find_one({"_id": ObjectId(assigned["linked_vehicle_movement_id"])})["status"], "approved")
 
-        started = stock.start_stock_transfer(created["id"], {}, current_user_id=str(self.driver_id), current_role="driver")
-        repeated_start = stock.start_stock_transfer(created["id"], {}, current_user_id=str(self.driver_id), current_role="driver")
+        started = stock.start_stock_transfer(created["id"], {"opening_fuel_level": 6}, current_user_id=str(self.driver_id), current_role="driver")
+        repeated_start = stock.start_stock_transfer(created["id"], {"opening_fuel_level": 6}, current_user_id=str(self.driver_id), current_role="driver")
         self.assertEqual(started["status"], "in_transit")
         self.assertEqual(self.db.waybills.find_one({"_id": ObjectId(assigned["linked_waybill_id"])})["status"], "in_transit")
         self.assertEqual(self.db.vehicle_movements.find_one({"_id": ObjectId(assigned["linked_vehicle_movement_id"])})["status"], "in_progress")
         self.assertEqual(len([item for item in repeated_start["audit_log"] if item["event"] == "journey_started"]), 1)
 
-        delivered = stock.arrive_stock_transfer(created["id"], {}, current_user_id=str(self.driver_id), current_role="driver")
-        repeated_delivery = stock.arrive_stock_transfer(created["id"], {}, current_user_id=str(self.driver_id), current_role="driver")
+        delivered = stock.arrive_stock_transfer(created["id"], {"closing_fuel_level": 5}, current_user_id=str(self.driver_id), current_role="driver")
+        repeated_delivery = stock.arrive_stock_transfer(created["id"], {"closing_fuel_level": 5}, current_user_id=str(self.driver_id), current_role="driver")
         self.assertEqual(delivered["workflow_stage"], "delivered")
         self.assertEqual(delivered["dispatch_status"], "delivered")
         waybill = self.db.waybills.find_one({"_id": ObjectId(assigned["linked_waybill_id"])})
@@ -1396,8 +1434,8 @@ class StockTransferTests(Phase1B2Base):
         replacement_id = str(replacement["linked_stock_transfer_id"])
         stock.acknowledge_stock_transfer(replacement_id, current_user_id=str(self.driver_id), current_role="driver")
         stock.release_stock_transfer(replacement_id, {}, current_user_id=str(self.admin_id), current_role="admin")
-        stock.start_stock_transfer(replacement_id, {}, current_user_id=str(self.driver_id), current_role="driver")
-        stock.arrive_stock_transfer(replacement_id, {}, current_user_id=str(self.driver_id), current_role="driver")
+        stock.start_stock_transfer(replacement_id, {"opening_fuel_level": 6}, current_user_id=str(self.driver_id), current_role="driver")
+        stock.arrive_stock_transfer(replacement_id, {"closing_fuel_level": 5}, current_user_id=str(self.driver_id), current_role="driver")
         verification = {
             "items": [{"item_id": "OIL", "received_quantity": 2, "condition": "correct"}],
             "actual_receiver": {"full_name": "Replacement Receiver", "primary_contact": "+233 24 222 1111", "initials": "RR"},
@@ -1440,10 +1478,10 @@ class StockTransferTests(Phase1B2Base):
         self.assertEqual(request["driver_id"], self.driver_id)
         self.assertEqual(self.db.waybills.find_one({"_id": request["linked_waybill_id"]})["status"], "approved")
         self.assertEqual(self.db.vehicle_movements.find_one({"_id": request["linked_vehicle_movement_id"]})["status"], "approved")
-        stock.transition_delivery_exception_return(created["id"], "in_transit", {}, current_user_id=str(self.driver_id), current_role="driver")
+        stock.transition_delivery_exception_return(created["id"], "in_transit", {"opening_fuel_level": 6}, current_user_id=str(self.driver_id), current_role="driver")
         self.assertEqual(self.db.waybills.find_one({"_id": request["linked_waybill_id"]})["status"], "in_transit")
         self.assertEqual(self.db.vehicle_movements.find_one({"_id": request["linked_vehicle_movement_id"]})["status"], "in_progress")
-        stock.transition_delivery_exception_return(created["id"], "returned", {}, current_user_id=str(self.driver_id), current_role="driver")
+        stock.transition_delivery_exception_return(created["id"], "returned", {"closing_fuel_level": 5}, current_user_id=str(self.driver_id), current_role="driver")
         completed = stock.transition_delivery_exception_return(created["id"], "received_at_origin", {}, current_user_id=str(self.admin_id), current_role="admin")
         request = self.db.delivery_return_requests.find_one({})
         self.assertEqual(request["status"], "received_at_origin")
@@ -1457,8 +1495,8 @@ class StockTransferTests(Phase1B2Base):
         with self.assertRaises(ApiError):
             stock.take_delivery_exception_action(created["id"], {"action": "dispatch_replacement"}, current_user_id=str(self.admin_id), current_role="admin")
         stock.take_delivery_exception_action(created["id"], {"action": "return_item"}, current_user_id=str(self.admin_id), current_role="admin")
-        stock.transition_delivery_exception_return(created["id"], "in_transit", {}, current_user_id=str(self.driver_id), current_role="driver")
-        stock.transition_delivery_exception_return(created["id"], "returned", {}, current_user_id=str(self.driver_id), current_role="driver")
+        stock.transition_delivery_exception_return(created["id"], "in_transit", {"opening_fuel_level": 6}, current_user_id=str(self.driver_id), current_role="driver")
+        stock.transition_delivery_exception_return(created["id"], "returned", {"closing_fuel_level": 5}, current_user_id=str(self.driver_id), current_role="driver")
         stock.transition_delivery_exception_return(created["id"], "received_at_origin", {}, current_user_id=str(self.admin_id), current_role="admin")
         result = stock.take_delivery_exception_action(created["id"], {"action": "dispatch_replacement"}, current_user_id=str(self.admin_id), current_role="admin")
         self.assertEqual(result["delivery_exception"]["current_action"]["action"], "dispatch_replacement")

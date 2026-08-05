@@ -1,5 +1,7 @@
 from bson import ObjectId
 
+from utils.operational_request_types import normalize_type_token
+
 from utils.fuel_levels import build_fuel_level_details, normalize_fuel_level_eighths
 
 
@@ -13,6 +15,18 @@ def _serialize_datetime(value):
     if value is None:
         return None
     return value.isoformat() if hasattr(value, "isoformat") else value
+
+
+def _serialize_value(value):
+    if isinstance(value, ObjectId):
+        return str(value)
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _serialize_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_serialize_value(item) for item in value]
+    return value
 
 
 def _serialize_custody_event(event_document: dict) -> dict:
@@ -92,7 +106,8 @@ def serialize_vehicle_movement(movement_document: dict) -> dict:
         "dispatch_job_id": _serialize_reference_id(movement_document.get("dispatch_job_id")),
         "dispatch_request_id": _serialize_reference_id(movement_document.get("dispatch_request_id")),
         "reservation_id": _serialize_reference_id(movement_document.get("reservation_id")),
-        "movement_type": movement_document.get("movement_type"),
+        "movement_type": normalize_type_token(movement_document.get("movement_type")),
+        "movement_category": movement_document.get("movement_category") or str(movement_document.get("movement_type") or "").upper(),
         "status": movement_document.get("status"),
         "requested_departure_time": _serialize_datetime(movement_document.get("requested_departure_time")),
         "actual_departure_at": _serialize_datetime(movement_document.get("actual_departure_at") or movement_document.get("departure_time")),
@@ -155,6 +170,10 @@ def serialize_vehicle_movement(movement_document: dict) -> dict:
         "estimated_fuel_consumed": movement_document.get("estimated_fuel_consumed"),
         "estimated_fuel_efficiency": movement_document.get("estimated_fuel_efficiency"),
         "fuel_summary_status": movement_document.get("fuel_summary_status"),
+        "distance_travelled": movement_document.get("distance_travelled"),
+        "duration_minutes": movement_document.get("duration_minutes"),
+        "late_return": movement_document.get("late_return"),
+        "fuel_difference": movement_document.get("fuel_difference"),
         "delivery_status": movement_document.get("delivery_status"),
         "delivered_at": _serialize_datetime(movement_document.get("delivered_at")),
         "delivery_note": movement_document.get("delivery_note"),
@@ -169,6 +188,10 @@ def serialize_vehicle_movement(movement_document: dict) -> dict:
         "returned_at": _serialize_datetime(movement_document.get("returned_at")),
         "closed_by": _serialize_reference_id(movement_document.get("closed_by")),
         "closed_at": _serialize_datetime(movement_document.get("closed_at")),
+        "started_at": _serialize_datetime(movement_document.get("started_at") or movement_document.get("departure_time")),
+        "completed_at": _serialize_datetime(movement_document.get("completed_at") or movement_document.get("closed_at")),
+        "status_history": _serialize_value(movement_document.get("status_history") or []),
+        "audit_log": _serialize_value(movement_document.get("audit_log") or []),
         "return_checklist": movement_document.get("return_checklist"),
         "created_by": _serialize_reference_id(movement_document.get("created_by")),
         "created_at": _serialize_datetime(movement_document.get("created_at")),

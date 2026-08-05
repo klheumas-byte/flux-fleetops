@@ -8,6 +8,7 @@ from pymongo.errors import DuplicateKeyError
 
 from extensions import get_collection
 from utils.api_error import ApiError
+from utils.operational_request_types import PERSONAL_USE_TYPE, normalize_type_token
 
 
 SOURCE_MOVEMENT_OWNERSHIP = {
@@ -71,6 +72,11 @@ SOURCE_MOVEMENT_OWNERSHIP = {
         "owning_module": "operational_requests",
         "source_module": "operational_requests",
     },
+    PERSONAL_USE_TYPE: {
+        "source_type": "vehicle_operation_request",
+        "owning_module": "operational_requests",
+        "source_module": "personal_vehicle_use",
+    },
 }
 SOURCE_MANAGED_MOVEMENT_TYPES = frozenset(SOURCE_MOVEMENT_OWNERSHIP)
 SUPPORTED_SOURCE_TYPES = frozenset(
@@ -86,7 +92,7 @@ SOURCE_OWNERSHIP_FIELDS = frozenset(
 
 
 def get_movement_source_ownership(movement_type: str | None) -> dict | None:
-    normalized_type = str(movement_type or "").strip().lower()
+    normalized_type = normalize_type_token(movement_type)
     rule = SOURCE_MOVEMENT_OWNERSHIP.get(normalized_type)
     return dict(rule) if rule else None
 
@@ -303,6 +309,12 @@ def build_dispatch_movement_defaults(
         or job_document.get("started_at")
     )
     started = initial_status == "in_progress"
+    financial_type = str(job_document.get("dispatch_financial_type") or "external_paid").lower()
+    movement_category = {
+        "external_paid": "COMMERCIAL_DISPATCH",
+        "complimentary": "COMPLIMENTARY_DISPATCH",
+        "cost_contribution": "COST_CONTRIBUTION_DISPATCH",
+    }.get(financial_type, "COMMERCIAL_DISPATCH")
     return {
         "vehicle_id": job_document["vehicle_id"],
         "driver_id": job_document.get("driver_id"),
@@ -313,6 +325,7 @@ def build_dispatch_movement_defaults(
         "dispatch_request_id": job_document.get("dispatch_request_id"),
         "reservation_id": job_document.get("vehicle_reservation_id"),
         "movement_type": "customer_dispatch",
+        "movement_category": movement_category,
         "status": initial_status,
         "requested_departure_time": job_document.get("scheduled_start_time"),
         "actual_departure_at": actual_departure if started else None,

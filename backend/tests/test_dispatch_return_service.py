@@ -119,10 +119,17 @@ class DispatchReturnConfirmationTests(unittest.TestCase):
         movement_collection = MagicMock()
 
         def update_movement(query, update):
-            if self.movement["status"] not in query["status"]["$in"]:
-                return SimpleNamespace(matched_count=0)
             self.movement.update(update["$set"])
             return SimpleNamespace(matched_count=1)
+
+        def return_movement(_movement_id, payload, **_kwargs):
+            self.movement.update({
+                "status": "returned",
+                "actual_return_time": payload["actual_return_time"],
+                "closing_odometer": payload.get("closing_odometer"),
+                "closing_fuel_level": payload["closing_fuel_level"],
+            })
+            return dict(self.movement)
 
         movement_collection.update_one.side_effect = update_movement
         job_collection = MagicMock()
@@ -143,8 +150,9 @@ class DispatchReturnConfirmationTests(unittest.TestCase):
             patch("services.dispatch_financial_service.ensure_dispatch_financial_record"),
             patch("services.dispatch_fuel_service.refresh_dispatch_fuel_summary"),
             patch("services.movement_custody_service.return_movement_custody"),
+            patch("services.vehicle_movement_service.return_vehicle_movement", side_effect=return_movement),
         ]
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patches[9]:
             result = service.confirm_dispatch_return(
                 str(self.job_id),
                 self.payload,

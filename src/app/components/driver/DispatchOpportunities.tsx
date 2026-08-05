@@ -24,7 +24,7 @@ import {
   updateDriverDispatchOpportunity,
   withdrawDriverDispatchOpportunity,
 } from '../../lib/dispatch-opportunity-api';
-import { Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle } from '../ui/drawer';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../ui/dialog';
 import { Skeleton } from '../ui/skeleton';
 
 type OpportunityFormState = {
@@ -32,7 +32,10 @@ type OpportunityFormState = {
   customer_phone: string;
   customer_company: string;
   pickup_location: string;
+  pickup_landmark: string;
   destination: string;
+  destination_landmark: string;
+  trip_purpose: 'PASSENGER' | 'GOODS' | 'MIXED' | 'OTHER';
   load_description: string;
   load_type: string;
   load_weight_category: string;
@@ -41,6 +44,11 @@ type OpportunityFormState = {
   preferred_pickup_date: string;
   preferred_pickup_time: string;
   proposed_charge: string;
+  dispatch_classification: 'COMMERCIAL' | 'COMPLIMENTARY' | 'COST_CONTRIBUTION';
+  complimentary_reason: string;
+  contribution_amount: string;
+  contribution_purpose: string;
+  contribution_payment_method: string;
   payment_status: string;
   notes: string;
 };
@@ -72,8 +80,11 @@ function initialFormState(options?: DispatchOpportunityOptionsResponse | null): 
     customer_name: '',
     customer_phone: '',
     customer_company: '',
-    pickup_location: options?.pickup_locations?.[0] || '',
+    pickup_location: '',
+    pickup_landmark: '',
     destination: '',
+    destination_landmark: '',
+    trip_purpose: 'GOODS',
     load_description: '',
     load_type: options?.load_types?.[0] || '',
     load_weight_category: options?.load_weight_categories?.[0] || '',
@@ -82,6 +93,11 @@ function initialFormState(options?: DispatchOpportunityOptionsResponse | null): 
     preferred_pickup_date: new Date().toISOString().slice(0, 10),
     preferred_pickup_time: new Date().toISOString().slice(11, 16),
     proposed_charge: '',
+    dispatch_classification: 'COMMERCIAL',
+    complimentary_reason: '',
+    contribution_amount: '',
+    contribution_purpose: '',
+    contribution_payment_method: '',
     payment_status: options?.payment_statuses?.[0] || '',
     notes: '',
   };
@@ -92,8 +108,11 @@ function buildFormState(record: DispatchOpportunityRecord, options?: DispatchOpp
     customer_name: record.customer_name || '',
     customer_phone: record.customer_phone || '',
     customer_company: record.customer_company || '',
-    pickup_location: record.pickup_location || options?.pickup_locations?.[0] || '',
+    pickup_location: record.pickup_location || '',
+    pickup_landmark: record.pickup_landmark || '',
     destination: record.destination || '',
+    destination_landmark: record.destination_landmark || '',
+    trip_purpose: record.trip_purpose || 'GOODS',
     load_description: record.load_description || '',
     load_type: record.load_type || options?.load_types?.[0] || '',
     load_weight_category: record.load_weight_category || options?.load_weight_categories?.[0] || '',
@@ -102,6 +121,11 @@ function buildFormState(record: DispatchOpportunityRecord, options?: DispatchOpp
     preferred_pickup_date: record.preferred_pickup_date || new Date().toISOString().slice(0, 10),
     preferred_pickup_time: record.preferred_pickup_time || new Date().toISOString().slice(11, 16),
     proposed_charge: record.proposed_charge != null ? String(record.proposed_charge) : '',
+    dispatch_classification: record.dispatch_classification || 'COMMERCIAL',
+    complimentary_reason: record.complimentary_reason || '',
+    contribution_amount: record.contribution_amount != null ? String(record.contribution_amount) : '',
+    contribution_purpose: record.contribution_purpose || '',
+    contribution_payment_method: record.contribution_payment_method || '',
     payment_status: record.payment_status || options?.payment_statuses?.[0] || '',
     notes: record.notes || '',
   };
@@ -241,7 +265,10 @@ export default function DispatchOpportunities() {
     customer_phone: form.customer_phone,
     customer_company: form.customer_company || undefined,
     pickup_location: form.pickup_location || undefined,
+    pickup_landmark: form.pickup_landmark || undefined,
     destination: form.destination || undefined,
+    destination_landmark: form.destination_landmark || undefined,
+    trip_purpose: form.trip_purpose,
     load_description: form.load_description || undefined,
     load_type: form.load_type || undefined,
     load_weight_category: form.load_weight_category || undefined,
@@ -250,6 +277,11 @@ export default function DispatchOpportunities() {
     preferred_pickup_date: form.preferred_pickup_date || undefined,
     preferred_pickup_time: form.preferred_pickup_time || undefined,
     proposed_charge: form.proposed_charge ? Number(form.proposed_charge) : undefined,
+    dispatch_classification: form.dispatch_classification,
+    complimentary_reason: form.dispatch_classification === 'COMPLIMENTARY' ? form.complimentary_reason : undefined,
+    contribution_amount: form.dispatch_classification === 'COST_CONTRIBUTION' && form.contribution_amount ? Number(form.contribution_amount) : undefined,
+    contribution_purpose: form.dispatch_classification === 'COST_CONTRIBUTION' ? form.contribution_purpose : undefined,
+    contribution_payment_method: form.dispatch_classification === 'COST_CONTRIBUTION' ? form.contribution_payment_method : undefined,
     payment_status: form.payment_status || undefined,
     notes: form.notes || undefined,
     status: targetStatus,
@@ -461,16 +493,16 @@ export default function DispatchOpportunities() {
         )}
       </div>
 
-      <Drawer open={isCreating || Boolean(selectedOpportunityId)} onOpenChange={(open) => { if (!open) closeDrawer(); }}>
-        <DrawerContent className="max-h-[100dvh] overflow-hidden border-t border-gray-200 bg-white sm:max-h-[92vh]">
-          <DrawerHeader className="border-b border-gray-200 px-4 py-4 text-left sm:px-6">
-            <DrawerTitle>{isCreating ? 'New Dispatch Opportunity' : detail?.opportunity_id || 'Dispatch Opportunity'}</DrawerTitle>
-            <DrawerDescription>
+      <Dialog open={isCreating || Boolean(selectedOpportunityId)} onOpenChange={(open) => { if (!open) closeDrawer(); }}>
+        <DialogContent className="flex h-[92dvh] w-[calc(100vw-1rem)] max-w-none flex-col gap-0 overflow-hidden rounded-xl border border-gray-200 bg-white p-0 sm:w-[calc(100vw-2rem)] md:h-auto md:max-h-[90dvh] md:max-w-[800px]">
+          <DialogHeader className="shrink-0 border-b border-gray-200 px-4 py-4 pr-12 text-left sm:px-6 sm:pr-14">
+            <DialogTitle>{isCreating ? 'New Dispatch Opportunity' : detail?.opportunity_id || 'Dispatch Opportunity'}</DialogTitle>
+            <DialogDescription>
               Save your field lead as a draft or submit it for operations review. Drivers cannot create final dispatch jobs from this screen.
-            </DrawerDescription>
-          </DrawerHeader>
+            </DialogDescription>
+          </DialogHeader>
 
-          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6">
+          <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain px-4 py-4 sm:px-6 [scrollbar-gutter:stable]">
             {isLoadingDetail ? (
               <div className="space-y-3">
                 <Skeleton className="h-8 w-full" />
@@ -499,20 +531,22 @@ export default function DispatchOpportunities() {
 
                 <section>
                   <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.16em] text-gray-500">Opportunity Form</h3>
-                  <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                  <div className="grid min-w-0 grid-cols-1 gap-4 md:grid-cols-2">
                     <InputField label="Customer Name" value={form.customer_name} onChange={(value) => setForm((current) => ({ ...current, customer_name: value }))} disabled={!canEdit} />
                     <InputField label="Customer Phone" value={form.customer_phone} onChange={(value) => setForm((current) => ({ ...current, customer_phone: value }))} disabled={!canEdit} />
                     <InputField label="Customer Company" value={form.customer_company} onChange={(value) => setForm((current) => ({ ...current, customer_company: value }))} disabled={!canEdit} />
-                    <SelectField label="Pickup Location" value={form.pickup_location} onChange={(value) => setForm((current) => ({ ...current, pickup_location: value }))} disabled={!canEdit}>
-                      <option value="">Select pickup location</option>
-                      {(options?.pickup_locations || []).map((item) => <option key={item} value={item}>{item}</option>)}
-                    </SelectField>
+                    <InputField label="Pickup Location" value={form.pickup_location} onChange={(value) => setForm((current) => ({ ...current, pickup_location: value }))} disabled={!canEdit} />
+                    <InputField label="Pickup Landmark" value={form.pickup_landmark} onChange={(value) => setForm((current) => ({ ...current, pickup_landmark: value }))} disabled={!canEdit} />
                     <InputField label="Destination" value={form.destination} onChange={(value) => setForm((current) => ({ ...current, destination: value }))} disabled={!canEdit} />
+                    <InputField label="Destination Landmark" value={form.destination_landmark} onChange={(value) => setForm((current) => ({ ...current, destination_landmark: value }))} disabled={!canEdit} />
+                    <SelectField label="Trip Purpose" value={form.trip_purpose} onChange={(value) => setForm((current) => ({ ...current, trip_purpose: value as OpportunityFormState['trip_purpose'] }))} disabled={!canEdit}>
+                      {(options?.trip_purposes || ['PASSENGER', 'GOODS', 'MIXED', 'OTHER']).map((item) => <option key={item} value={item}>{item.replaceAll('_', ' ')}</option>)}
+                    </SelectField>
                     <SelectField label="Vehicle Type Needed" value={form.vehicle_type_needed} onChange={(value) => setForm((current) => ({ ...current, vehicle_type_needed: value }))} disabled={!canEdit}>
                       <option value="">Select vehicle type</option>
                       {(options?.vehicle_types || []).map((item) => <option key={item} value={item}>{item}</option>)}
                     </SelectField>
-                    <SelectField label="Load Type" value={form.load_type} onChange={(value) => setForm((current) => ({ ...current, load_type: value }))} disabled={!canEdit}>
+                    {['GOODS', 'MIXED'].includes(form.trip_purpose) && <><SelectField label="Load Type" value={form.load_type} onChange={(value) => setForm((current) => ({ ...current, load_type: value }))} disabled={!canEdit}>
                       <option value="">Select load type</option>
                       {(options?.load_types || []).map((item) => <option key={item} value={item}>{item}</option>)}
                     </SelectField>
@@ -523,18 +557,23 @@ export default function DispatchOpportunities() {
                     <SelectField label="Size Category" value={form.load_size_category} onChange={(value) => setForm((current) => ({ ...current, load_size_category: value }))} disabled={!canEdit}>
                       <option value="">Select size category</option>
                       {(options?.load_size_categories || []).map((item) => <option key={item} value={item}>{item}</option>)}
-                    </SelectField>
+                    </SelectField></>}
                     <InputField label="Preferred Pickup Date" type="date" value={form.preferred_pickup_date} onChange={(value) => setForm((current) => ({ ...current, preferred_pickup_date: value }))} disabled={!canEdit} />
                     <InputField label="Preferred Pickup Time" type="time" value={form.preferred_pickup_time} onChange={(value) => setForm((current) => ({ ...current, preferred_pickup_time: value }))} disabled={!canEdit} />
-                    <InputField label="Proposed Charge" type="number" value={form.proposed_charge} onChange={(value) => setForm((current) => ({ ...current, proposed_charge: value }))} disabled={!canEdit} />
-                    <SelectField label="Payment Status" value={form.payment_status} onChange={(value) => setForm((current) => ({ ...current, payment_status: value }))} disabled={!canEdit}>
+                    <SelectField label="Dispatch Classification" value={form.dispatch_classification} onChange={(value) => setForm((current) => ({ ...current, dispatch_classification: value as OpportunityFormState['dispatch_classification'] }))} disabled={!canEdit}>
+                      {(options?.dispatch_classifications || ['COMMERCIAL', 'COMPLIMENTARY', 'COST_CONTRIBUTION']).map((item) => <option key={item} value={item}>{item.replaceAll('_', ' ')}</option>)}
+                    </SelectField>
+                    {form.dispatch_classification === 'COMMERCIAL' && <InputField label="Proposed Charge" type="number" value={form.proposed_charge} onChange={(value) => setForm((current) => ({ ...current, proposed_charge: value }))} disabled={!canEdit} />}
+                    {form.dispatch_classification === 'COMPLIMENTARY' && <InputField label="Complimentary Reason" value={form.complimentary_reason} onChange={(value) => setForm((current) => ({ ...current, complimentary_reason: value }))} disabled={!canEdit} />}
+                    {form.dispatch_classification === 'COST_CONTRIBUTION' && <><InputField label="Contribution Amount" type="number" value={form.contribution_amount} onChange={(value) => setForm((current) => ({ ...current, contribution_amount: value }))} disabled={!canEdit} /><InputField label="Contribution Purpose" value={form.contribution_purpose} onChange={(value) => setForm((current) => ({ ...current, contribution_purpose: value }))} disabled={!canEdit} /><InputField label="Payment Method (optional)" value={form.contribution_payment_method} onChange={(value) => setForm((current) => ({ ...current, contribution_payment_method: value }))} disabled={!canEdit} /></>}
+                    {form.dispatch_classification === 'COMMERCIAL' && <SelectField label="Payment Status" value={form.payment_status} onChange={(value) => setForm((current) => ({ ...current, payment_status: value }))} disabled={!canEdit}>
                       <option value="">Select payment status</option>
                       {(options?.payment_statuses || []).map((item) => <option key={item} value={item}>{item}</option>)}
-                    </SelectField>
-                    <div className="lg:col-span-2">
+                    </SelectField>}
+                    {['GOODS', 'MIXED'].includes(form.trip_purpose) && <div className="md:col-span-2">
                       <TextAreaField label="Load / Goods Description" value={form.load_description} onChange={(value) => setForm((current) => ({ ...current, load_description: value }))} disabled={!canEdit} />
-                    </div>
-                    <div className="lg:col-span-2">
+                    </div>}
+                    <div className="md:col-span-2">
                       <TextAreaField label="Notes" value={form.notes} onChange={(value) => setForm((current) => ({ ...current, notes: value }))} disabled={!canEdit} />
                     </div>
                   </div>
@@ -549,7 +588,7 @@ export default function DispatchOpportunities() {
             )}
           </div>
 
-          <div className="border-t border-gray-200 bg-white px-4 py-4 sm:px-6">
+          <div className="shrink-0 border-t border-gray-200 bg-white px-4 py-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] sm:px-6 sm:py-4">
             <div className="flex flex-col-reverse gap-3 sm:flex-row sm:flex-wrap sm:justify-between">
               <button
                 type="button"
@@ -595,8 +634,8 @@ export default function DispatchOpportunities() {
               </div>
             </div>
           </div>
-        </DrawerContent>
-      </Drawer>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -630,7 +669,7 @@ function InputField({
         value={value}
         onChange={(event) => onChange(event.target.value)}
         disabled={disabled}
-        className="w-full rounded-lg border border-gray-300 px-4 py-2.5 text-sm disabled:cursor-not-allowed disabled:bg-gray-50"
+        className="min-h-11 w-full min-w-0 rounded-lg border border-gray-300 px-4 py-2.5 text-base disabled:cursor-not-allowed disabled:bg-gray-50"
       />
     </div>
   );
@@ -656,7 +695,7 @@ function SelectField({
         value={value}
         onChange={(event) => onChange(event.target.value)}
         disabled={disabled}
-        className="w-full rounded-lg border border-gray-300 px-4 py-2.5 text-sm disabled:cursor-not-allowed disabled:bg-gray-50"
+        className="min-h-11 w-full min-w-0 rounded-lg border border-gray-300 px-4 py-2.5 text-base disabled:cursor-not-allowed disabled:bg-gray-50"
       >
         {children}
       </select>
@@ -682,7 +721,7 @@ function TextAreaField({
         value={value}
         onChange={(event) => onChange(event.target.value)}
         disabled={disabled}
-        className="min-h-[100px] w-full rounded-lg border border-gray-300 px-4 py-3 text-sm disabled:cursor-not-allowed disabled:bg-gray-50"
+        className="min-h-[100px] w-full min-w-0 rounded-lg border border-gray-300 px-4 py-3 text-base disabled:cursor-not-allowed disabled:bg-gray-50"
       />
     </div>
   );

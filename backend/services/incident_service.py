@@ -13,7 +13,7 @@ from models.incident import serialize_incident
 from models.user import serialize_user
 from models.vehicle import serialize_vehicle
 from services.maintenance_service import create_maintenance_job
-from services.notification_service import notify_roles
+from services.notification_service import notify_roles, resolve_action_notifications
 from utils.api_error import ApiError
 from utils.file_validation import validate_attachment_list
 from services.cloudflare_images_service import (
@@ -417,6 +417,28 @@ def _build_vehicle_insurance_snapshot(vehicle_document: dict, *, incident_type: 
     }
 
 
+def _build_audit_log_entry(
+    document: dict,
+    *,
+    action: str,
+    actor_id: str,
+    actor_role: str,
+    changes: list[str] | None = None,
+    note: str | None = None,
+    reason: str | None = None,
+):
+    return {
+        "id": str(uuid4()),
+        "action": action,
+        "actor_id": _to_object_id(actor_id, "actor_id"),
+        "actor_role": actor_role,
+        "note": note,
+        "reason": reason,
+        "changes": changes or [],
+        "created_at": now_utc(),
+    }
+
+
 def _append_audit_log(
     document: dict,
     *,
@@ -427,16 +449,15 @@ def _append_audit_log(
     note: str | None = None,
     reason: str | None = None,
 ):
-    entry = {
-        "id": str(uuid4()),
-        "action": action,
-        "actor_id": _to_object_id(actor_id, "actor_id"),
-        "actor_role": actor_role,
-        "note": note,
-        "reason": reason,
-        "changes": changes or [],
-        "created_at": now_utc(),
-    }
+    entry = _build_audit_log_entry(
+        document,
+        action=action,
+        actor_id=actor_id,
+        actor_role=actor_role,
+        changes=changes,
+        note=note,
+        reason=reason,
+    )
     incidents_collection().update_one({"_id": document["_id"]}, {"$push": {"audit_logs": entry}})
     document.setdefault("audit_logs", []).append(entry)
 
@@ -477,13 +498,34 @@ def _status_for_incident_vehicle(document: dict) -> str:
     return "available"
 
 
-def _sync_vehicle_status_for_incident(document: dict):
-    vehicle_document = _get_vehicle_document(document.get("vehicle_id"))
-    target_status = document.get("vehicle_status_after_incident") or _status_for_incident_vehicle(document)
+def _resolved_vehicle_status_for_incident(document: dict, *, vehicle_document: dict) -> str:
+    if document.get("status") not in {"resolved", "rejected", "closed"}:
+        return document.get("vehicle_status_after_incident") or _status_for_incident_vehicle(document)
+    other_open_incident = incidents_collection().find_one(
+        {
+            "_id": {"$ne": document.get("_id")},
+            "vehicle_id": document.get("vehicle_id"),
+            "status": {"$nin": ["resolved", "rejected", "closed"]},
+            "record_scope": {"$ne": "personal"},
+        },
+        {"status": 1, "can_vehicle_move": 1, "vehicle_status_after_incident": 1},
+    )
+    if other_open_incident:
+        return _status_for_incident_vehicle(other_open_incident)
+    requested = document.get("vehicle_status_after_incident")
+    if requested in {"available", "assigned"}:
+        return requested
+    return "assigned" if vehicle_document.get("assigned_driver_id") else "available"
+
+
+def _sync_vehicle_status_for_incident(document: dict, *, vehicle_document: dict | None = None, target_status: str | None = None):
+    vehicle_document = vehicle_document or _get_vehicle_document(document.get("vehicle_id"))
+    target_status = target_status or _resolved_vehicle_status_for_incident(document, vehicle_document=vehicle_document)
     vehicles_collection().update_one(
         {"_id": vehicle_document["_id"]},
         {"$set": {"status": target_status, "updated_at": now_utc()}},
     )
+    vehicle_document["status"] = target_status
     document["vehicle_status_after_incident"] = target_status
 
 
@@ -1071,10 +1113,17 @@ def update_incident(incident_id: str, payload: dict, *, current_user_id: str, cu
     document.update({key: value for key, value in update_fields.items() if not key.startswith("$push_")})
     _update_outstanding_claim_fields(document)
     _update_downtime_fields(document, vehicle_document=vehicle_document)
+    vehicle_status_changed = "status" in update_fields or "vehicle_status_after_incident" in update_fields
+    target_vehicle_status = document.get("vehicle_status_after_incident")
+    if vehicle_status_changed:
+        target_vehicle_status = _resolved_vehicle_status_for_incident(document, vehicle_document=vehicle_document)
+        document["vehicle_status_after_incident"] = target_vehicle_status
 
     update_fields["outstanding_claim"] = document.get("outstanding_claim")
     update_fields["downtime_days"] = document.get("downtime_days")
     update_fields["estimated_revenue_lost"] = document.get("estimated_revenue_lost")
+    if vehicle_status_changed:
+        update_fields["vehicle_status_after_incident"] = target_vehicle_status
     update_fields["updated_by"] = _to_object_id(current_user_id, "updated_by")
     update_fields["updated_at"] = now_utc()
 
@@ -1085,17 +1134,7 @@ def update_incident(incident_id: str, payload: dict, *, current_user_id: str, cu
     if update_fields.get("$push_attachments"):
         mongo_update.setdefault("$push", {})["attachments"] = {"$each": update_fields["$push_attachments"]}
         document.setdefault("attachments", []).extend(update_fields["$push_attachments"])
-
-    try:
-        incidents_collection().update_one({"_id": document["_id"]}, mongo_update)
-    except Exception:
-        for attachment in update_fields.get("$push_attachments") or []:
-            if attachment.get("provider_asset_id"):
-                delete_image(attachment.get("provider_asset_id"))
-        raise
-    if "status" in update_fields or "vehicle_status_after_incident" in update_fields:
-        _sync_vehicle_status_for_incident(document)
-    _append_audit_log(
+    audit_entry = _build_audit_log_entry(
         document,
         action="incident_updated",
         actor_id=current_user_id,
@@ -1104,7 +1143,29 @@ def update_incident(incident_id: str, payload: dict, *, current_user_id: str, cu
         note=_normalize_string(payload.get("investigation_note")),
         reason=_normalize_string(payload.get("claim_eligibility_override_reason")),
     )
-    return _enrich_incident(document)
+    mongo_update.setdefault("$push", {})["audit_logs"] = audit_entry
+
+    try:
+        incidents_collection().update_one({"_id": document["_id"]}, mongo_update)
+    except Exception:
+        for attachment in update_fields.get("$push_attachments") or []:
+            if attachment.get("provider_asset_id"):
+                delete_image(attachment.get("provider_asset_id"))
+        raise
+    document.setdefault("audit_logs", []).append(audit_entry)
+    if vehicle_status_changed:
+        _sync_vehicle_status_for_incident(document, vehicle_document=vehicle_document, target_status=target_vehicle_status)
+    if document.get("status") in {"resolved", "rejected", "closed"}:
+        resolve_action_notifications(
+            "incident",
+            document["_id"],
+            resolution="completed" if document.get("status") in {"resolved", "closed"} else "cancelled",
+            completed_by=current_user_id,
+        )
+    return _enrich_incident(
+        document,
+        vehicle_map={str(vehicle_document["_id"]): vehicle_document},
+    )
 
 
 def create_maintenance_job_from_incident(incident_id: str, *, current_user_id: str, current_role: str) -> dict:

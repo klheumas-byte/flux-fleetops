@@ -436,10 +436,11 @@ def _validate_driver_fault_scope(current_user_id: str, vehicle_id: str | None, d
         permitted_movement = vehicle_movements_collection().find_one(
             {
                 "vehicle_id": resolved_vehicle_object_id,
-                "status": {"$in": ["approved", "checked_out", "in_progress"]},
+                "status": {"$in": ["approved", "checked_out", "in_progress", "returned"]},
                 "$or": [
                     {"movement_custodian_id": current_user_object_id},
                     {"driver_id": current_user_object_id},
+                    {"returned_by": current_user_object_id, "movement_type": "personal_use"},
                 ],
             },
             {"_id": 1},

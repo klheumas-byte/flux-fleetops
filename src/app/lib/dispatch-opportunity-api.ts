@@ -26,7 +26,10 @@ export interface DispatchOpportunityRecord {
   customer_phone?: string | null;
   customer_company?: string | null;
   pickup_location?: string | null;
+  pickup_landmark?: string | null;
   destination?: string | null;
+  destination_landmark?: string | null;
+  trip_purpose?: 'PASSENGER' | 'GOODS' | 'MIXED' | 'OTHER';
   load_description?: string | null;
   load_type?: string | null;
   load_weight_category?: string | null;
@@ -35,6 +38,12 @@ export interface DispatchOpportunityRecord {
   preferred_pickup_date?: string | null;
   preferred_pickup_time?: string | null;
   proposed_charge?: number | null;
+  dispatch_classification?: 'COMMERCIAL' | 'COMPLIMENTARY' | 'COST_CONTRIBUTION';
+  complimentary_reason?: string | null;
+  contribution_amount?: number | null;
+  contribution_purpose?: string | null;
+  contribution_payment_method?: string | null;
+  contribution_reconciliation_status?: string | null;
   approved_charge?: number | null;
   payment_status?: string | null;
   notes?: string | null;
@@ -76,6 +85,8 @@ export interface DispatchOpportunityOptionsResponse {
   payment_statuses: string[];
   statuses: DispatchOpportunityStatus[];
   driver_editable_statuses: DispatchOpportunityStatus[];
+  trip_purposes: Array<'PASSENGER' | 'GOODS' | 'MIXED' | 'OTHER'>;
+  dispatch_classifications: Array<'COMMERCIAL' | 'COMPLIMENTARY' | 'COST_CONTRIBUTION'>;
 }
 
 export interface DispatchOpportunityListResponse {

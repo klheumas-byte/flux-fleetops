@@ -10,6 +10,8 @@ from services.user_service import (
 )
 from utils.decorators import role_required
 from utils.responses import success_response
+from services.vehicle_availability_service import resolve_driver_availability, update_driver_manual_availability
+from utils.api_error import ApiError
 
 
 drivers_bp = Blueprint("drivers", __name__)
@@ -79,3 +81,23 @@ def update_driver_status(driver_id: str):
         data={"driver": driver},
         message="Driver status updated successfully.",
     )
+
+
+@drivers_bp.patch("/<driver_id>/live-availability")
+@role_required("owner", "admin", "operations_administrator", "operations_manager", "driver")
+def update_driver_live_availability_route(driver_id: str):
+    availability = update_driver_manual_availability(
+        driver_id,
+        request.get_json(silent=True) or {},
+        current_user_id=get_jwt_identity(),
+        current_role=get_jwt().get("role"),
+    )
+    return success_response(data={"availability": availability}, message="Driver live availability updated.")
+
+
+@drivers_bp.get("/<driver_id>/live-availability")
+@role_required("owner", "admin", "operations_administrator", "operations_manager", "driver")
+def get_driver_live_availability_route(driver_id: str):
+    if get_jwt().get("role") == "driver" and str(get_jwt_identity()) != str(driver_id):
+        raise ApiError("You can only view your own live availability.", status_code=403)
+    return success_response(data={"availability": resolve_driver_availability(driver_id)})

@@ -35,6 +35,7 @@ const OperationalRequests = lazy(() => import('./components/shared/OperationalRe
 const StockTransfers = lazy(() => import('./components/shared/StockTransfers'));
 const SupplierPickup = lazy(() => import('./components/shared/SupplierPickup'));
 const OperationalTasks = lazy(() => import('./components/driver/OperationalTasks'));
+const PersonalVehicleUse = lazy(() => import('./components/driver/PersonalVehicleUse'));
 const DigitalWaybills = lazy(() => import('./components/shared/DigitalWaybills'));
 const DispatchFinancials = lazy(() => import('./components/admin/DispatchFinancials'));
 const DispatchOpportunitiesReview = lazy(() => import('./components/admin/DispatchOpportunitiesReview'));
@@ -87,6 +88,8 @@ const RbacConsole = lazy(() => import('./components/admin/RbacConsole'));
 const RoleDashboard = lazy(() => import('./components/admin/RoleDashboard'));
 const SmartLivingDeliveries = lazy(() => import('./components/shared/SmartLivingDeliveries'));
 const BranchManagement = lazy(() => import('./components/admin/BranchManagement'));
+const BranchOperations = lazy(() => import('./components/branch/BranchOperations'));
+const BranchTeam = lazy(() => import('./components/branch/BranchTeam'));
 
 export type UserRole = SessionUserRole;
 export type AuthUser = SessionUser;
@@ -460,7 +463,10 @@ export default function App() {
         >
           <Suspense fallback={loadingFallback}>
           {currentPage === 'dashboard' && (userRole === 'owner' || userRole === 'admin') && renderProtectedPage('dashboard', <Dashboard onNavigate={navigateToPage} userRole={userRole} />)}
-          {currentPage === 'dashboard' && !['owner','admin','dispatcher','customer_service'].includes(userRole) && currentUser && renderProtectedPage('dashboard', <RoleDashboard user={currentUser} onNavigate={navigateToPage} />)}
+          {currentPage === 'dashboard' && userRole === 'branch_manager' && renderProtectedPage('branch-operations', <BranchOperations onNavigate={navigateToPage} />)}
+          {currentPage === 'dashboard' && !['owner','admin','dispatcher','customer_service','branch_manager'].includes(userRole) && currentUser && renderProtectedPage('dashboard', <RoleDashboard user={currentUser} onNavigate={navigateToPage} />)}
+          {currentPage === 'branch-operations' && renderProtectedPage('branch-operations', <BranchOperations onNavigate={navigateToPage} />)}
+          {currentPage === 'branch-team' && renderProtectedPage('branch-team', <BranchTeam />)}
           {currentPage === 'users' && renderProtectedPage('users', <RbacConsole view="users" />)}
           {currentPage === 'roles-permissions' && renderProtectedPage('roles-permissions', <RbacConsole view="roles-permissions" />)}
           {currentPage === 'branches' && renderProtectedPage('branches', <BranchManagement />)}
@@ -554,6 +560,7 @@ export default function App() {
             {currentPage === 'my-dispatch-opportunities' && renderProtectedPage('my-dispatch-opportunities', <DispatchOpportunities />)}
             {currentPage === 'my-dispatches' && renderProtectedPage('my-dispatches', <MyDispatches />)}
             {currentPage === 'my-operational-tasks' && renderProtectedPage('my-operational-tasks', <OperationalTasks onNavigate={navigateToPage} />)}
+            {currentPage === 'personal-vehicle-use' && renderProtectedPage('personal-vehicle-use', <PersonalVehicleUse />)}
             {currentPage === 'smart-living-deliveries' && renderProtectedPage('smart-living-deliveries', <SmartLivingDeliveries />)}
             {currentPage === 'digital-waybills' && renderProtectedPage('digital-waybills', <DigitalWaybills driverMode />)}
             {currentPage === 'create-ride' && renderProtectedPage('create-ride', <CreateRide />)}

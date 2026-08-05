@@ -1257,9 +1257,10 @@ def release_stock_transfer(transfer_id, payload, *, current_user_id, current_rol
     if not document.get("acknowledged_at"): raise ApiError("The assigned driver must acknowledge custody before stock release.", status_code=400)
     if is_pickup and not document.get("pickup_confirmation"):
         raise ApiError("Confirm collected pickup quantities before marking this pickup as Loaded.", status_code=400)
-    movement = _ensure_movement(document, current_user_id=current_user_id)
-    from services.vehicle_movement_service import check_out_vehicle_movement
-    check_out_vehicle_movement(str(movement["_id"]), payload or {}, current_user_id=current_user_id, current_role=current_role)
+    # Loading/releasing stock is a business-workflow event.  It must not imply
+    # that the vehicle has physically departed; the shared start endpoint owns
+    # that transition once the driver records departure fuel.
+    _ensure_movement(document, current_user_id=current_user_id)
     waybill, waybill_collection = _linked_waybill(document)
     if is_pickup:
         if (payload or {}).get("loaded_quantities") is not None or (payload or {}).get("loaded_items") is not None:
@@ -2351,8 +2352,18 @@ def complete_stock_transfer(transfer_id, payload, *, current_user_id, current_ro
     if current_role not in {"owner", "admin"}: raise ApiError("Only an owner or admin can complete stock transfers.", status_code=403)
     document = _get(transfer_id)
     if document.get("status") == "completed": return serialize_stock_transfer(document, include_items=True)
-    if document.get("linked_delivery_exception_id"):
-        raise ApiError("An open Delivery Exception blocks transfer completion.", status_code=409)
+    exception_id = document.get("linked_delivery_exception_id")
+    if exception_id:
+        exception = get_collection("delivery_exceptions").find_one(
+            {"_id": exception_id}, {"status": 1, "operational_status": 1}
+        )
+        exception_resolved = (
+            (exception or {}).get("status") == "resolved"
+            or (exception or {}).get("operational_status") == "resolved"
+            or (not exception and document.get("delivery_exception_status") == "resolved")
+        )
+        if not exception_resolved:
+            raise ApiError("An open Delivery Exception blocks transfer completion.", status_code=409)
     if document.get("recipient") and not document.get("actual_receiver"):
         raise ApiError("Actual receiver verification is required before completion.", status_code=409)
     if document.get("status") != "awaiting_receipt" or document.get("receiving_status") != "received": raise ApiError("Receiving confirmation is required before completion.", status_code=400)

@@ -89,6 +89,36 @@ interface AssignmentHandoversResponse {
   };
 }
 
+interface LiveAvailability {
+  is_available: boolean;
+  operational_state: string;
+  primary_reason?: string | null;
+  manual_availability_status: 'available' | 'temporarily_unavailable';
+  manual_availability_reason?: string | null;
+  manual_availability_note?: string | null;
+  manual_availability_updated_at?: string | null;
+  manual_availability_updated_by?: string | null;
+}
+
+type AvailabilityKind = 'vehicle' | 'driver';
+type AvailabilityReason = { value: string; label: string };
+
+const VEHICLE_AVAILABILITY_REASONS: AvailabilityReason[] = [
+  { value: 'fueling', label: 'Fueling' },
+  { value: 'cleaning', label: 'Cleaning' },
+  { value: 'parked_secured', label: 'Parked / Secured' },
+  { value: 'minor_issue', label: 'Minor Issue' },
+  { value: 'other', label: 'Other' },
+];
+
+const DRIVER_AVAILABILITY_REASONS: AvailabilityReason[] = [
+  { value: 'driver_unavailable', label: 'Driver unavailable' },
+  { value: 'break', label: 'Break' },
+  { value: 'off_duty', label: 'Off duty' },
+  { value: 'personal_reason', label: 'Personal reason' },
+  { value: 'other', label: 'Other' },
+];
+
 type PreventiveScheduleStatus = 'active' | 'due_soon' | 'due' | 'overdue' | 'completed' | 'paused';
 
 interface PreventiveSchedule {
@@ -152,6 +182,123 @@ function formatLabel(value: string) {
     .split('_')
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(' ');
+}
+
+function AvailabilityCard({
+  label,
+  availability,
+  reasons,
+  editorOpen,
+  selectedReason,
+  note,
+  busy,
+  error,
+  success,
+  onOpenEditor,
+  onCancelEditor,
+  onReasonChange,
+  onNoteChange,
+  onConfirmUnavailable,
+  onMarkAvailable,
+}: {
+  label: string;
+  availability: LiveAvailability | null;
+  reasons: AvailabilityReason[];
+  editorOpen: boolean;
+  selectedReason: string;
+  note: string;
+  busy: boolean;
+  error: string;
+  success: string;
+  onOpenEditor: () => void;
+  onCancelEditor: () => void;
+  onReasonChange: (reason: string) => void;
+  onNoteChange: (note: string) => void;
+  onConfirmUnavailable: () => void;
+  onMarkAvailable: () => void;
+}) {
+  const manualStatus = availability?.manual_availability_status || 'available';
+  const effectiveStatus = availability?.primary_reason
+    || formatLabel(availability?.operational_state || 'available');
+  const currentReason = availability?.manual_availability_reason
+    ? formatLabel(availability.manual_availability_reason)
+    : null;
+
+  return (
+    <div className="rounded-lg bg-slate-50 p-4">
+      <p className="text-sm font-semibold text-slate-900">{label}</p>
+      <dl className="mt-2 space-y-1 text-sm">
+        <div className="flex flex-wrap justify-between gap-2">
+          <dt className="text-slate-500">Manual state</dt>
+          <dd className="font-medium text-slate-800">{formatLabel(manualStatus)}</dd>
+        </div>
+        <div className="flex flex-wrap justify-between gap-2">
+          <dt className="text-slate-500">Effective state</dt>
+          <dd className="text-right font-medium text-slate-800">{effectiveStatus}</dd>
+        </div>
+        {manualStatus === 'temporarily_unavailable' && currentReason ? (
+          <div className="flex flex-wrap justify-between gap-2">
+            <dt className="text-slate-500">Reason</dt>
+            <dd className="text-right font-medium text-amber-800">
+              {currentReason}{availability?.manual_availability_note ? ` — ${availability.manual_availability_note}` : ''}
+            </dd>
+          </div>
+        ) : null}
+      </dl>
+
+      {editorOpen ? (
+        <div className="mt-4 space-y-3 rounded-lg border border-amber-200 bg-white p-3">
+          <label className="block text-sm font-medium text-slate-700">
+            Temporary unavailability reason
+            <select
+              value={selectedReason}
+              onChange={(event) => onReasonChange(event.target.value)}
+              disabled={busy}
+              className="mt-1 min-h-11 w-full rounded-lg border border-slate-300 bg-white px-3 text-base"
+            >
+              {reasons.map((reason) => <option key={reason.value} value={reason.value}>{reason.label}</option>)}
+            </select>
+          </label>
+          {selectedReason === 'other' ? (
+            <label className="block text-sm font-medium text-slate-700">
+              Short note
+              <input
+                value={note}
+                onChange={(event) => onNoteChange(event.target.value)}
+                disabled={busy}
+                maxLength={200}
+                className="mt-1 min-h-11 w-full rounded-lg border border-slate-300 px-3 text-base"
+                placeholder="Add a short note (optional)"
+              />
+            </label>
+          ) : null}
+          <div className="flex flex-wrap justify-end gap-2">
+            <button type="button" onClick={onCancelEditor} disabled={busy} className="min-h-11 rounded-lg border border-slate-300 px-3 text-sm font-medium text-slate-700 disabled:opacity-60">Cancel</button>
+            <button type="button" onClick={onConfirmUnavailable} disabled={busy || !selectedReason} className="min-h-11 rounded-lg bg-amber-600 px-3 text-sm font-semibold text-white disabled:opacity-60">
+              {busy ? 'Saving...' : 'Confirm'}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-4">
+          {manualStatus === 'available' ? (
+            <button type="button" disabled={busy} onClick={onOpenEditor} className="min-h-11 rounded-lg border border-amber-300 bg-amber-50 px-3 text-sm font-medium text-amber-800 disabled:opacity-60">
+              Mark Temporarily Unavailable
+            </button>
+          ) : (
+            <button type="button" disabled={busy} onClick={onMarkAvailable} className="min-h-11 rounded-lg bg-emerald-600 px-3 text-sm font-medium text-white disabled:opacity-60">
+              {busy ? 'Saving...' : 'Mark Available'}
+            </button>
+          )}
+        </div>
+      )}
+      {error ? <p className="mt-3 text-sm text-red-600" role="alert">{error}</p> : null}
+      {success ? <p className="mt-3 text-sm text-emerald-700" role="status">{success}</p> : null}
+      {availability?.manual_availability_updated_at ? (
+        <p className="mt-2 text-xs text-slate-500">Updated {new Date(availability.manual_availability_updated_at).toLocaleString()}</p>
+      ) : null}
+    </div>
+  );
 }
 
 function statusBadgeClass(status: MaintenanceStatus) {
@@ -250,6 +397,17 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
   const [handoverError, setHandoverError] = useState('');
   const [handoverActionId, setHandoverActionId] = useState<string | null>(null);
   const vehicleId = vehicle?.id || '';
+  const [vehicleAvailability, setVehicleAvailability] = useState<LiveAvailability | null>(null);
+  const [driverAvailability, setDriverAvailability] = useState<LiveAvailability | null>(null);
+  const [availabilityEditor, setAvailabilityEditor] = useState<AvailabilityKind | null>(null);
+  const [vehicleAvailabilityReason, setVehicleAvailabilityReason] = useState('fueling');
+  const [driverAvailabilityReason, setDriverAvailabilityReason] = useState('driver_unavailable');
+  const [vehicleAvailabilityNote, setVehicleAvailabilityNote] = useState('');
+  const [driverAvailabilityNote, setDriverAvailabilityNote] = useState('');
+  const [availabilityBusy, setAvailabilityBusy] = useState<Record<AvailabilityKind, boolean>>({ vehicle: false, driver: false });
+  const availabilityMutationRef = useRef<Record<AvailabilityKind, boolean>>({ vehicle: false, driver: false });
+  const [availabilityError, setAvailabilityError] = useState<Record<AvailabilityKind, string>>({ vehicle: '', driver: '' });
+  const [availabilitySuccess, setAvailabilitySuccess] = useState<Record<AvailabilityKind, string>>({ vehicle: '', driver: '' });
 
   const formatValue = (value: string | number | null | undefined) =>
     value === null || value === undefined || value === '' ? 'Not provided' : String(value);
@@ -274,6 +432,75 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
   useEffect(() => {
     void loadAssignmentHandovers();
   }, []);
+
+  const loadLiveAvailability = async () => {
+    if (!vehicleId || !currentUser?.id) return;
+    const [vehicleResponse, driverResponse] = await Promise.all([
+      apiRequest<{ availability: LiveAvailability }>(`/vehicles/${vehicleId}/live-availability`, {
+        componentName: 'MyVehicle', requestLabel: 'vehicle-live-availability', dedupeKey: `vehicle-live-availability:${vehicleId}`,
+      }),
+      apiRequest<{ availability: LiveAvailability }>(`/drivers/${currentUser.id}/live-availability`, {
+        componentName: 'MyVehicle', requestLabel: 'driver-live-availability', dedupeKey: `driver-live-availability:${currentUser.id}`,
+      }),
+    ]);
+    const nextVehicle = vehicleResponse.data.availability;
+    const nextDriver = driverResponse.data.availability;
+    setVehicleAvailability(nextVehicle);
+    setDriverAvailability(nextDriver);
+    if (nextVehicle.manual_availability_reason && VEHICLE_AVAILABILITY_REASONS.some((item) => item.value === nextVehicle.manual_availability_reason)) {
+      setVehicleAvailabilityReason(nextVehicle.manual_availability_reason);
+    }
+    if (nextDriver.manual_availability_reason && DRIVER_AVAILABILITY_REASONS.some((item) => item.value === nextDriver.manual_availability_reason)) {
+      setDriverAvailabilityReason(nextDriver.manual_availability_reason);
+    }
+    setVehicleAvailabilityNote(nextVehicle.manual_availability_note || '');
+    setDriverAvailabilityNote(nextDriver.manual_availability_note || '');
+  };
+
+  useEffect(() => {
+    if (!vehicleId || !currentUser?.id) return;
+    void loadLiveAvailability().catch((caught) => {
+      const message = caught instanceof ApiRequestError ? caught.message : 'Unable to load live availability.';
+      setAvailabilityError({ vehicle: message, driver: message });
+    });
+  }, [currentUser?.id, vehicleId]);
+
+  const setManualAvailability = async (kind: 'vehicle' | 'driver', status: 'available' | 'temporarily_unavailable') => {
+    if (!vehicleId || !currentUser?.id || availabilityMutationRef.current[kind]) return;
+    availabilityMutationRef.current[kind] = true;
+    setAvailabilityBusy((current) => ({ ...current, [kind]: true }));
+    setAvailabilityError((current) => ({ ...current, [kind]: '' }));
+    setAvailabilitySuccess((current) => ({ ...current, [kind]: '' }));
+    try {
+      const reason = kind === 'vehicle' ? vehicleAvailabilityReason : driverAvailabilityReason;
+      const note = kind === 'vehicle' ? vehicleAvailabilityNote : driverAvailabilityNote;
+      const body = JSON.stringify({
+        status,
+        reason: status === 'temporarily_unavailable' ? reason : undefined,
+        note: status === 'temporarily_unavailable' && reason === 'other' ? note : undefined,
+      });
+      if (kind === 'vehicle') {
+        await apiRequest<{ availability: LiveAvailability }>(`/vehicles/${vehicleId}/live-availability`, { method: 'PATCH', body });
+      } else {
+        await apiRequest<{ availability: LiveAvailability }>(`/drivers/${currentUser.id}/live-availability`, { method: 'PATCH', body });
+      }
+      await loadLiveAvailability();
+      setAvailabilityEditor(null);
+      setAvailabilitySuccess((current) => ({
+        ...current,
+        [kind]: `${kind === 'vehicle' ? 'Vehicle' : 'Driver'} availability updated successfully.`,
+      }));
+      window.dispatchEvent(new CustomEvent('flux-availability-changed'));
+    } catch (caught) {
+      setAvailabilityError((current) => ({
+        ...current,
+        [kind]: caught instanceof ApiRequestError ? caught.message : 'Unable to update live availability.',
+      }));
+    } finally {
+      availabilityMutationRef.current[kind] = false;
+      setAvailabilityBusy((current) => ({ ...current, [kind]: false }));
+    }
+  };
 
   const handleAssignmentHandover = async (assignment: AssignmentHandover) => {
     setHandoverActionId(assignment.id);
@@ -571,6 +798,45 @@ export default function MyVehicle({ currentUser, activeAssignment }: MyVehiclePr
       </div>
 
       <div className="mx-auto max-w-4xl space-y-6 px-4">
+        {hasAssignedVehicle && <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div><h2 className="font-semibold text-slate-900">Live availability</h2><p className="mt-1 text-sm text-slate-500">Manual availability is your status setting. Effective availability also includes reservations, active movements, dispatches and maintenance.</p></div>
+          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+            <AvailabilityCard
+              label="Vehicle"
+              availability={vehicleAvailability}
+              reasons={VEHICLE_AVAILABILITY_REASONS}
+              editorOpen={availabilityEditor === 'vehicle'}
+              selectedReason={vehicleAvailabilityReason}
+              note={vehicleAvailabilityNote}
+              busy={availabilityBusy.vehicle}
+              error={availabilityError.vehicle}
+              success={availabilitySuccess.vehicle}
+              onOpenEditor={() => { setAvailabilityEditor('vehicle'); setAvailabilityError((current) => ({ ...current, vehicle: '' })); setAvailabilitySuccess((current) => ({ ...current, vehicle: '' })); }}
+              onCancelEditor={() => setAvailabilityEditor(null)}
+              onReasonChange={setVehicleAvailabilityReason}
+              onNoteChange={setVehicleAvailabilityNote}
+              onConfirmUnavailable={() => void setManualAvailability('vehicle', 'temporarily_unavailable')}
+              onMarkAvailable={() => void setManualAvailability('vehicle', 'available')}
+            />
+            <AvailabilityCard
+              label="Driver"
+              availability={driverAvailability}
+              reasons={DRIVER_AVAILABILITY_REASONS}
+              editorOpen={availabilityEditor === 'driver'}
+              selectedReason={driverAvailabilityReason}
+              note={driverAvailabilityNote}
+              busy={availabilityBusy.driver}
+              error={availabilityError.driver}
+              success={availabilitySuccess.driver}
+              onOpenEditor={() => { setAvailabilityEditor('driver'); setAvailabilityError((current) => ({ ...current, driver: '' })); setAvailabilitySuccess((current) => ({ ...current, driver: '' })); }}
+              onCancelEditor={() => setAvailabilityEditor(null)}
+              onReasonChange={setDriverAvailabilityReason}
+              onNoteChange={setDriverAvailabilityNote}
+              onConfirmUnavailable={() => void setManualAvailability('driver', 'temporarily_unavailable')}
+              onMarkAvailable={() => void setManualAvailability('driver', 'available')}
+            />
+          </div>
+        </section>}
         <VehicleRestrictionsPanel vehicleId={vehicle?.id} driverMode />
         {handoverError ? (
           <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">

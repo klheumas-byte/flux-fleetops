@@ -41,6 +41,7 @@ def get_vehicle_movements_route():
         page_size=request.args.get("page_size", default=25, type=int),
         vehicle_id=request.args.get("vehicle_id"),
         driver_id=request.args.get("driver_id"),
+        branch_id=request.args.get("branch_id"),
         status=request.args.get("status"),
         movement_type=request.args.get("movement_type"),
         search_query=request.args.get("q"),

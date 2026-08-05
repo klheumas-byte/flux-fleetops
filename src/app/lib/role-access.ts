@@ -51,6 +51,8 @@ export type AppModule =
   | 'branches'
   | 'audit-logs'
   | 'smart-living-deliveries'
+  | 'branch-operations'
+  | 'branch-team'
   | 'my-vehicle'
   | 'my-wallet'
   | 'my-earnings'
@@ -58,6 +60,7 @@ export type AppModule =
   | 'my-dispatch-opportunities'
   | 'my-dispatches'
   | 'my-operational-tasks'
+  | 'personal-vehicle-use'
   | 'create-ride'
   | 'ride-history'
   | 'calendar'
@@ -126,6 +129,8 @@ export const MODULE_ACCESS_MATRIX: Record<AppModule, RoleMatrix> = {
   branches: { owner: FULL_ACCESS },
   'audit-logs': { owner: FULL_ACCESS },
   'smart-living-deliveries': { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: DRIVER_ACCESS },
+  'branch-operations': { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN },
+  'branch-team': { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN },
   dashboard: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: DRIVER_ACCESS, fleet_owner: { ...NO_ACCESS, can_view: true } },
   'fleet-tracking': { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
   vehicles: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
@@ -196,6 +201,7 @@ export const MODULE_ACCESS_MATRIX: Record<AppModule, RoleMatrix> = {
   'my-dispatch-opportunities': { owner: NO_ACCESS, admin: NO_ACCESS, driver: DRIVER_ACCESS },
   'my-dispatches': { owner: NO_ACCESS, admin: NO_ACCESS, driver: DRIVER_ACCESS },
   'my-operational-tasks': { owner: NO_ACCESS, admin: NO_ACCESS, driver: DRIVER_ACCESS },
+  'personal-vehicle-use': { owner: NO_ACCESS, admin: NO_ACCESS, driver: DRIVER_ACCESS },
   'create-ride': { owner: NO_ACCESS, admin: NO_ACCESS, driver: DRIVER_ACCESS },
   'ride-history': { owner: NO_ACCESS, admin: NO_ACCESS, driver: DRIVER_ACCESS },
   calendar: { owner: NO_ACCESS, admin: NO_ACCESS, driver: DRIVER_ACCESS },
@@ -243,8 +249,11 @@ const MODULE_REQUIRED_PERMISSION: Partial<Record<AppModule, string | string[]>> 
   security: 'security.manage', expenses: 'expenses.manage', fuel: 'fuel.expenses',
   'finance-accounts': 'finance.view', 'my-dispatches': 'delivery.view_own',
   'my-operational-tasks': 'delivery.view_own', 'my-vehicle': 'vehicle.view_assigned',
+  'personal-vehicle-use': 'personal_vehicle_use.create',
   'report-fault': 'fault.report', 'ride-history': 'trip.view_own',
   'smart-living-deliveries': ['delivery_scheduler.view','delivery_schedule.view_assigned','loading_schedule.view','deliveries.view','deliveries.view_own','deliveries.view_assigned'],
+  'branch-operations': 'branch_operations.view',
+  'branch-team': 'branch_operations.manage_team',
 };
 
 export function filterAccessibleModules<T extends { id: AppModule }>(
@@ -259,6 +268,7 @@ const DRIVER_OPERATIONS_MODULES = new Set<AppModule>([
   'my-dispatch-opportunities',
   'my-dispatches',
   'my-operational-tasks',
+  'personal-vehicle-use',
   'digital-waybills',
   'create-ride',
   'ride-history',

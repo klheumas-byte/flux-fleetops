@@ -36,6 +36,8 @@ ADMIN_CLARIFICATION_STATUSES = {"submitted", "under_review", "needs_clarificatio
 ADMIN_APPROVABLE_STATUSES = {"submitted", "under_review"}
 ADMIN_CONVERTIBLE_STATUSES = {"approved"}
 ADMIN_REVIEW_ROLES = {"owner", "admin", "dispatcher", "customer_service"}
+TRIP_PURPOSES = {"PASSENGER", "GOODS", "MIXED", "OTHER"}
+DISPATCH_CLASSIFICATIONS = {"COMMERCIAL", "COMPLIMENTARY", "COST_CONTRIBUTION"}
 MASTER_DATA_GROUPS = {
     "pickup_location": "dispatch_pickup_locations",
     "vehicle_type_needed": "dispatch_vehicle_types",
@@ -50,7 +52,10 @@ LIST_PROJECTION = {
     "customer_phone": 1,
     "customer_company": 1,
     "pickup_location": 1,
+    "pickup_landmark": 1,
     "destination": 1,
+    "destination_landmark": 1,
+    "trip_purpose": 1,
     "load_type": 1,
     "load_weight_category": 1,
     "load_size_category": 1,
@@ -59,6 +64,13 @@ LIST_PROJECTION = {
     "preferred_pickup_time": 1,
     "proposed_charge": 1,
     "approved_charge": 1,
+    "dispatch_classification": 1,
+    "complimentary_reason": 1,
+    "contribution_amount": 1,
+    "contribution_purpose": 1,
+    "contribution_payment_method": 1,
+    "contribution_collected_by": 1,
+    "contribution_reconciliation_status": 1,
     "payment_status": 1,
     "status": 1,
     "submitted_by_driver_id": 1,
@@ -93,7 +105,10 @@ DRIVER_EDITABLE_FIELDS = {
     "customer_phone",
     "customer_company",
     "pickup_location",
+    "pickup_landmark",
     "destination",
+    "destination_landmark",
+    "trip_purpose",
     "load_description",
     "load_type",
     "load_weight_category",
@@ -102,6 +117,11 @@ DRIVER_EDITABLE_FIELDS = {
     "preferred_pickup_date",
     "preferred_pickup_time",
     "proposed_charge",
+    "dispatch_classification",
+    "complimentary_reason",
+    "contribution_amount",
+    "contribution_purpose",
+    "contribution_payment_method",
     "payment_status",
     "notes",
     "status",
@@ -314,9 +334,18 @@ def _normalize_dispatch_opportunity_payload(payload: dict, *, partial: bool = Fa
     if "customer_company" in payload or not partial:
         normalized["customer_company"] = _normalize_text(payload.get("customer_company"))
     if "pickup_location" in payload or not partial:
-        normalized["pickup_location"] = _validate_master_data_value(payload.get("pickup_location"), "pickup_location", required=False)
+        normalized["pickup_location"] = _normalize_text(payload.get("pickup_location"))
+    if "pickup_landmark" in payload or not partial:
+        normalized["pickup_landmark"] = _normalize_text(payload.get("pickup_landmark"))
     if "destination" in payload or not partial:
         normalized["destination"] = _normalize_text(payload.get("destination"))
+    if "destination_landmark" in payload or not partial:
+        normalized["destination_landmark"] = _normalize_text(payload.get("destination_landmark"))
+    if "trip_purpose" in payload or not partial:
+        purpose = str(payload.get("trip_purpose") or "GOODS").strip().upper()
+        if purpose not in TRIP_PURPOSES:
+            raise ApiError("trip_purpose must be PASSENGER, GOODS, MIXED, or OTHER.", status_code=400)
+        normalized["trip_purpose"] = purpose
     if "load_description" in payload or not partial:
         normalized["load_description"] = _normalize_text(payload.get("load_description"))
     if "load_type" in payload or not partial:
@@ -335,6 +364,16 @@ def _normalize_dispatch_opportunity_payload(payload: dict, *, partial: bool = Fa
         normalized["proposed_charge"] = _validate_non_negative_number(payload.get("proposed_charge"), "proposed_charge")
     if "approved_charge" in payload:
         normalized["approved_charge"] = _validate_non_negative_number(payload.get("approved_charge"), "approved_charge")
+    if "dispatch_classification" in payload or not partial:
+        classification = str(payload.get("dispatch_classification") or "COMMERCIAL").strip().upper()
+        if classification not in DISPATCH_CLASSIFICATIONS:
+            raise ApiError("Invalid dispatch_classification.", status_code=400)
+        normalized["dispatch_classification"] = classification
+    for field in ("complimentary_reason", "contribution_purpose", "contribution_payment_method"):
+        if field in payload or not partial:
+            normalized[field] = _normalize_text(payload.get(field))
+    if "contribution_amount" in payload or not partial:
+        normalized["contribution_amount"] = _validate_non_negative_number(payload.get("contribution_amount"), "contribution_amount")
     if "payment_status" in payload or not partial:
         normalized["payment_status"] = _validate_master_data_value(payload.get("payment_status"), "payment_status", required=False)
     if "notes" in payload or not partial:
@@ -352,19 +391,29 @@ def _validate_complete_opportunity(document: dict):
         "customer_phone",
         "pickup_location",
         "destination",
-        "load_description",
-        "load_type",
-        "load_weight_category",
-        "load_size_category",
         "vehicle_type_needed",
         "preferred_pickup_date",
         "preferred_pickup_time",
+        "trip_purpose",
+        "dispatch_classification",
     )
     for field_name in required_text_fields:
         if not document.get(field_name):
             raise ApiError(f"{field_name} is required before submitting a dispatch opportunity.", status_code=400)
-    if document.get("proposed_charge") is None:
-        raise ApiError("proposed_charge is required before submitting a dispatch opportunity.", status_code=400)
+    if document.get("trip_purpose") in {"GOODS", "MIXED"}:
+        for field_name in ("load_description", "load_type", "load_weight_category", "load_size_category"):
+            if not document.get(field_name):
+                raise ApiError(f"{field_name} is required for goods or mixed dispatches.", status_code=400)
+    classification = document.get("dispatch_classification") or "COMMERCIAL"
+    charge = float(document.get("proposed_charge") or 0)
+    if classification == "COMMERCIAL" and charge <= 0:
+        raise ApiError("Commercial dispatches require a proposed charge greater than zero.", status_code=400)
+    if classification == "COMPLIMENTARY":
+        if charge != 0 or not document.get("complimentary_reason"):
+            raise ApiError("Complimentary dispatches require zero charge and a reason.", status_code=400)
+    if classification == "COST_CONTRIBUTION":
+        if charge != 0 or float(document.get("contribution_amount") or 0) <= 0 or not document.get("contribution_purpose"):
+            raise ApiError("Cost Contribution requires zero customer charge, a contribution amount, and a purpose.", status_code=400)
 
 
 def _get_dispatch_opportunity_document(opportunity_id: str, *, projection: dict | None = None) -> dict:
@@ -462,6 +511,8 @@ def list_dispatch_opportunity_options(*, current_role: str) -> dict:
         "load_weight_categories": [item["name"] for item in get_active_master_data_items("dispatch_load_weight_categories")],
         "load_size_categories": [item["name"] for item in get_active_master_data_items("dispatch_load_size_categories")],
         "payment_statuses": [item["name"] for item in get_active_master_data_items("dispatch_payment_statuses")],
+        "trip_purposes": sorted(TRIP_PURPOSES),
+        "dispatch_classifications": sorted(DISPATCH_CLASSIFICATIONS),
         "statuses": sorted(ALLOWED_OPPORTUNITY_STATUSES),
         "driver_editable_statuses": sorted(DRIVER_MUTABLE_STATUSES),
     }
@@ -723,7 +774,7 @@ def review_dispatch_opportunity(opportunity_id: str, payload: dict, *, current_u
     update_fields = {
         key: value
         for key, value in normalized_payload.items()
-        if key in {"proposed_charge", "approved_charge", "review_notes", "payment_status"}
+        if key in {"proposed_charge", "approved_charge", "review_notes", "payment_status", "dispatch_classification", "complimentary_reason", "contribution_amount", "contribution_purpose", "contribution_payment_method"}
     }
     update_fields["status"] = "under_review" if document.get("status") == "submitted" else document.get("status")
     update_fields["reviewed_by"] = _to_object_id(current_user_id, "current_user_id")
@@ -747,6 +798,10 @@ def request_dispatch_opportunity_clarification(opportunity_id: str, payload: dic
         raise ApiError("clarification_request is required.", status_code=400)
     normalized_payload = _normalize_dispatch_opportunity_payload(payload or {}, partial=True)
     timestamp = now_utc()
+    classification = merged_document.get("dispatch_classification") or "COMMERCIAL"
+    approved_charge = merged_document.get("approved_charge") if merged_document.get("approved_charge") is not None else merged_document.get("proposed_charge")
+    if classification != "COMMERCIAL":
+        approved_charge = 0.0
     update_fields = {
         key: value
         for key, value in normalized_payload.items()
@@ -792,9 +847,14 @@ def approve_dispatch_opportunity(opportunity_id: str, payload: dict, *, current_
     update_fields = {
         "status": "approved",
         "proposed_charge": merged_document.get("proposed_charge"),
-        "approved_charge": merged_document.get("approved_charge")
-        if merged_document.get("approved_charge") is not None
-        else merged_document.get("proposed_charge"),
+        "approved_charge": approved_charge,
+        "dispatch_classification": classification,
+        "complimentary_reason": merged_document.get("complimentary_reason"),
+        "contribution_amount": merged_document.get("contribution_amount"),
+        "contribution_purpose": merged_document.get("contribution_purpose"),
+        "contribution_payment_method": merged_document.get("contribution_payment_method"),
+        "contribution_collected_by": _to_object_id(current_user_id, "current_user_id") if classification == "COST_CONTRIBUTION" and merged_document.get("contribution_payment_method") else None,
+        "contribution_reconciliation_status": "pending" if classification == "COST_CONTRIBUTION" else None,
         "payment_status": merged_document.get("payment_status"),
         "review_notes": merged_document.get("review_notes"),
         "reviewed_by": _to_object_id(current_user_id, "current_user_id"),

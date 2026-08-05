@@ -24,6 +24,8 @@ from utils.decorators import role_required
 from utils.responses import success_response
 from extensions import get_collection
 from services.rbac_service import user_has_permission
+from services.vehicle_availability_service import resolve_vehicle_availability, update_vehicle_manual_availability
+from utils.api_error import ApiError
 from bson import ObjectId
 
 
@@ -169,6 +171,32 @@ def update_vehicle_status_route(vehicle_id: str):
         data={"vehicle": vehicle},
         message="Vehicle status updated successfully.",
     )
+
+
+@vehicles_bp.get("/<vehicle_id>/live-availability")
+@role_required("owner", "admin", "operations_administrator", "operations_manager", "driver")
+def get_vehicle_live_availability_route(vehicle_id: str):
+    role = get_jwt().get("role")
+    actor_id = get_jwt_identity()
+    if role == "driver":
+        vehicle = get_collection("vehicles").find_one({"_id": ObjectId(vehicle_id)}) if ObjectId.is_valid(vehicle_id) else None
+        if not vehicle or actor_id not in {str(vehicle.get("assigned_driver_id")), str(vehicle.get("current_custodian_id"))}:
+            assignment = get_collection("assignments").find_one({"vehicle_id": ObjectId(vehicle_id), "driver_id": ObjectId(actor_id), "status": "active"}, {"_id": 1}) if vehicle and ObjectId.is_valid(str(actor_id)) else None
+            if not assignment:
+                raise ApiError("You can only view live availability for your assigned vehicle.", status_code=403)
+    return success_response(data={"availability": resolve_vehicle_availability(vehicle_id)})
+
+
+@vehicles_bp.patch("/<vehicle_id>/live-availability")
+@role_required("owner", "admin", "operations_administrator", "operations_manager", "driver")
+def update_vehicle_live_availability_route(vehicle_id: str):
+    availability = update_vehicle_manual_availability(
+        vehicle_id,
+        request.get_json(silent=True) or {},
+        current_user_id=get_jwt_identity(),
+        current_role=get_jwt().get("role"),
+    )
+    return success_response(data={"availability": availability}, message="Vehicle live availability updated.")
 
 
 @vehicles_bp.delete("/<vehicle_id>")

@@ -780,7 +780,11 @@ def _build_job_overlap_query(start_time: datetime, end_time: datetime) -> dict:
 
 def _vehicle_conflicts(*, vehicle_id: ObjectId, start_time: datetime, end_time: datetime, exclude_job_id: ObjectId | None = None, exclude_movement_id: ObjectId | None = None) -> list[str]:
     conflicts: list[str] = []
-    availability = resolve_vehicle_availability(vehicle_id)
+    availability = resolve_vehicle_availability(vehicle_id, context={
+        "start_time": start_time,
+        "end_time": end_time,
+        "exclude_movement_id": exclude_movement_id,
+    })
     conflicts.extend(
         reason["message"] for reason in availability.get("blocking_reasons", [])
         if reason.get("code") not in {"active_reservation", "active_dispatch"}
@@ -799,6 +803,11 @@ def _vehicle_conflicts(*, vehicle_id: ObjectId, start_time: datetime, end_time: 
     movement_query = {
         "vehicle_id": vehicle_id,
         "status": {"$in": sorted(MOVEMENT_BLOCKING_STATUSES)},
+        "movement_type": {"$ne": "assignment_handover"},
+        "$or": [
+            {"$and": [{"requested_departure_time": {"$lt": end_time}}, {"expected_return_time": {"$gt": start_time}}]},
+            {"status": {"$in": ["checked_out", "in_progress"]}},
+        ],
     }
     if exclude_movement_id:
         movement_query["_id"] = {"$ne": exclude_movement_id}
@@ -829,6 +838,11 @@ def _driver_conflicts(*, driver_id: ObjectId, start_time: datetime, end_time: da
     movement_query = {
         "driver_id": driver_id,
         "status": {"$in": sorted(MOVEMENT_BLOCKING_STATUSES)},
+        "movement_type": {"$ne": "assignment_handover"},
+        "$or": [
+            {"$and": [{"requested_departure_time": {"$lt": end_time}}, {"expected_return_time": {"$gt": start_time}}]},
+            {"status": {"$in": ["checked_out", "in_progress"]}},
+        ],
     }
     if exclude_movement_id:
         movement_query["_id"] = {"$ne": exclude_movement_id}
@@ -845,7 +859,7 @@ def _driver_conflicts(*, driver_id: ObjectId, start_time: datetime, end_time: da
     if dispatch_jobs_collection().find_one(job_query, {"_id": 1}):
         conflicts.append("Driver already has another active dispatch assignment in the selected time window.")
 
-    driver = users_collection().find_one({"_id": driver_id}, {"status": 1, "driver_profile.approval_status": 1})
+    driver = users_collection().find_one({"_id": driver_id}, {"status": 1, "driver_profile.approval_status": 1, "driver_profile.manual_availability_status": 1, "driver_profile.manual_availability_reason": 1})
     if not driver:
         conflicts.append("Driver not found.")
     else:
@@ -857,6 +871,10 @@ def _driver_conflicts(*, driver_id: ObjectId, start_time: datetime, end_time: da
             conflicts.append("Driver is currently unavailable.")
         if approval_status and approval_status != "approved":
             conflicts.append("Driver is not approved for dispatch assignment.")
+        manual_status = (((driver.get("driver_profile") or {}).get("manual_availability_status")) or "available").strip().lower()
+        if manual_status == "temporarily_unavailable":
+            reason = (((driver.get("driver_profile") or {}).get("manual_availability_reason")) or "temporarily unavailable").replace("_", " ")
+            conflicts.append(f"Driver is temporarily unavailable — {reason}.")
     return conflicts
 
 
@@ -1040,7 +1058,7 @@ def list_planner_options(*, current_role: str, current_user_id: str) -> dict:
     started_at = perf_counter()
     vehicles = list(
         vehicles_collection().find(
-            {"status": "available"},
+            {"status": {"$in": ["available", "assigned", "active"]}},
             {"registration_number": 1, "vehicle_type": 1, "make": 1, "model": 1, "status": 1},
         ).sort("registration_number", ASCENDING)
     )
@@ -2160,7 +2178,12 @@ def update_driver_dispatch_job_workflow(job_id: str, payload: dict, *, current_u
             raise ApiError("Only accepted dispatches can be started.", status_code=400)
         from services.dispatch_fuel_service import assert_dispatch_opening_confirmed
 
-        assert_dispatch_opening_confirmed(job_document)
+        movement = assert_dispatch_opening_confirmed(job_document)
+        from services.vehicle_movement_service import start_vehicle_movement
+        start_vehicle_movement(
+            str(movement["_id"]), {},
+            current_user_id=current_user_id, current_role="driver",
+        )
         update_fields.update(
             {
                 "status": "in_progress",

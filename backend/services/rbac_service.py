@@ -67,6 +67,8 @@ ROLE_DEFINITIONS = {
             "trips.execute", "vehicle.view_assigned", "fault.report", "returns.record_own", "delivery_schedule.view_assigned", "custody.view", "custody.accept", "custody.dispute",
             "delivery_execution.accept", "delivery_execution.start", "delivery_execution.stop_update", "delivery_execution.complete",
             "notifications.view", "trip.view_own",
+            "personal_vehicle_use.create", "personal_vehicle_use.start", "personal_vehicle_use.complete",
+            "vehicle_movements.view",
         ],
     },
     "field_agent": {
@@ -86,7 +88,10 @@ ROLE_DEFINITIONS = {
         "description": "Provides operational oversight for explicitly assigned branches.",
         "default_data_scope": "PRIMARY_BRANCH",
         "permissions": [
-            "branches.view_assigned", "delivery_operations.view_branch", "branch_operations.view",
+            "branches.view_assigned", "delivery_operations.view_branch", "branch_operations.view", "branch_operations.manage_team",
+            "delivery_scheduler.view", "delivery_scheduler.manage", "deliveries.view", "deliveries.assign",
+            "delivery_batches.view", "delivery_batches.create", "delivery_batches.update", "delivery_batches.assign",
+            "delivery_runs.publish", "delivery_runs.lock", "exceptions.manage",
             "stock_transfers.view_incoming", "stock_transfers.receive", "stock_transfers.verify",
             "stock_transfers.report_variance", "stock_transfers.view_history", "notifications.view",
             "driver.view", "vehicle.view", "operations.view",
@@ -120,12 +125,12 @@ ROLE_DEFINITIONS = {
 # without replacing administrator-defined custom roles.
 SYSTEM_PERMISSION_ADDITIONS = {
     "system_administrator": {"users.manage_operational", "stock_transfers.view_incoming", "stock_transfers.receive", "stock_transfers.verify", "stock_transfers.report_variance", "stock_transfers.view_history"},
-    "operations_administrator": {"delivery_batches.view", "delivery_batches.create", "delivery_batches.update", "delivery_batches.publish", "delivery_batches.assign", "delivery_routes.manage", "delivery_execution.manage", "delivery_execution.override", "delivery_items.issue", "delivery_items.acknowledge", "returns.receive", "returns.manage", "exceptions.manage", "investigations.manage", "reconciliation.manage", "delivery_batches.close", "delivery_batches.reopen", "branches.view_assigned", "delivery_operations.view_branch", "branch_operations.view", "stock_transfers.view_incoming", "stock_transfers.receive", "stock_transfers.verify", "stock_transfers.report_variance", "stock_transfers.view_history"},
-    "operations_manager": {"delivery_batches.view", "delivery_batches.create", "delivery_batches.update", "delivery_batches.publish", "delivery_batches.assign", "delivery_routes.manage", "delivery_execution.manage", "returns.manage", "exceptions.manage", "investigations.manage", "reconciliation.manage", "delivery_batches.close"},
-    "driver": {"delivery_batches.view", "delivery_routes.execute", "delivery_items.acknowledge", "delivery_execution.manage"},
-    "field_agent": {"delivery_batches.view"},
+    "operations_administrator": {"delivery_batches.view", "delivery_batches.create", "delivery_batches.update", "delivery_batches.publish", "delivery_batches.assign", "delivery_routes.manage", "delivery_execution.manage", "delivery_execution.override", "delivery_items.issue", "delivery_items.acknowledge", "returns.receive", "returns.manage", "exceptions.manage", "investigations.manage", "reconciliation.manage", "delivery_batches.close", "delivery_batches.reopen", "branches.view_assigned", "delivery_operations.view_branch", "branch_operations.view", "stock_transfers.view_incoming", "stock_transfers.receive", "stock_transfers.verify", "stock_transfers.report_variance", "stock_transfers.view_history", "personal_vehicle_use.approve", "vehicle_movements.view", "vehicle_movements.manage"},
+    "operations_manager": {"delivery_batches.view", "delivery_batches.create", "delivery_batches.update", "delivery_batches.publish", "delivery_batches.assign", "delivery_routes.manage", "delivery_execution.manage", "returns.manage", "exceptions.manage", "investigations.manage", "reconciliation.manage", "delivery_batches.close", "personal_vehicle_use.approve", "vehicle_movements.view", "vehicle_movements.manage"},
+    "driver": {"delivery_batches.view", "delivery_routes.execute", "delivery_items.acknowledge", "delivery_execution.manage", "personal_vehicle_use.create", "personal_vehicle_use.start", "personal_vehicle_use.complete", "vehicle_movements.view"},
+    "field_agent": {"delivery_batches.view", "delivery_routes.execute", "delivery_items.acknowledge", "delivery_execution.manage"},
     "issuing_receiving_officer": {"delivery_batches.view", "delivery_items.issue", "returns.receive", "returns.manage"},
-    "branch_manager": {"branches.view_assigned", "delivery_operations.view_branch", "branch_operations.view", "stock_transfers.view_incoming", "stock_transfers.receive", "stock_transfers.verify", "stock_transfers.report_variance", "stock_transfers.view_history", "driver.view", "vehicle.view", "operations.view", "notifications.view"},
+    "branch_manager": {"branches.view_assigned", "delivery_operations.view_branch", "branch_operations.view", "branch_operations.manage_team", "delivery_scheduler.view", "delivery_scheduler.manage", "deliveries.view", "deliveries.assign", "delivery_batches.view", "delivery_batches.create", "delivery_batches.update", "delivery_batches.assign", "delivery_runs.publish", "delivery_runs.lock", "exceptions.manage", "stock_transfers.view_incoming", "stock_transfers.receive", "stock_transfers.verify", "stock_transfers.report_variance", "stock_transfers.view_history", "driver.view", "vehicle.view", "operations.view", "notifications.view"},
     "branch_warehouse_coordinator": {"stock_transfers.view_incoming", "stock_transfers.receive", "stock_transfers.verify", "stock_transfers.report_variance", "stock_transfers.view_history", "notifications.view"},
 }
 
@@ -133,7 +138,7 @@ PERMISSION_MODULES = {
     "Users": ["users.view", "users.create", "users.update", "users.manage", "users.manage_operational"],
     "Roles": ["roles.view", "roles.create", "roles.update", "roles.manage"],
     "Permissions": ["permissions.view", "permissions.manage"],
-    "Branches": ["branches.view", "branches.view_assigned", "branches.create", "branches.update", "branches.manage", "branch_operations.view"],
+    "Branches": ["branches.view", "branches.view_assigned", "branches.create", "branches.update", "branches.manage", "branch_operations.view", "branch_operations.manage_team"],
     "Stock Transfers": ["stock_transfers.view_incoming", "stock_transfers.receive", "stock_transfers.verify", "stock_transfers.report_variance", "stock_transfers.view_history"],
     "Dispatch": ["delivery.create", "delivery.update", "delivery.batch"],
     "Delivery Operations": ["deliveries.view", "deliveries.create", "deliveries.update", "deliveries.manage", "deliveries.assign", "delivery_operations.view_branch", "delivery.accept", "delivery.execute", "delivery.confirm", "deliveries.view_own", "deliveries.view_assigned", "delivery_schedule.view_assigned", "loading_schedule.view", "delivery_batches.view", "delivery_batches.create", "delivery_batches.update", "delivery_batches.publish", "delivery_batches.assign", "delivery_routes.manage", "delivery_routes.execute", "delivery_items.issue", "delivery_items.acknowledge", "delivery_execution.manage", "delivery_execution.override"],
@@ -142,7 +147,8 @@ PERMISSION_MODULES = {
     "Drivers": ["driver.view", "driver.update", "driver.assign", "drivers.assign", "driver.view_waiting"],
     "Field Agents": ["customer.view_assigned", "customer.issue_report"],
     "Vehicles": ["vehicle.view", "vehicle.manage", "vehicle.view_assigned", "vehicle.assign", "vehicles.assign"],
-    "Vehicle Movement": ["vehicle_movements.view", "vehicle_movements.create", "vehicle_movements.update", "vehicle_movements.approve"],
+    "Vehicle Movement": ["vehicle_movements.view", "vehicle_movements.create", "vehicle_movements.update", "vehicle_movements.approve", "vehicle_movements.manage"],
+    "Personal Vehicle Use": ["personal_vehicle_use.create", "personal_vehicle_use.approve", "personal_vehicle_use.start", "personal_vehicle_use.complete"],
     "Maintenance": ["maintenance.view", "maintenance.manage", "fault.view", "fault.manage", "fault.report"],
     "Item Issue and Returns": ["items.issue", "items.reissue", "items.receive", "items.correct", "items.history", "custody.view", "custody.accept", "custody.dispute", "returns.manage"],
     "Delivery Accountability": ["returns.receive", "returns.manage", "exceptions.manage", "investigations.manage", "reconciliation.manage", "delivery_batches.close", "delivery_batches.reopen"],

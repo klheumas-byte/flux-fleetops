@@ -4,6 +4,7 @@ import { ApiRequestError } from '../../lib/api';
 import { fetchOperationOptions, type OperationOptions } from '../../lib/operational-request-api';
 import { createStockTransfer, fetchStockTransfer, fetchStockTransfers, fetchSupplierPickupTasks, mutateStockTransfer, type StockTransfer, type StockTransferItem } from '../../lib/stock-transfer-api';
 import { searchWaybillProducts, type WaybillProduct } from '../../lib/waybill-api';
+import { MovementFuelDialog, type MovementFuelDraft } from './MovementFuelDialog';
 
 const PICKUP_STATUSES = ['Draft', 'Approved', 'Assigned', 'Driver Accepted', 'Arrived at Supplier', 'Pickup Confirmed', 'Loaded', 'In Transit', 'Delivered', 'Completed'];
 const emptyForm = () => ({
@@ -46,6 +47,7 @@ export default function SupplierPickup({ driverMode = false, taskId }: { driverM
   const [scheduling, setScheduling] = useState({ id: '', vehicle_id: '', driver_id: '' });
   const [pickupEntry, setPickupEntry] = useState<{ id: string; items: Record<string, { collected: string; reason: string }> }>({ id: '', items: {} });
   const [deliveryEntry, setDeliveryEntry] = useState<{ id: string; receiver_name: string; receiver_contact: string; receiver_initials: string; items: Record<string, string> }>({ id: '', receiver_name: '', receiver_contact: '', receiver_initials: '', items: {} });
+  const [movementAction, setMovementAction] = useState<{ record: StockTransfer; mode: 'start' | 'return'; draft: MovementFuelDraft } | null>(null);
 
   const load = async () => {
     if (!loadedOnce.current) setLoading(true);
@@ -79,6 +81,20 @@ export default function SupplierPickup({ driverMode = false, taskId }: { driverM
     } catch (value) { setError(message(value)); return undefined; } finally { setBusy(false); setBusyAction(''); }
   };
   const isBusy = (record: StockTransfer, action?: string) => busyAction === `${record.id}:${action}` || (!action && busyAction.startsWith(`${record.id}:`));
+  const openMovement = (record: StockTransfer, mode: 'start' | 'return') => {
+    setError('');
+    setMovementAction({ record, mode, draft: { fuel: null, odometer: '', notes: '' } });
+  };
+  const submitMovement = async () => {
+    if (!movementAction || movementAction.draft.fuel == null) return;
+    const { record, mode, draft } = movementAction;
+    const payload: Record<string, unknown> = {
+      [mode === 'start' ? 'opening_fuel_level' : 'closing_fuel_level']: draft.fuel,
+      notes: draft.notes.trim() || undefined,
+    };
+    if (draft.odometer.trim()) payload[mode === 'start' ? 'opening_odometer' : 'closing_odometer'] = Number(draft.odometer);
+    if (await run(record, mode === 'start' ? 'start' : 'arrive', payload)) setMovementAction(null);
+  };
   const approve = async (record: StockTransfer) => {
     const submitted = record.status === 'draft' ? await run(record, 'submit') : record;
     if (!submitted) return;
@@ -159,8 +175,8 @@ export default function SupplierPickup({ driverMode = false, taskId }: { driverM
             {driverMode && record.status === 'scheduled' && !record.acknowledged_at && <button type="button" disabled={busy} onClick={() => void acceptAssignment(record)} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-60">{loadingLabel(isBusy(record, 'acknowledge'), 'Accept Pickup', 'Accepting…')}</button>}
             {driverMode && record.status === 'scheduled' && record.acknowledged_at && !record.supplier_arrived_at && <button type="button" disabled={busy} onClick={() => void run(record, 'arrive')} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-60">{loadingLabel(isBusy(record, 'arrive'), 'Arrived at Supplier', 'Updating…')}</button>}
             {driverMode && record.status === 'scheduled' && Boolean(record.pickup_confirmation) && <button type="button" disabled={busy} onClick={() => void run(record, 'release')} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-60">{loadingLabel(isBusy(record, 'release'), 'Mark Loaded', 'Loading…')}</button>}
-            {driverMode && record.status === 'released' && <button type="button" disabled={busy} onClick={() => void run(record, 'start')} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-60">{loadingLabel(isBusy(record, 'start'), 'Start Journey', 'Starting…')}</button>}
-            {driverMode && record.status === 'in_transit' && <button type="button" disabled={busy} onClick={() => void run(record, 'arrive')} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-60">{loadingLabel(isBusy(record, 'arrive'), 'Mark Delivered', 'Delivering…')}</button>}
+            {driverMode && record.status === 'released' && <button type="button" disabled={busy} onClick={() => openMovement(record, 'start')} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-60">Start Journey</button>}
+            {driverMode && record.status === 'in_transit' && <button type="button" disabled={busy} onClick={() => openMovement(record, 'return')} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-60">Mark Delivered</button>}
             {driverMode && record.status === 'awaiting_receipt' && !record.actual_receiver && <button type="button" disabled={busy} onClick={() => openDeliveryConfirmation(record)} className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-60">Confirm Delivery</button>}
           </div>
           {scheduling.id === record.id && <div className="mt-4 grid gap-3 rounded-lg bg-slate-50 p-4 sm:grid-cols-2">{!options && <div className="inline-flex items-center gap-2 text-sm text-slate-600 sm:col-span-2"><Loader2 className="h-4 w-4 animate-spin" />Loading vehicles and drivers…</div>}<Select label="Vehicle" value={scheduling.vehicle_id} onChange={(vehicle_id) => setScheduling({ ...scheduling, vehicle_id })} options={(options?.vehicles || []).map((item) => ({ value: item.id, label: item.registration_number }))} /><Select label="Driver" value={scheduling.driver_id} onChange={(driver_id) => setScheduling({ ...scheduling, driver_id })} options={(options?.drivers || []).map((item) => ({ value: item.id, label: item.full_name }))} /><div className="flex gap-2 sm:col-span-2"><button type="button" disabled={busy || !scheduling.vehicle_id || !scheduling.driver_id} onClick={() => void assign(record)} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-60">{loadingLabel(isBusy(record, 'schedule'), 'Save Assignment', 'Saving…')}</button><button type="button" onClick={() => setScheduling({ id: '', vehicle_id: '', driver_id: '' })} className="rounded-lg border px-3 py-2 text-sm">Cancel</button></div></div>}
@@ -170,6 +186,7 @@ export default function SupplierPickup({ driverMode = false, taskId }: { driverM
         </article>)}
       </div> : <EmptyState onCreate={() => !driverMode && setCreating(true)} driverMode={driverMode} />}
     </div>
+    {movementAction && <MovementFuelDialog mode={movementAction.mode} vehicleLabel={movementAction.record.vehicle?.registration_number} draft={movementAction.draft} busy={busy && isBusy(movementAction.record)} error={error} onChange={(draft) => setMovementAction((current) => current ? { ...current, draft } : null)} onClose={() => setMovementAction(null)} onConfirm={() => void submitMovement()} />}
   </div>;
 }
 

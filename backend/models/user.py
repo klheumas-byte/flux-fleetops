@@ -48,6 +48,11 @@ def serialize_driver_profile(user_document: dict) -> dict | None:
         "target_amount": driver_profile.get("target_amount"),
         "target_frequency": driver_profile.get("target_frequency") or "weekly",
         "private_finance_enabled": driver_profile.get("private_finance_enabled", False),
+        "manual_availability_status": driver_profile.get("manual_availability_status") or "available",
+        "manual_availability_reason": driver_profile.get("manual_availability_reason"),
+        "manual_availability_updated_at": driver_profile.get("manual_availability_updated_at").isoformat()
+        if hasattr(driver_profile.get("manual_availability_updated_at"), "isoformat")
+        else driver_profile.get("manual_availability_updated_at"),
         "settings_effective_date": driver_profile.get("settings_effective_date"),
         "settings_history": [
             {

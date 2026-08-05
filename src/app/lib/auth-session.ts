@@ -12,6 +12,8 @@ export interface SessionDriverProfile {
   target_amount?: number | null;
   target_frequency?: 'daily' | 'weekly';
   private_finance_enabled?: boolean;
+  manual_availability_status?: 'available' | 'temporarily_unavailable';
+  manual_availability_reason?: string | null;
 }
 
 export interface SessionUser {

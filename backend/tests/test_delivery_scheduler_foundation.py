@@ -408,3 +408,44 @@ def test_phase5_authorized_reopen_requires_reason(scheduler):
     assert reason.value.status_code == 400
     reopened = delivery.reopen_scheduler_batch(run["id"], {"reason": "Audit recount required"}, str(scheduler["manager"]))
     assert reopened["status"] == "REOPENED" and reopened["locked"] is False
+
+
+def test_kaya_run_is_ready_without_driver_or_vehicle_and_reuses_execution(scheduler):
+    order = delivery.create_certified_order(order_payload(scheduler, "KAYA-1"), str(scheduler["manager"]))
+    run = delivery.create_daily_run({
+        "branch_id": str(scheduler["branch"]), "delivery_date": "2099-08-10", "planned_departure_time": "08:00",
+        "transport_method": "KAYA", "manual_transport": {"provider_name": "Kojo Kaya", "phone": "0201234567", "agreed_cost": 45, "notes": "Call before loading"},
+        "delivery_order_ids": [order["id"]],
+    }, str(scheduler["manager"]))
+    assert run["transport_method"] == "KAYA" and run["driver_id"] is None and run["vehicle_id"] is None
+    assert run["readiness"] == "READY" and not any("driver" in item.lower() or "vehicle" in item.lower() for item in run["review"]["errors"])
+    published = delivery.publish_daily_run(run["id"], str(scheduler["manager"]))
+    delivery.accept_run_assignment(published["id"], str(scheduler["agent_a"]))
+    delivery.issue_scheduler_run(run["id"], {}, str(scheduler["manager"]))
+    custody = delivery.respond_to_custody(run["id"], {"decision": "ACCEPT"}, str(scheduler["agent_a"]))
+    assert custody["custody_holder_id"] == str(scheduler["agent_a"]) and custody.get("driver_id") is None
+    started = delivery.start_scheduler_run(run["id"], {}, str(scheduler["agent_a"]))
+    stop = started["stops"][0]; line = stop["products"][0]
+    delivery.update_scheduler_stop(run["id"], stop["stop_id"], {"action": "ARRIVE"}, str(scheduler["agent_a"]))
+    completed = delivery.update_scheduler_stop(run["id"], stop["stop_id"], {"action": "OUTCOME", "outcome": "COMPLETED", "recipient_name": "Customer", "items": [{"line_id": line["line_id"], "quantity_delivered": line["quantity_issued"], "quantity_undelivered": 0}]}, str(scheduler["agent_a"]))
+    assert completed["status"] == "AWAITING_RECONCILIATION"
+    assert delivery.reconcile_scheduler_batch(run["id"], {}, str(scheduler["manager"]))["status"] == "RECONCILED"
+
+
+def test_manual_transport_requires_handler_but_legacy_run_remains_vehicle(scheduler):
+    first = delivery.create_certified_order(order_payload(scheduler, "KAYA-MISSING"), str(scheduler["manager"]))
+    manual = delivery.create_daily_run({"branch_id": str(scheduler["branch"]), "delivery_date": "2099-08-10", "planned_departure_time": "08:00", "transport_method": "OTHER_MANUAL", "delivery_order_ids": [first["id"]]}, str(scheduler["manager"]))
+    assert manual["readiness"] != "READY"
+    assert any("handler" in item.lower() for item in manual["review"]["errors"])
+    second = delivery.create_certified_order(order_payload(scheduler, "LEGACY-VEHICLE"), str(scheduler["manager"]))
+    legacy = make_run(scheduler, [second])
+    assert legacy["transport_method"] == "VEHICLE" and legacy["readiness"] == "READY"
+
+
+def test_temporary_company_driver_is_available_to_branch_planner(scheduler):
+    company_driver = ObjectId()
+    scheduler["db"].users.insert_one({"_id": company_driver, "full_name": "HQ Relief Driver", "role": "driver", "status": "active", "operational_scope": "COMPANY_WIDE"})
+    app = Flask(__name__); app.config["ENV_NAME"] = "development"
+    with patch.object(delivery, "driver_ids_visible_to_branch_user", return_value={scheduler["driver"], company_driver}), app.app_context():
+        metadata = delivery.scheduler_metadata(str(scheduler["manager"]))
+    assert str(company_driver) in {item["id"] for item in metadata["drivers"]["items"]}

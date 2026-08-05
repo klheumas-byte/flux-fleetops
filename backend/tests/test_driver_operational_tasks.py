@@ -281,6 +281,27 @@ class DriverOperationalTaskTests(unittest.TestCase):
         )
         self.assertEqual(pickup["current_action"]["label"], "Arrive at Supplier")
 
+    def test_resolved_delivery_exception_awaits_final_completion_not_driver_review(self):
+        exception_id = ObjectId()
+        transfer_id = self.db.stock_transfers.insert_one({
+            "transfer_id": "ST-RESOLVED",
+            "operation_type": "stock_transfer",
+            "driver_id": self.driver_id,
+            "status": "awaiting_receipt",
+            "receiving_status": "received",
+            "linked_delivery_exception_id": exception_id,
+            "delivery_exception_status": "resolved",
+            "scheduled_at": self.now,
+        }).inserted_id
+
+        result = tasks.list_driver_operational_tasks(str(self.driver_id))
+
+        task = next(item for item in result["tasks"] if item["id"] == str(transfer_id))
+        self.assertEqual(task["current_action"], {
+            "key": "awaiting_completion",
+            "label": "Await Final Completion",
+        })
+
     def test_operations_dashboard_counts_all_sources_without_target_data(self):
         self.insert_active_operations()
         self.db.dispatch_jobs.insert_one({

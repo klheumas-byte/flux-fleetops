@@ -8,6 +8,7 @@ DISPATCH_FINANCIAL_TYPES = {
     "internal_company",
     "partner_contract",
     "complimentary",
+    "cost_contribution",
 }
 PARTNER_BILLING_METHODS = {
     "no_individual_payment",

@@ -48,6 +48,7 @@ const Collections = lazy(() => import('./components/admin/Collections'));
 const Deposits = lazy(() => import('./components/admin/Deposits'));
 const Expenses = lazy(() => import('./components/admin/Expenses'));
 const FinanceAccounts = lazy(() => import('./components/admin/FinanceAccounts'));
+const FundingLedger = lazy(() => import('./components/admin/FundingLedger'));
 const Revenue = lazy(() => import('./components/admin/Revenue'));
 const AdminAccountability = lazy(() => import('./components/admin/AdminAccountability'));
 const Customers = lazy(() => import('./components/admin/Customers'));
@@ -60,6 +61,7 @@ const DriverPerformance = lazy(() => import('./components/admin/DriverPerformanc
 const Rides = lazy(() => import('./components/admin/Rides'));
 const Security = lazy(() => import('./components/admin/Security'));
 const Settings = lazy(() => import('./components/admin/Settings'));
+const SmartLivingIntegration = lazy(() => import('./components/admin/SmartLivingIntegration'));
 const DriverDashboard = lazy(() => import('./components/driver/DriverDashboard'));
 const CreateRide = lazy(() => import('./components/driver/CreateRide'));
 const CustomerManagement = lazy(() => import('./components/driver/CustomerManagement'));
@@ -102,6 +104,7 @@ export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [defaultPasswordReminderDismissed, setDefaultPasswordReminderDismissed] = useState(false);
   const [driverActiveAssignment, setDriverActiveAssignment] = useState<DriverActiveAssignment | null>(null);
   const [driverDashboardSummary, setDriverDashboardSummary] = useState<DriverDashboardSummary | null>(null);
   const [driverWalletData, setDriverWalletData] = useState<DriverWalletData | null>(null);
@@ -446,6 +449,14 @@ export default function App() {
     }} />;
   }
 
+  if (currentUser?.default_password_active && !defaultPasswordReminderDismissed) {
+    return <ChangePassword optional onSkip={() => setDefaultPasswordReminderDismissed(true)} onLogout={handleLogout} onChanged={(user) => {
+      setStoredSessionUser(user);
+      setCurrentUser(user);
+      setUserRole(String(user.selected_workspace || user.role).trim().toLowerCase() as UserRole);
+    }} />;
+  }
+
   if (userRole !== 'driver' && userRole !== 'fleet_owner' && userRole !== 'personal_vehicle_owner') {
     return (
       <>
@@ -498,6 +509,7 @@ export default function App() {
           {currentPage === 'deposits' && renderProtectedPage('deposits', <Deposits />)}
           {currentPage === 'expenses' && renderProtectedPage('expenses', <Expenses />)}
           {currentPage === 'finance-accounts' && renderProtectedPage('finance-accounts', <FinanceAccounts />)}
+          {currentPage === 'funding-ledger' && renderProtectedPage('funding-ledger', <FundingLedger />)}
           {currentPage === 'revenue' && renderProtectedPage('revenue', <Revenue />)}
           {currentPage === 'rides' && renderProtectedPage('dashboard', <Rides />)}
           {currentPage === 'accountability' && renderProtectedPage('accountability', <AdminAccountability />)}
@@ -512,6 +524,7 @@ export default function App() {
           {currentPage === 'notifications' && renderProtectedPage('notifications', <Notifications onNavigate={navigateToPage} />)}
           {currentPage === 'security' && renderProtectedPage('security', <Security />)}
           {currentPage === 'settings' && renderProtectedPage('settings', <Settings />)}
+          {currentPage === 'smart-living-integration' && renderProtectedPage('smart-living-integration', <SmartLivingIntegration />)}
           </Suspense>
         </AdminLayout>
       </>

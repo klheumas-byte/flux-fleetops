@@ -24,6 +24,18 @@ export interface DriverOperationalTask {
   status_label: string;
   current_action: { key: string; label: string };
   linked_waybill_id?: string | null;
+  stops?: Array<{
+    sequence?: number | null;
+    customer?: string | null;
+    phone?: string | null;
+    location?: string | null;
+    products?: Array<{ name?: string | null; quantity?: number | null }>;
+    field_agent?: string | null;
+    branch?: string | null;
+    date?: string | null;
+    time?: string | null;
+    status?: string | null;
+  }>;
   updated_at?: string | null;
 }
 

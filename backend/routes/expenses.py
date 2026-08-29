@@ -17,7 +17,7 @@ expenses_bp = Blueprint("expenses", __name__)
 
 
 @expenses_bp.get("")
-@role_required("owner", "admin", "driver")
+@role_required("owner", "admin", "finance_officer", "driver")
 def get_expenses():
     return success_response(
         data={
@@ -30,12 +30,13 @@ def get_expenses():
 
 
 @expenses_bp.post("")
-@role_required("owner", "admin", "driver")
+@role_required("owner", "admin", "finance_officer", "driver")
 def create_expense_route():
     expense = create_expense(
         payload=request.get_json(silent=True) or {},
         current_user_id=get_jwt_identity(),
         current_role=get_jwt().get("role"),
+        idempotency_key=request.headers.get("Idempotency-Key"),
     )
     return success_response(
         data={"expense": expense},
@@ -45,7 +46,7 @@ def create_expense_route():
 
 
 @expenses_bp.get("/<expense_id>")
-@role_required("owner", "admin", "driver")
+@role_required("owner", "admin", "finance_officer", "driver")
 def get_expense_route(expense_id: str):
     expense = get_expense_by_id(
         expense_id=expense_id,
@@ -86,9 +87,11 @@ def reject_expense_route(expense_id: str):
 @expenses_bp.patch("/<expense_id>/mark-paid")
 @role_required("owner")
 def mark_expense_paid_route(expense_id: str):
+    payload = request.get_json(silent=True) or {}
     expense = mark_expense_paid(
         expense_id=expense_id,
         current_user_id=get_jwt_identity(),
+        paid_by=payload.get("paid_by"),
     )
     return success_response(
         data={"expense": expense},

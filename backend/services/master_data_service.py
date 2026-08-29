@@ -18,6 +18,17 @@ from utils.api_error import ApiError
 
 
 MASTER_DATA_DEFAULTS: dict[str, list[str]] = {
+    "funding_sources": [
+        "Fleet Sales / Operating Revenue",
+        "Fleet Sales / Driver Collection",
+        "Smart Living",
+        "Axelera",
+        "Adapt Institute",
+        "Owner Funding",
+        "Loan / Bank",
+        "Petty Cash",
+        "Other",
+    ],
     "customer_categories": [
         "Regular",
         "Recurring",
@@ -417,6 +428,10 @@ def _serialize_item(document: dict):
         "updated_by": str(document.get("updated_by")) if document.get("updated_by") else None,
         "created_at": document.get("created_at").isoformat() if document.get("created_at") else None,
         "updated_at": document.get("updated_at").isoformat() if document.get("updated_at") else None,
+        "audit_log": [
+            {**entry, "actor_id": str(entry.get("actor_id")) if entry.get("actor_id") else None, "at": entry.get("at").isoformat() if hasattr(entry.get("at"), "isoformat") else entry.get("at")}
+            for entry in document.get("audit_log", [])
+        ],
     }
 
 
@@ -636,6 +651,7 @@ def create_master_data_item(payload: dict, *, current_user_id: str, current_role
         "updated_by": _to_object_id(current_user_id, "current_user_id"),
         "created_at": timestamp,
         "updated_at": timestamp,
+        "audit_log": [{"action": "master_data_created", "actor_id": _to_object_id(current_user_id, "current_user_id"), "actor_role": current_role, "at": timestamp}],
     }
     try:
         result = master_data_collection().insert_one(document)
@@ -682,12 +698,14 @@ def update_master_data_item(item_id: str, payload: dict, *, current_user_id: str
 
     update_fields["updated_by"] = _to_object_id(current_user_id, "current_user_id")
     update_fields["updated_at"] = now_utc()
+    audit = {"action": "master_data_updated", "actor_id": update_fields["updated_by"], "actor_role": current_role, "at": update_fields["updated_at"], "fields": sorted(key for key in update_fields if key not in {"updated_by", "updated_at"})}
     try:
         master_data_collection().update_one(
             {"_id": document["_id"]},
-            {"$set": update_fields},
+            {"$set": update_fields, "$push": {"audit_log": audit}},
         )
     except DuplicateKeyError:
         raise ApiError("A master data item with this name already exists for that type.", status_code=409) from None
     document.update(update_fields)
+    document.setdefault("audit_log", []).append(audit)
     return _serialize_item(document)

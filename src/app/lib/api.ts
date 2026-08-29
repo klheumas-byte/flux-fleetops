@@ -1,3 +1,5 @@
+import { emitDataSync, type DataResource } from './data-sync';
+
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL?.trim() || '/api').replace(/\/+$/, '');
 
 type ApiRequestOptions = Omit<RequestInit, 'headers'> & {
@@ -29,6 +31,37 @@ const inflightRequests = new Map<string, Promise<unknown>>();
 const requestControllers = new Map<string, AbortController>();
 const activeCancelGroups = new Map<string, Set<string>>();
 let authExpiryEventDispatched = false;
+
+function resourcesForMutation(path: string): DataResource[] {
+  const resources = new Set<DataResource>();
+  if (/vehicle-movements|vehicles/.test(path)) resources.add(path.includes('vehicle-movements') ? 'vehicle_movements' : 'vehicles');
+  if (/drivers|assignments/.test(path)) resources.add('drivers');
+  if (/dispatch-opportunities/.test(path)) resources.add('dispatch_opportunities');
+  if (/smart-living-deliveries|delivery|scheduler|returns|reconcile/.test(path)) {
+    resources.add('deliveries');
+    resources.add('delivery_runs');
+    resources.add('returns');
+  }
+  if (/branches/.test(path)) resources.add('branches');
+  if (/users|agents|managers|provision/.test(path)) {
+    resources.add('users');
+    resources.add('agents');
+    resources.add('managers');
+  }
+  return [...resources];
+}
+
+function invalidateResourceCache(resources: DataResource[]) {
+  const terms: Record<DataResource, string[]> = {
+    vehicles: ['vehicle'], vehicle_movements: ['vehicle-movement', 'vehicle_movements'],
+    drivers: ['driver', 'assignment'], users: ['user'], deliveries: ['delivery', 'smart-living'],
+    delivery_runs: ['run', 'scheduler'], returns: ['return', 'reconcile'], branches: ['branch'],
+    agents: ['agent'], managers: ['manager'], dispatch_opportunities: ['dispatch-opportunit'], notifications: ['notification'],
+  };
+  for (const [key] of responseCache) {
+    if (resources.some((resource) => terms[resource].some((term) => key.toLowerCase().includes(term)))) responseCache.delete(key);
+  }
+}
 
 export class ApiRequestError extends Error {
   status: number;
@@ -336,6 +369,11 @@ export async function apiRequest<T>(
     }
 
     if (method !== 'GET' && typeof window !== 'undefined') {
+      const resources = resourcesForMutation(path);
+      if (resources.length) {
+        invalidateResourceCache(resources);
+        emitDataSync(resources, { path, method });
+      }
       window.dispatchEvent(new CustomEvent('flux-notifications-changed', {
         detail: { path, method },
       }));

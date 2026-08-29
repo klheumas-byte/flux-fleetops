@@ -138,7 +138,7 @@ def get_branch_operations_overview(actor_id):
             "status": order.get("status"), "readiness": "PLANNING_REQUIRED",
             "customer": order.get("customer_name"), "area": order.get("landmark") or order.get("delivery_address"),
             "products": [item.get("product_name") for item in order.get("product_lines", []) if item.get("product_name")],
-            "field_agent": people.get(order.get("assigned_field_agent_id")), "transport_method": str(order.get("transport_method") or "VEHICLE").upper(),
+            "field_agent": people.get(order.get("assigned_field_agent_id")), "field_agents": [people.get(order.get("assigned_field_agent_id"))] if people.get(order.get("assigned_field_agent_id")) else [], "transport_method": str(order.get("transport_method") or "VEHICLE").upper(),
             "driver": None, "handler": None, "vehicle": None, "delivery_count": 1,
         })
     for run in runs:
@@ -157,7 +157,8 @@ def get_branch_operations_overview(actor_id):
             if not (manual.get("phone") or manual.get("handler_phone")): missing.append("handler phone")
         readiness = "READY" if not missing else "PLANNING_REQUIRED" if len(missing) >= 4 else "PARTIALLY_PLANNED"
         products = list(dict.fromkeys(item.get("product_name") for order in order_rows for item in order.get("product_lines", []) if item.get("product_name")))
-        row = {"id": str(run["_id"]), "record_type": "delivery_run", "run_number": run.get("run_number") or run.get("batch_number"), "delivery_date": run.get("delivery_date"), "expected_time": run.get("planned_departure_time") or (stops[0].get("expected_arrival_time") if stops else None), "status": run.get("status"), "readiness": readiness, "missing_requirements": missing, "customer": first.get("customer_name") or (stops[0].get("customer_name") if stops else None), "area": first.get("landmark") or first.get("delivery_address") or (stops[0].get("landmark") if stops else None), "products": products, "field_agent": people.get(run.get("field_agent_id")), "transport_method": method, "driver": people.get(run.get("driver_id")), "handler": manual.get("provider_name") or manual.get("handler_name"), "vehicle": vehicles.get(run.get("vehicle_id")), "delivery_count": len(run.get("delivery_order_ids") or [])}
+        run_agent_names = list(dict.fromkeys(people.get(value) for value in (run.get("assigned_agent_ids") or [run.get("field_agent_id")]) if people.get(value)))
+        row = {"id": str(run["_id"]), "record_type": "delivery_run", "run_number": run.get("run_number") or run.get("batch_number"), "delivery_date": run.get("delivery_date"), "expected_time": run.get("planned_departure_time") or (stops[0].get("expected_arrival_time") if stops else None), "status": run.get("status"), "readiness": readiness, "missing_requirements": missing, "customer": first.get("customer_name") or (stops[0].get("customer_name") if stops else None), "area": first.get("landmark") or first.get("delivery_address") or (stops[0].get("landmark") if stops else None), "products": products, "field_agent": run_agent_names[0] if run_agent_names else None, "field_agents": run_agent_names, "transport_method": method, "driver": people.get(run.get("driver_id")), "handler": manual.get("provider_name") or manual.get("handler_name"), "vehicle": vehicles.get(run.get("vehicle_id")), "delivery_count": len(run.get("delivery_order_ids") or [])}
         board[_group(run.get("status"))].append(row)
     awaiting = len(unplanned)
     incoming = get_collection("stock_transfers").count_documents({**_match(branch_ids, "destination_branch_id"), "status": {"$in": list(OPEN_TRANSFER_STATUSES)}, "receiving_status": {"$ne": "received"}})

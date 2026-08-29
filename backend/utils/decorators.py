@@ -6,7 +6,7 @@ from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
 from utils.responses import error_response
 from extensions import get_collection
 from bson import ObjectId
-from services.rbac_service import user_has_permission, user_role_codes, write_audit
+from services.rbac_service import user_can_manage_smartliving, user_has_permission, user_role_codes, write_audit
 
 
 PASSWORD_CHANGE_EXEMPT_PATHS = {
@@ -157,6 +157,31 @@ def permission_required(permission: str):
             return protected()
         return wrapper
     return decorator
+
+
+def smartliving_admin_required(fn):
+    """Protect global SmartLiving administration with the canonical RBAC rule."""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if request.method == "OPTIONS":
+            return "", 200
+
+        @jwt_required()
+        def protected():
+            denial = _current_account_denial()
+            if denial is not None:
+                return denial
+            current_user_id = get_jwt_identity()
+            if not ObjectId.is_valid(str(current_user_id)):
+                return error_response("Invalid user identity.", status_code=401)
+            user = get_collection("users").find_one({"_id": ObjectId(str(current_user_id))})
+            if not user_can_manage_smartliving(user):
+                return error_response("You do not have permission to manage SmartLiving Integration.", status_code=403)
+            return fn(*args, **kwargs)
+
+        return protected()
+
+    return wrapper
 
 
 def permission_for_request(path: str, method: str) -> str | None:

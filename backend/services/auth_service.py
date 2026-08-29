@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import re
 
 from bson import ObjectId
 from flask_jwt_extended import create_access_token
@@ -53,6 +54,16 @@ def normalize_role_value(value) -> str | None:
     return normalized or None
 
 
+def normalize_username(value) -> str | None:
+    """Canonical username identity; full_name remains the display value."""
+    normalized = str(value or "").strip().lower()
+    return normalized or None
+
+
+def _case_insensitive_username_filter(username: str) -> dict:
+    return {"username": re.compile(f"^{re.escape(username)}$", re.IGNORECASE)}
+
+
 def ensure_indexes():
     ensure_indexes_for_collection(
         users_collection(),
@@ -60,6 +71,7 @@ def ensure_indexes():
             {"keys": [("email", ASCENDING)], "options": {"unique": True, "sparse": True}},
             {"keys": [("phone", ASCENDING)], "options": {"unique": True, "sparse": True}},
             {"keys": [("username", ASCENDING)], "options": {"unique": True, "sparse": True}},
+            {"keys": [("username_normalized", ASCENDING)], "options": {"unique": True, "sparse": True}},
             {"keys": [("branch", ASCENDING), ("status", ASCENDING)]},
             {"keys": [("role", ASCENDING)]},
             {"keys": [("role_ids", ASCENDING), ("status", ASCENDING)]},
@@ -152,7 +164,7 @@ def _require_primary_branch_for_roles(role_ids, primary_branch_id):
         raise ApiError("Invalid primary_branch_id.", status_code=400)
 
 
-def create_user(payload: dict, role: str) -> dict:
+def create_user(payload: dict, role: str, *, allow_missing_phone: bool = False, trusted_fields: dict | None = None) -> dict:
     role = normalize_role_value(role)
     role_ids = user_role_codes({"role_ids": payload.get("role_ids") or [], "roles": payload.get("roles") or [], "role": role, "user_type": payload.get("user_type")})
     if role and role not in role_ids:
@@ -164,7 +176,7 @@ def create_user(payload: dict, role: str) -> dict:
 
     full_name = (payload.get("full_name") or "").strip()
     email = normalize_email(payload.get("email"))
-    username = str(payload.get("username") or "").strip().lower() or None
+    username = normalize_username(payload.get("username"))
     phone = normalize_phone(payload.get("phone"))
     password = payload.get("password")
     status = str(payload.get("status", "active" if role in {"owner", "admin", "fleet_owner", "personal_vehicle_owner"} else "inactive")).strip().lower()
@@ -175,23 +187,28 @@ def create_user(payload: dict, role: str) -> dict:
         raise ApiError("A valid email address is required.", status_code=400)
     if not username and not email:
         raise ApiError("Username or email is required.", status_code=400)
-    if not phone:
+    if not phone and not allow_missing_phone:
         raise ApiError("Phone number is required.", status_code=400)
-    if not validate_phone(phone):
+    if phone and not validate_phone(phone):
         raise ApiError("A valid phone number is required.", status_code=400)
     if not password or len(password) < 6:
         raise ApiError("Password must be at least 6 characters long.", status_code=400)
     if status not in ALLOWED_STATUSES:
         raise ApiError("Invalid user status.", status_code=400)
 
-    identity_filters = [{"phone": phone}]
+    identity_filters = []
+    if phone:
+        identity_filters.append({"phone": phone})
     if email:
         identity_filters.append({"email": email})
     if username:
-        identity_filters.append({"username": username})
-    existing_user = users_read_collection().find_one({"$or": identity_filters})
+        identity_filters.extend([
+            {"username_normalized": username},
+            _case_insensitive_username_filter(username),
+        ])
+    existing_user = users_read_collection().find_one({"$or": identity_filters}) if identity_filters else None
     if existing_user:
-        raise ApiError("A user with this email or phone already exists.", status_code=409)
+        raise ApiError("A user with this username, email, or phone already exists.", status_code=409)
 
     driver_profile = normalize_driver_profile_payload(payload) if "driver" in role_ids else None
     primary_branch_id = ObjectId(str(payload["primary_branch_id"])) if payload.get("primary_branch_id") and ObjectId.is_valid(str(payload["primary_branch_id"])) else None
@@ -207,6 +224,7 @@ def create_user(payload: dict, role: str) -> dict:
         "email": email,
         "phone": phone,
         "username": username,
+        "username_normalized": username,
         "branch": str(payload.get("branch") or "").strip() or None,
         "primary_branch_id": primary_branch_id,
         "allowed_branch_ids": [ObjectId(str(value)) for value in payload.get("allowed_branch_ids", []) if ObjectId.is_valid(str(value))],
@@ -224,13 +242,18 @@ def create_user(payload: dict, role: str) -> dict:
         "temporary_password_issued_at": timestamp if payload.get("temporary_password", False) else None,
         "password_changed_at": None,
         "password_version": 1,
+        **(trusted_fields or {}),
     }
     if not email:
         user_document.pop("email", None)
+    if not phone:
+        user_document.pop("phone", None)
+    if not username:
+        user_document.pop("username_normalized", None)
     try:
         insert_result = users_collection().insert_one(user_document)
     except DuplicateKeyError:
-        raise ApiError("A user with this email or phone already exists.", status_code=409) from None
+        raise ApiError("A user with this username, email, or phone already exists.", status_code=409) from None
 
     user_document["_id"] = insert_result.inserted_id
     return serialize_user(user_document)
@@ -255,19 +278,23 @@ def create_session_token(user: dict) -> str:
 def authenticate_user(identifier: str, password: str) -> dict:
     normalized_email = normalize_email(identifier)
     normalized_phone = normalize_phone(identifier)
-    normalized_username = str(identifier or "").strip().lower()
+    normalized_username = normalize_username(identifier)
 
-    filters = []
-    if normalized_email:
-        filters.append({"email": normalized_email})
-    if normalized_phone:
-        filters.append({"phone": normalized_phone})
-    if normalized_username:
-        filters.append({"username": normalized_username})
-    if not filters:
+    user = None
+    if normalized_email and validate_email(normalized_email):
+        user = users_read_collection().find_one({"email": normalized_email})
+    elif normalized_phone and validate_phone(normalized_phone):
+        user = users_read_collection().find_one({"phone": normalized_phone})
+    elif normalized_username:
+        username_matches = list(users_read_collection().find({"$or": [
+            {"username_normalized": normalized_username},
+            _case_insensitive_username_filter(normalized_username),
+        ]}).limit(2))
+        # Never choose arbitrarily if legacy data contains a case-only collision.
+        user = username_matches[0] if len(username_matches) == 1 else None
+    else:
         raise ApiError("A valid username, email, or phone number is required.", status_code=400)
 
-    user = users_read_collection().find_one({"$or": filters})
     if not user or not check_password_hash(user["password_hash"], password):
         try:
             write_audit("failed_login", metadata={"identifier": str(identifier or "")})
@@ -310,7 +337,9 @@ def get_user_by_id(user_id: str) -> dict:
 def list_users_for_role(current_role: str) -> list[dict]:
     current_role = normalize_role_value(current_role) or current_role
     operational_roles = ["operations_manager", "driver", "field_agent", "issuing_receiving_officer", "branch_manager", "branch_warehouse_coordinator", "personal_vehicle_owner", "fleet_owner"]
-    query = {} if current_role in {"owner", "system_administrator"} else {"$or": [{"role": {"$in": operational_roles}}, {"role_ids": {"$in": operational_roles}}]}
+    query = {"archived": {"$ne": True}}
+    if current_role not in {"owner", "system_administrator"}:
+        query["$or"] = [{"role": {"$in": operational_roles}}, {"role_ids": {"$in": operational_roles}}]
     users = users_collection().find(query).sort("created_at", ASCENDING)
     return [serialize_user(user) for user in users]
 
@@ -323,14 +352,14 @@ def list_users_for_actor(actor: dict) -> list[dict]:
     token remains valid.
     """
     if user_has_permission(actor, "users.manage"):
-        documents = users_collection().find({}).sort("created_at", ASCENDING)
+        documents = users_collection().find({"archived": {"$ne": True}}).sort("created_at", ASCENDING)
     elif user_has_permission(actor, "users.manage_operational"):
         operational_roles = {
             "operations_manager", "driver", "field_agent",
             "issuing_receiving_officer", "branch_manager", "branch_warehouse_coordinator", "personal_vehicle_owner", "fleet_owner",
         }
         documents = (
-            user for user in users_collection().find({}).sort("created_at", ASCENDING)
+            user for user in users_collection().find({"archived": {"$ne": True}}).sort("created_at", ASCENDING)
             if operational_roles.intersection(user_role_codes(user))
         )
     else:
@@ -427,10 +456,11 @@ def update_user_account_as(current_user_id: str, current_role: str, target_user_
             raise ApiError("A valid phone number is required.", status_code=400)
         updates["phone"] = phone
     if "username" in payload:
-        username = str(payload.get("username") or "").strip().lower()
+        username = normalize_username(payload.get("username"))
         if not username:
             raise ApiError("Username is required.", status_code=400)
         updates["username"] = username
+        updates["username_normalized"] = username
     if "role_ids" in payload or "roles" in payload:
         role_ids = user_role_codes({"role_ids": payload.get("role_ids") or [], "roles": payload.get("roles") or []})
         if not role_ids:
@@ -469,15 +499,18 @@ def update_user_account_as(current_user_id: str, current_role: str, target_user_
     if "phone" in updates:
         duplicate_query["$or"].append({"phone": updates["phone"]})
     if "username" in updates:
-        duplicate_query["$or"].append({"username": updates["username"]})
+        duplicate_query["$or"].extend([
+            {"username_normalized": updates["username_normalized"]},
+            _case_insensitive_username_filter(updates["username"]),
+        ])
     if duplicate_query["$or"] and users_collection().find_one(duplicate_query, {"_id": 1}):
-        raise ApiError("A user with this email or phone already exists.", status_code=409)
+        raise ApiError("A user with this username, email, or phone already exists.", status_code=409)
     before = {key: user.get(key) for key in updates}
     updates["updated_at"] = now_utc()
     try:
         users_collection().update_one({"_id": user["_id"]}, {"$set": updates})
     except DuplicateKeyError:
-        raise ApiError("A user with this email or phone already exists.", status_code=409) from None
+        raise ApiError("A user with this username, email, or phone already exists.", status_code=409) from None
     user.update(updates)
     _audit_user_management("user_profile_changed", current_user_id, current_role, user["_id"], {"before": before, "after": {key: updates[key] for key in before}})
     if "role_ids" in updates:
@@ -519,10 +552,11 @@ def change_own_password(current_user_id: str, current_password: str, new_passwor
     users_collection().update_one({"_id": user["_id"]}, {"$set": {
         "password_hash": generate_password_hash(new_password),
         "must_change_password": False,
+        "default_password_active": False,
         "password_changed_at": timestamp,
         "updated_at": timestamp,
     }, "$unset": {"temporary_password_issued_at": ""}, "$inc": {"password_version": 1}})
-    user.update({"must_change_password": False, "password_changed_at": timestamp, "updated_at": timestamp})
+    user.update({"must_change_password": False, "default_password_active": False, "password_changed_at": timestamp, "updated_at": timestamp})
     user.pop("temporary_password_issued_at", None)
     _audit_user_management("first_login_password_changed", current_user_id, user.get("role"), user["_id"], {"must_change_password": False})
     return serialize_user(user)

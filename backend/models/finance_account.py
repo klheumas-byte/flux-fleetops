@@ -25,6 +25,10 @@ def serialize_finance_account(account_document: dict) -> dict:
         "updated_at": account_document.get("updated_at").isoformat()
         if account_document.get("updated_at")
         else None,
+        "audit_log": [
+            {**item, "actor_id": _serialize_reference_id(item.get("actor_id")), "at": item.get("at").isoformat() if hasattr(item.get("at"), "isoformat") else item.get("at")}
+            for item in account_document.get("audit_log", [])
+        ],
     }
 
 

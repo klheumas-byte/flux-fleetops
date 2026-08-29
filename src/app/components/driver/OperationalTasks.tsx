@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { ArrowLeft, ClipboardList, ExternalLink, Loader2, RefreshCw } from 'lucide-react';
 import { ApiRequestError } from '../../lib/api';
 import { fetchDriverOperationalTasks, type DriverOperationalTask } from '../../lib/driver-api';
+import { useDataSync } from '../../lib/data-sync';
 
 const SupplierPickup = lazy(() => import('../shared/SupplierPickup'));
 const StockTransfers = lazy(() => import('../shared/StockTransfers'));
@@ -68,6 +69,7 @@ export default function OperationalTasks({ onNavigate }: { onNavigate?: (page: s
   }, [selected]);
 
   useEffect(() => { void load(); }, []);
+  useDataSync(['deliveries', 'delivery_runs', 'vehicle_movements', 'returns'], () => { if (document.visibilityState === 'visible') void load(); });
   useEffect(() => {
     const refresh = () => { if (document.visibilityState === 'visible') void load(); };
     const interval = window.setInterval(refresh, 15_000);
@@ -162,6 +164,21 @@ export default function OperationalTasks({ onNavigate }: { onNavigate?: (page: s
                 <Info label="Origin" value={task.origin || 'Not set'} />
                 <Info label="Destination" value={task.destination || 'Not set'} />
               </dl>
+              {task.operation_type === 'smart_living_delivery' && Boolean(task.stops?.length) && (
+                <div className="mt-4 space-y-2">
+                  {task.stops?.map((stop, index) => (
+                    <div key={`${task.id}-stop-${stop.sequence || index}`} className="rounded-lg border bg-slate-50 p-3 text-sm">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <strong className="text-slate-900">Stop {stop.sequence || index + 1}: {stop.customer || 'Customer'}</strong>
+                        <span className="text-xs text-slate-500">{stop.status || 'Pending'}</span>
+                      </div>
+                      <p className="mt-1 text-slate-600">{stop.phone || 'No phone'} · {stop.location || 'No location'}</p>
+                      <p className="mt-1 text-xs text-slate-500">{stop.branch || 'Branch'} · Agent: {stop.field_agent || 'Unassigned'} · {stop.date || 'No date'} {stop.time || ''}</p>
+                      <p className="mt-1 text-xs text-slate-600">{stop.products?.map((item) => `${item.name || 'Product'} × ${item.quantity || 0}`).join(', ') || 'No products'}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className="mt-5 flex flex-wrap gap-2">
                 <button type="button" onClick={() => { if (task.operation_type === 'smart_living_delivery' && onNavigate) { sessionStorage.setItem('flux_smart_living_batch', task.id); onNavigate('smart-living-deliveries'); } else setSelected(task); }} className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white">
                   {task.current_action.label}

@@ -79,6 +79,24 @@ class MovementSourceServiceTests(unittest.TestCase):
         self.assertEqual(result["source_key"], f"dispatch_job:{self.source_id}")
         collection.insert_one.assert_called_once()
 
+    def test_explicit_pymongo_collection_is_never_truth_tested(self):
+        collection = MagicMock()
+        collection.__bool__.side_effect = NotImplementedError(
+            "Collection objects do not implement truth value testing"
+        )
+        collection.find_one.return_value = None
+        collection.insert_one.return_value = SimpleNamespace(inserted_id=ObjectId())
+
+        result = source_service.ensure_movement_for_source(
+            source_type="dispatch_job",
+            source_record_id=self.source_id,
+            movement_defaults=self.defaults,
+            movement_collection=collection,
+        )
+
+        self.assertTrue(result["created"])
+        collection.__bool__.assert_not_called()
+
     def test_repeated_source_call_returns_existing_movement(self):
         existing = {
             "_id": ObjectId(),

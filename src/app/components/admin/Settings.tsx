@@ -79,6 +79,7 @@ const tabConfig: Array<{
 ];
 
 const typeLabels: Record<string, string> = {
+  funding_sources: 'Funding Sources',
   customer_categories: 'Customer Categories',
   relationship_categories: 'Relationship Categories',
   relationship_roles: 'Relationship Roles',

@@ -57,6 +57,9 @@ interface FinanceAccount {
   status: 'active' | 'inactive';
 }
 
+interface FundingSource { id: string; name: string; active: boolean; }
+interface MaintenanceJob { id: string; title: string; vehicle_id: string | null; expense_id?: string | null; status: string; }
+
 interface ExpenseRecord {
   id: string;
   expense_title: string;
@@ -66,6 +69,10 @@ interface ExpenseRecord {
   vehicle_id: string | null;
   driver_id: string | null;
   finance_account_id: string | null;
+  funding_source_id: string | null;
+  funding_source_snapshot?: { id: string; name: string } | null;
+  funding_source_description?: string | null;
+  maintenance_job_id?: string | null;
   finance_account_snapshot?: {
     id: string | null;
     account_name: string;
@@ -142,6 +149,9 @@ interface FinanceAccountsResponse {
   };
 }
 
+interface FundingSourcesResponse { data: { funding_sources: FundingSource[] } }
+interface MaintenanceResponse { data: { jobs: MaintenanceJob[] } }
+
 interface ExpenseFormState {
   expense_title: string;
   expense_category: ExpenseCategory;
@@ -150,6 +160,10 @@ interface ExpenseFormState {
   vehicle_id: string;
   driver_id: string;
   finance_account_id: string;
+  funding_source_id: string;
+  funding_source_description: string;
+  maintenance_job_id: string;
+  paid_by: string;
   payment_method: PaymentMethod;
   reference_number: string;
   receipt_image: string;
@@ -164,6 +178,10 @@ const initialFormState: ExpenseFormState = {
   vehicle_id: '',
   driver_id: '',
   finance_account_id: '',
+  funding_source_id: '',
+  funding_source_description: '',
+  maintenance_job_id: '',
+  paid_by: '',
   payment_method: 'cash',
   reference_number: '',
   receipt_image: '',
@@ -209,12 +227,14 @@ export default function Expenses() {
   const sessionUser = getStoredSessionUser();
   const currentRole = sessionUser?.role || null;
   const isOwner = currentRole === 'owner';
-  const canCreateExpense = currentRole === 'owner' || currentRole === 'admin';
+  const canCreateExpense = currentRole === 'owner' || currentRole === 'admin' || currentRole === 'finance_officer';
 
   const [expenses, setExpenses] = useState<ExpenseRecord[]>([]);
   const [drivers, setDrivers] = useState<UserSummary[]>([]);
   const [vehicles, setVehicles] = useState<VehicleSummary[]>([]);
   const [financeAccounts, setFinanceAccounts] = useState<FinanceAccount[]>([]);
+  const [fundingSources, setFundingSources] = useState<FundingSource[]>([]);
+  const [maintenanceJobs, setMaintenanceJobs] = useState<MaintenanceJob[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isActionSubmitting, setIsActionSubmitting] = useState(false);
@@ -232,11 +252,13 @@ export default function Expenses() {
     setPageError('');
 
     try {
-      const [expensesResponse, driversResponse, vehiclesResponse, financeAccountsResponse] = await Promise.all([
+      const [expensesResponse, driversResponse, vehiclesResponse, financeAccountsResponse, fundingSourcesResponse, maintenanceResponse] = await Promise.all([
         apiRequest<ExpensesResponse>('/expenses'),
         apiRequest<DriversResponse>('/drivers'),
         apiRequest<VehiclesResponse>('/vehicles'),
         apiRequest<FinanceAccountsResponse>('/finance/accounts'),
+        apiRequest<FundingSourcesResponse>('/finance/funding-sources'),
+        apiRequest<MaintenanceResponse>('/maintenance'),
       ]);
       setExpenses(Array.isArray(expensesResponse.data?.expenses) ? expensesResponse.data.expenses : []);
       setDrivers(Array.isArray(driversResponse.data?.drivers) ? driversResponse.data.drivers : []);
@@ -244,6 +266,8 @@ export default function Expenses() {
       setFinanceAccounts(
         Array.isArray(financeAccountsResponse.data?.accounts) ? financeAccountsResponse.data.accounts : [],
       );
+      setFundingSources(Array.isArray(fundingSourcesResponse.data?.funding_sources) ? fundingSourcesResponse.data.funding_sources : []);
+      setMaintenanceJobs(Array.isArray(maintenanceResponse.data?.jobs) ? maintenanceResponse.data.jobs : []);
     } catch (error) {
       if (error instanceof ApiRequestError) {
         setPageError(error.message);
@@ -275,6 +299,16 @@ export default function Expenses() {
       }));
     }
   }, [financeAccounts, formState.finance_account_id, showModal]);
+
+  useEffect(() => {
+    if (!showModal) return;
+    const firstSource = fundingSources.find((source) => source.active !== false);
+    setFormState((current) => ({
+      ...current,
+      funding_source_id: current.funding_source_id || firstSource?.id || '',
+      paid_by: current.paid_by || sessionUser?.id || drivers[0]?.id || '',
+    }));
+  }, [drivers, fundingSources, sessionUser?.id, showModal]);
 
   const totals = useMemo(() => {
     return expenses.reduce(
@@ -323,6 +357,8 @@ export default function Expenses() {
       ...initialFormState,
       expense_date: new Date().toISOString().slice(0, 10),
       finance_account_id: firstActiveAccount?.id || '',
+      funding_source_id: fundingSources.find((source) => source.active !== false)?.id || '',
+      paid_by: sessionUser?.id || drivers[0]?.id || '',
     });
   };
 
@@ -367,6 +403,10 @@ export default function Expenses() {
           vehicle_id: formState.vehicle_id || null,
           driver_id: formState.driver_id || null,
           finance_account_id: formState.finance_account_id,
+          funding_source_id: formState.funding_source_id,
+          funding_source_description: formState.funding_source_description,
+          maintenance_job_id: formState.maintenance_job_id || null,
+          paid_by: formState.paid_by,
           payment_method: formState.payment_method,
           reference_number: formState.reference_number,
           receipt_image: formState.receipt_image || null,
@@ -564,6 +604,7 @@ export default function Expenses() {
                       <div className="mt-1 text-xs text-gray-500">
                         Requested by {expense.requested_by_user?.full_name || 'Unknown user'}
                       </div>
+                      <div className="text-xs text-gray-500">Funded by {expense.funding_source_snapshot?.name || 'Legacy / not classified'}</div>
                     </td>
                     <td className="px-6 py-4">
                       <div className="text-gray-700">{expense.driver?.full_name || 'No driver linked'}</div>
@@ -801,6 +842,49 @@ export default function Expenses() {
                       ))}
                     </select>
                   </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                  <div>
+                    <label className="mb-2 block text-sm font-medium text-gray-700">Funding Source</label>
+                    <select required value={formState.funding_source_id}
+                      onChange={(event) => setFormState((current) => ({ ...current, funding_source_id: event.target.value }))}
+                      className="w-full rounded-lg border border-gray-300 px-4 py-2.5 focus:ring-2 focus:ring-[#2563EB]">
+                      <option value="">Choose funding source...</option>
+                      {fundingSources.filter((source) => source.active !== false).map((source) => <option key={source.id} value={source.id}>{source.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="mb-2 block text-sm font-medium text-gray-700">Paid By</label>
+                    <select required value={formState.paid_by}
+                      onChange={(event) => setFormState((current) => ({ ...current, paid_by: event.target.value }))}
+                      className="w-full rounded-lg border border-gray-300 px-4 py-2.5 focus:ring-2 focus:ring-[#2563EB]">
+                      {sessionUser?.id && <option value={sessionUser.id}>{sessionUser.full_name || 'Current user'}</option>}
+                      {drivers.filter((user) => user.id !== sessionUser?.id).map((user) => <option key={user.id} value={user.id}>{user.full_name}</option>)}
+                    </select>
+                  </div>
+                </div>
+
+                {fundingSources.find((source) => source.id === formState.funding_source_id)?.name.toLowerCase() === 'other' && (
+                  <div>
+                    <label className="mb-2 block text-sm font-medium text-gray-700">Other Funding Source Description</label>
+                    <input required value={formState.funding_source_description}
+                      onChange={(event) => setFormState((current) => ({ ...current, funding_source_description: event.target.value }))}
+                      className="w-full rounded-lg border border-gray-300 px-4 py-2.5 focus:ring-2 focus:ring-[#2563EB]" />
+                  </div>
+                )}
+
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-gray-700">Maintenance / Repair Link</label>
+                  <select value={formState.maintenance_job_id}
+                    onChange={(event) => {
+                      const job = maintenanceJobs.find((item) => item.id === event.target.value);
+                      setFormState((current) => ({ ...current, maintenance_job_id: event.target.value, vehicle_id: job?.vehicle_id || current.vehicle_id }));
+                    }}
+                    className="w-full rounded-lg border border-gray-300 px-4 py-2.5 focus:ring-2 focus:ring-[#2563EB]">
+                    <option value="">No maintenance job linked</option>
+                    {maintenanceJobs.filter((job) => !job.expense_id).map((job) => <option key={job.id} value={job.id}>{job.title} ({formatEnumLabel(job.status)})</option>)}
+                  </select>
                 </div>
 
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-2">

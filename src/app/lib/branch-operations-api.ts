@@ -1,7 +1,7 @@
 import { apiRequest } from './api';
 import type { SessionUser } from './auth-session';
 
-export type BranchRun = { id:string; record_type?:string; run_number?:string; delivery_date?:string; expected_time?:string; status:string; readiness?:'PLANNING_REQUIRED'|'PARTIALLY_PLANNED'|'READY'; missing_requirements?:string[]; customer?:string; products?:string[]; area?:string; field_agent?:string; transport_method?:'VEHICLE'|'KAYA'|'OTHER_MANUAL'; driver?:string; handler?:string; vehicle?:string; delivery_count:number };
+export type BranchRun = { id:string; record_type?:string; run_number?:string; delivery_date?:string; expected_time?:string; status:string; readiness?:'PLANNING_REQUIRED'|'PARTIALLY_PLANNED'|'READY'; missing_requirements?:string[]; customer?:string; products?:string[]; area?:string; field_agent?:string; field_agents?:string[]; transport_method?:'VEHICLE'|'KAYA'|'OTHER_MANUAL'; driver?:string; handler?:string; vehicle?:string; delivery_count:number };
 export type BranchOverview = {
   kpis: Record<'deliveries_today'|'tomorrow'|'upcoming'|'awaiting_planning'|'scheduled'|'in_progress'|'completed'|'failed_partial'|'incoming_stock'|'open_exceptions'|'available_branch_drivers', number>;
   board: Record<'awaiting_planning'|'scheduled'|'in_progress'|'completed'|'exceptions', BranchRun[]>;

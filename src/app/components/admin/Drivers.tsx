@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
 import { useDebouncedValue } from '../../lib/use-debounced-value';
+import { useDataSync } from '../../lib/data-sync';
 import PersonalUserAccounts from './PersonalUserAccounts';
 
 type ApprovalStatus = 'pending' | 'approved' | 'rejected';
@@ -58,6 +59,15 @@ interface DriverProfile {
     reason?: string;
     effective_date?: string | null;
     changes?: Record<string, { before: unknown; after: unknown }>;
+  }>;
+  target_history: Array<{
+    target_amount: number;
+    target_frequency: 'daily' | 'weekly';
+    effective_from: string;
+    effective_to?: string | null;
+    reason?: string;
+    changed_by_name?: string;
+    changed_at?: string;
   }>;
   guarantor: {
     full_name: string | null;
@@ -144,6 +154,7 @@ interface DriverCreateForm {
   target_frequency: 'daily' | 'weekly';
   private_finance_enabled: boolean;
   settings_effective_date: string;
+  target_effective_to: string;
   change_reason: string;
   guarantor_full_name: string;
   guarantor_phone: string;
@@ -181,6 +192,7 @@ const initialDriverForm: DriverCreateForm = {
   target_frequency: 'weekly',
   private_finance_enabled: false,
   settings_effective_date: '',
+  target_effective_to: '',
   change_reason: '',
   guarantor_full_name: '',
   guarantor_phone: '',
@@ -280,6 +292,7 @@ function formFromDriver(driver: Driver): DriverCreateForm {
     target_frequency: profile?.target_frequency || 'weekly',
     private_finance_enabled: profile?.private_finance_enabled ?? false,
     settings_effective_date: profile?.settings_effective_date?.slice(0, 10) || '',
+    target_effective_to: '',
     change_reason: '',
     guarantor_full_name: guarantor?.full_name || '',
     guarantor_phone: guarantor?.phone || '',
@@ -370,6 +383,9 @@ export default function Drivers() {
   useEffect(() => {
     void loadDrivers();
   }, [currentRole]);
+  useDataSync(['drivers', 'users', 'delivery_runs', 'deliveries'], () => {
+    if (document.visibilityState === 'visible') void loadDrivers();
+  });
 
   const stats = useMemo(() => {
     const activeDrivers = drivers.filter((driver) => driver.status === 'active').length;
@@ -490,13 +506,37 @@ export default function Drivers() {
           body: JSON.stringify(payload),
         });
       } else if (selectedDriver) {
+        const profilePayload = buildDriverProfilePayload(driverForm) as Record<string, unknown>;
+        delete profilePayload.target_amount;
+        delete profilePayload.target_frequency;
+        delete profilePayload.target_enabled;
+        delete profilePayload.settings_effective_date;
         await apiRequest(`/drivers/${selectedDriver.id}/profile`, {
           method: 'PATCH',
           body: JSON.stringify({
-            driver_profile: buildDriverProfilePayload(driverForm),
+            driver_profile: profilePayload,
             change_reason: driverForm.change_reason || 'Driver settings updated from Driver Management',
           }),
         });
+        const targetChanged = currentRole === 'owner' && (
+          Number(driverForm.target_amount || 0) !== Number(selectedDriver.driver_profile?.target_amount || 0) ||
+          driverForm.target_frequency !== (selectedDriver.driver_profile?.target_frequency || 'weekly') ||
+          driverForm.settings_effective_date !== (selectedDriver.driver_profile?.settings_effective_date?.slice(0, 10) || '') ||
+          Boolean(driverForm.target_effective_to)
+        );
+        if (targetChanged) {
+          if (!driverForm.settings_effective_date) throw new Error('Effective from date is required for a target change.');
+          await apiRequest(`/drivers/${selectedDriver.id}/targets`, {
+            method: 'POST',
+            body: JSON.stringify({
+              target_amount: Number(driverForm.target_amount || 0),
+              target_frequency: driverForm.target_frequency,
+              effective_from: driverForm.settings_effective_date,
+              effective_to: driverForm.target_effective_to || null,
+              reason: driverForm.change_reason || 'Target updated from Driver Management',
+            }),
+          });
+        }
       }
 
       closeModal();
@@ -505,7 +545,7 @@ export default function Drivers() {
       if (error instanceof ApiRequestError) {
         setFormError(error.message);
       } else {
-        setFormError('Unable to save driver details right now.');
+        setFormError(error instanceof Error ? error.message : 'Unable to save driver details right now.');
       }
     } finally {
       setIsSubmitting(false);
@@ -1281,7 +1321,7 @@ export default function Drivers() {
                       <input
                         type="checkbox"
                         checked={driverForm.target_enabled}
-                        disabled={profileMode === 'view' || driverForm.operating_mode === 'operations_only'}
+                        disabled={profileMode === 'view' || driverForm.operating_mode === 'operations_only' || currentRole !== 'owner'}
                         onChange={(event) => updateFormField('target_enabled', event.target.checked)}
                       />
                       Target enabled
@@ -1290,7 +1330,7 @@ export default function Drivers() {
                       <label className="block text-sm font-medium text-gray-700 mb-2">Target Frequency</label>
                       <select
                         value={driverForm.target_frequency}
-                        disabled={profileMode === 'view' || !driverForm.target_enabled}
+                        disabled={profileMode === 'view' || !driverForm.target_enabled || currentRole !== 'owner'}
                         onChange={(event) => updateFormField('target_frequency', event.target.value as DriverCreateForm['target_frequency'])}
                         className="w-full px-3 py-2.5 border border-gray-300 rounded-lg bg-white"
                       >
@@ -1314,7 +1354,7 @@ export default function Drivers() {
                         min="0"
                         step="0.01"
                         value={driverForm.target_amount}
-                        disabled={profileMode === 'view' || !driverForm.target_enabled}
+                        disabled={profileMode === 'view' || !driverForm.target_enabled || currentRole !== 'owner'}
                         onChange={(event) => updateFormField('target_amount', event.target.value)}
                         className="w-full px-3 py-2.5 border border-gray-300 rounded-lg bg-white"
                       />
@@ -1324,10 +1364,18 @@ export default function Drivers() {
                       <input
                         type="date"
                         value={driverForm.settings_effective_date}
-                        disabled={profileMode === 'view'}
+                        disabled={profileMode === 'view' || currentRole !== 'owner'}
                         onChange={(event) => updateFormField('settings_effective_date', event.target.value)}
                         className="w-full px-3 py-2.5 border border-gray-300 rounded-lg bg-white"
                       />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Optional Target End Date</label>
+                      <input type="date" value={driverForm.target_effective_to}
+                        disabled={profileMode === 'view' || currentRole !== 'owner'}
+                        min={driverForm.settings_effective_date || undefined}
+                        onChange={(event) => updateFormField('target_effective_to', event.target.value)}
+                        className="w-full px-3 py-2.5 border border-gray-300 rounded-lg bg-white" />
                     </div>
                     {profileMode === 'edit' && <div className="md:col-span-2">
                       <label className="mb-2 block text-sm font-medium text-gray-700">Change reason</label>
@@ -1374,6 +1422,20 @@ export default function Drivers() {
                                   </span>
                                 ))}
                               </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {(selectedDriver?.driver_profile?.target_history || []).length > 0 && (
+                      <div className="rounded-xl border border-gray-200 bg-white p-4">
+                        <h4 className="mb-3 text-sm font-semibold text-gray-900">Effective-dated target history</h4>
+                        <div className="space-y-2">
+                          {[...(selectedDriver?.driver_profile?.target_history || [])].reverse().map((entry, index) => (
+                            <div key={`${entry.effective_from}-${index}`} className="rounded-lg bg-gray-50 p-3 text-sm">
+                              <div className="font-medium text-gray-900">GHS {entry.target_amount.toLocaleString()} {entry.target_frequency}</div>
+                              <div className="text-gray-500">{entry.effective_from} to {entry.effective_to || 'ongoing'} · {entry.changed_by_name || 'System'}</div>
+                              {entry.reason && <div className="mt-1 text-gray-600">Reason: {entry.reason}</div>}
                             </div>
                           ))}
                         </div>

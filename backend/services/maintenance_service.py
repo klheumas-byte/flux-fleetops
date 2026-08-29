@@ -800,6 +800,10 @@ def _link_existing_or_new_expense(
 
     if expense_id:
         expense_document = _get_expense_document(expense_id)
+        if expense_document.get("vehicle_id") and expense_document.get("vehicle_id") != vehicle_id:
+            raise ApiError("Linked expense vehicle must match the maintenance vehicle.", status_code=400)
+        if expense_document.get("maintenance_job_id"):
+            raise ApiError("Expense is already linked to another maintenance job.", status_code=409)
         return expense_document["_id"]
 
     if not create_linked_expense:
@@ -819,6 +823,9 @@ def _link_existing_or_new_expense(
         "vehicle_id": str(vehicle_id),
         "driver_id": str(driver_id) if driver_id else None,
         "finance_account_id": create_linked_expense.get("finance_account_id"),
+        "funding_source_id": create_linked_expense.get("funding_source_id"),
+        "funding_source_description": create_linked_expense.get("funding_source_description"),
+        "paid_by": create_linked_expense.get("paid_by"),
         "payment_method": create_linked_expense.get("payment_method") or "cash",
         "reference_number": create_linked_expense.get("reference_number"),
         "receipt_image": create_linked_expense.get("receipt_image"),
@@ -1384,6 +1391,11 @@ def create_maintenance_job(payload: dict, current_user_id: str, current_role: st
         document["expense_id"] = expense_object_id
     result = maintenance_jobs_collection().insert_one(document)
     document["_id"] = result.inserted_id
+    if expense_object_id is not None:
+        expenses_collection().update_one(
+            {"_id": expense_object_id, "$or": [{"maintenance_job_id": None}, {"maintenance_job_id": {"$exists": False}}]},
+            {"$set": {"maintenance_job_id": document["_id"], "updated_at": timestamp}},
+        )
 
     if document.get("transport_required") and derived_status in {
         "approved",

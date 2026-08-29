@@ -113,7 +113,7 @@ ROLE_DEFINITIONS = {
         "permissions": ["finance.view", "operational_expenses.view", "expenses.manage", "fuel.expenses", "repair.payments", "finance.operational_reports"],
     },
     "owner": {"name": "Owner (Legacy)", "dashboard": "dashboard", "description": "Legacy owner account.", "default_data_scope": "ALL_RECORDS", "permissions": ["*"], "system": True, "legacy": True},
-    "admin": {"name": "Administrator (Legacy)", "dashboard": "dashboard", "description": "Legacy operational administrator.", "default_data_scope": "ALL_BRANCHES", "inherits": "operations_administrator", "system": True, "legacy": True},
+    "admin": {"name": "Administrator (Legacy)", "dashboard": "dashboard", "description": "Legacy operational administrator.", "default_data_scope": "ALL_BRANCHES", "inherits": "operations_administrator", "permissions": ["integrations.manage"], "system": True, "legacy": True},
     "dispatcher": {"name": "Dispatcher (Legacy)", "dashboard": "dispatch-requests", "description": "Legacy dispatch account.", "default_data_scope": "ALLOWED_BRANCHES", "inherits": "operations_manager", "system": True, "legacy": True},
     "customer_service": {"name": "Customer Service (Legacy)", "dashboard": "dispatch-requests", "description": "Legacy customer service account.", "default_data_scope": "ASSIGNED_RECORDS", "permissions": ["delivery.create", "delivery.update", "notifications.view"], "system": True, "legacy": True},
     "fleet_owner": {"name": "Fleet Owner", "dashboard": "dashboard", "description": "Fleet owner portal account.", "default_data_scope": "OWN_RECORDS", "permissions": ["fleet_owner.portal"], "system": True, "legacy": True},
@@ -126,6 +126,7 @@ ROLE_DEFINITIONS = {
 SYSTEM_PERMISSION_ADDITIONS = {
     "system_administrator": {"users.manage_operational", "stock_transfers.view_incoming", "stock_transfers.receive", "stock_transfers.verify", "stock_transfers.report_variance", "stock_transfers.view_history"},
     "operations_administrator": {"delivery_batches.view", "delivery_batches.create", "delivery_batches.update", "delivery_batches.publish", "delivery_batches.assign", "delivery_routes.manage", "delivery_execution.manage", "delivery_execution.override", "delivery_items.issue", "delivery_items.acknowledge", "returns.receive", "returns.manage", "exceptions.manage", "investigations.manage", "reconciliation.manage", "delivery_batches.close", "delivery_batches.reopen", "branches.view_assigned", "delivery_operations.view_branch", "branch_operations.view", "stock_transfers.view_incoming", "stock_transfers.receive", "stock_transfers.verify", "stock_transfers.report_variance", "stock_transfers.view_history", "personal_vehicle_use.approve", "vehicle_movements.view", "vehicle_movements.manage"},
+    "admin": {"integrations.manage"},
     "operations_manager": {"delivery_batches.view", "delivery_batches.create", "delivery_batches.update", "delivery_batches.publish", "delivery_batches.assign", "delivery_routes.manage", "delivery_execution.manage", "returns.manage", "exceptions.manage", "investigations.manage", "reconciliation.manage", "delivery_batches.close", "personal_vehicle_use.approve", "vehicle_movements.view", "vehicle_movements.manage"},
     "driver": {"delivery_batches.view", "delivery_routes.execute", "delivery_items.acknowledge", "delivery_execution.manage", "personal_vehicle_use.create", "personal_vehicle_use.start", "personal_vehicle_use.complete", "vehicle_movements.view"},
     "field_agent": {"delivery_batches.view", "delivery_routes.execute", "delivery_items.acknowledge", "delivery_execution.manage"},
@@ -156,9 +157,12 @@ PERMISSION_MODULES = {
     "Reports": ["reports.view", "reports.export", "audit.view"],
     "Audit Logs": ["audit.view", "audit.export"],
     "System Settings": ["system.configure", "security.manage", "notifications.view"],
+    "Integrations": ["integrations.manage"],
 }
 PERMISSION_CATALOG = {item for items in PERMISSION_MODULES.values() for item in items}
 PERMISSION_CATALOG.update({permission for definition in ROLE_DEFINITIONS.values() for permission in definition.get("permissions", []) if permission != "*"})
+
+SMARTLIVING_GLOBAL_ADMIN_ROLES = frozenset({"owner", "admin"})
 
 
 def now_utc():
@@ -230,7 +234,7 @@ def role_definition(role: str | None) -> dict:
     inherited = definition.get("inherits")
     if inherited:
         parent = role_definition(inherited)
-        definition["permissions"] = parent.get("permissions", [])
+        definition["permissions"] = sorted(set(parent.get("permissions", [])) | set(definition.get("permissions", [])))
     definition.setdefault("code", code)
     definition.setdefault("status", "active")
     definition.setdefault("default_data_scope", "OWN_RECORDS")
@@ -266,6 +270,12 @@ def primary_workspace(user: dict | None) -> str | None:
 def user_has_permission(user: dict | None, permission: str) -> bool:
     permissions = permissions_for_user(user)
     return "*" in permissions or permission in permissions
+
+
+def user_can_manage_smartliving(user: dict | None) -> bool:
+    """Canonical global SmartLiving administrator decision."""
+    active_role = primary_workspace(user)
+    return active_role in SMARTLIVING_GLOBAL_ADMIN_ROLES and user_has_permission(user, "integrations.manage")
 
 
 def dashboard_for_role(role: str | None) -> str:

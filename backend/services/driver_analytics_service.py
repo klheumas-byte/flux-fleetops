@@ -5,6 +5,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from bson import ObjectId
 
 from extensions import get_collection
+from services.finance_foundation_service import target_for_date
 from models.user import serialize_user
 from models.vehicle import serialize_vehicle
 from services.payment_cycle_service import get_weekly_cycle_window
@@ -287,10 +288,14 @@ def _serialize_driver_analytics(
         active_assignment = assignments[0]
 
     weekly_target = 0.0
-    for assignment in assignments:
-        weekly_target += _count_assignment_weeks_in_range(assignment, start_date, end_date) * float(
-            assignment.get("weekly_target") or 0
-        )
+    for week_start in _week_starts_between(start_date, end_date):
+        target_record = target_for_date(driver_document, min(week_start + timedelta(days=5), end_date))
+        target_amount = float(target_record.get("target_amount") or 0)
+        if target_amount:
+            weekly_target += target_amount * (6 if target_record.get("target_frequency") == "daily" else 1)
+        else:
+            matching_assignment = next((item for item in assignments if _date_overlaps_range(_parse_date_optional(item.get("start_date")), _parse_date_optional(item.get("end_date")), week_start, week_start + timedelta(days=5))), None)
+            weekly_target += float((matching_assignment or {}).get("weekly_target") or 0)
     weekly_target = round(weekly_target, 2)
 
     collections = list(collections_collection().find({"driver_id": driver_document["_id"]}))

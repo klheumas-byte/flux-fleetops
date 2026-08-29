@@ -6,6 +6,7 @@ import {
   setBranchFieldAgentStatus, submitBranchDriverRequest, updateBranchFieldAgent,
   type BranchTeam as TeamData, type TeamUser,
 } from '../../lib/branch-operations-api';
+import { useDataSync } from '../../lib/data-sync';
 
 const empty = { full_name:'', email:'', phone:'', username:'', password:'', license_number:'', license_class:'', license_expiry:'', notes:'' };
 
@@ -24,6 +25,7 @@ export default function BranchTeam() {
     finally { setLoading(false); }
   };
   useEffect(() => { void load(); }, []);
+  useDataSync(['users', 'agents', 'drivers', 'delivery_runs'], () => { if (document.visibilityState === 'visible') void load(); });
 
   const openCreate = (nextMode: 'agent' | 'driver') => { setEditingId(null); setForm(empty); setMode(nextMode); };
   const openEdit = (row: TeamUser) => {

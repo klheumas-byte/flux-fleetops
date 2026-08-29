@@ -9,6 +9,7 @@ from services.smart_living_delivery_service import (
     accept_run_assignment, issue_scheduler_run, reissue_scheduler_run, respond_to_custody,
     start_scheduler_run, update_scheduler_stop, complete_scheduler_run, handoff_scheduler_returns,
     list_accountability_batches, receive_scheduler_returns, create_delivery_exception,
+    list_field_agent_deliveries,
     list_delivery_exceptions, update_delivery_exception, investigate_delivery_exception,
     reconcile_scheduler_batch, close_scheduler_batch, reopen_scheduler_batch, delivery_accountability_report,
 )
@@ -134,7 +135,7 @@ def my_schedule():
 @smart_living_deliveries_bp.get("/field-schedule")
 @permission_required("deliveries.view_assigned")
 def field_schedule():
-    return success_response(data=list_batches(get_jwt_identity(), request.args.to_dict()))
+    return success_response(data=list_field_agent_deliveries(get_jwt_identity(), request.args.to_dict()))
 
 
 # Canonical scheduler endpoints. They share the legacy delivery collections so

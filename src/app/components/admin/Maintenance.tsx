@@ -226,6 +226,8 @@ interface FinanceAccountsResponse {
     accounts: FinanceAccount[];
   };
 }
+interface FundingSource { id: string; name: string; active: boolean }
+interface FundingSourcesResponse { data: { funding_sources: FundingSource[] } }
 
 interface AccountabilityResponse {
   success: boolean;
@@ -264,6 +266,7 @@ interface MaintenanceFormState {
   linked_expense_category: ExpenseCategory;
   linked_expense_amount: string;
   linked_expense_finance_account_id: string;
+  linked_expense_funding_source_id: string;
   linked_expense_payment_method: PaymentMethod;
   linked_expense_date: string;
 }
@@ -306,6 +309,7 @@ const initialFormState: MaintenanceFormState = {
   linked_expense_category: 'repairs',
   linked_expense_amount: '',
   linked_expense_finance_account_id: '',
+  linked_expense_funding_source_id: '',
   linked_expense_payment_method: 'cash',
   linked_expense_date: new Date().toISOString().slice(0, 10),
 };
@@ -413,6 +417,7 @@ export default function Maintenance() {
   const [drivers, setDrivers] = useState<UserSummary[]>([]);
   const [expenses, setExpenses] = useState<ExpenseRecord[]>([]);
   const [financeAccounts, setFinanceAccounts] = useState<FinanceAccount[]>([]);
+  const [fundingSources, setFundingSources] = useState<FundingSource[]>([]);
   const [coordinators, setCoordinators] = useState<UserSummary[]>([]);
   const [dueFollowUps, setDueFollowUps] = useState<MaintenanceJob[]>([]);
   const [overdueFollowUps, setOverdueFollowUps] = useState<MaintenanceJob[]>([]);
@@ -479,6 +484,7 @@ export default function Maintenance() {
         driversResult,
         expensesResult,
         financeAccountsResult,
+        fundingSourcesResult,
         coordinatorsResult,
         dueResult,
         overdueResult,
@@ -488,6 +494,7 @@ export default function Maintenance() {
         apiRequest<DriversResponse>('/drivers', { cacheTtlMs: 10000, timeoutMs: 15000 }),
         apiRequest<ExpensesResponse>('/expenses', { cacheTtlMs: 10000, timeoutMs: 15000 }),
         apiRequest<FinanceAccountsResponse>('/finance/accounts', { cacheTtlMs: 10000, timeoutMs: 15000 }),
+        apiRequest<FundingSourcesResponse>('/finance/funding-sources', { cacheTtlMs: 10000, timeoutMs: 15000 }),
         apiRequest<AccountabilityResponse>('/admins/accountability', { cacheTtlMs: 10000, timeoutMs: 15000 }),
         apiRequest<MaintenanceJobsResponse>('/maintenance/follow-ups/due', { cacheTtlMs: 10000, timeoutMs: 15000 }),
         apiRequest<MaintenanceJobsResponse>('/maintenance/follow-ups/overdue', { cacheTtlMs: 10000, timeoutMs: 15000 }),
@@ -498,6 +505,7 @@ export default function Maintenance() {
       const driversResponse = getSettledData<DriversResponse | null>(driversResult, null);
       const expensesResponse = getSettledData<ExpensesResponse | null>(expensesResult, null);
       const financeAccountsResponse = getSettledData<FinanceAccountsResponse | null>(financeAccountsResult, null);
+      const fundingSourcesResponse = getSettledData<FundingSourcesResponse | null>(fundingSourcesResult, null);
       const coordinatorsResponse = getSettledData<AccountabilityResponse | null>(coordinatorsResult, null);
       const dueResponse = getSettledData<MaintenanceJobsResponse | null>(dueResult, null);
       const overdueResponse = getSettledData<MaintenanceJobsResponse | null>(overdueResult, null);
@@ -510,6 +518,7 @@ export default function Maintenance() {
       setDrivers(Array.isArray(driversResponse?.data?.drivers) ? driversResponse.data.drivers : []);
       setExpenses(Array.isArray(expensesResponse?.data?.expenses) ? expensesResponse.data.expenses : []);
       setFinanceAccounts(Array.isArray(financeAccountsResponse?.data?.accounts) ? financeAccountsResponse.data.accounts : []);
+      setFundingSources(Array.isArray(fundingSourcesResponse?.data?.funding_sources) ? fundingSourcesResponse.data.funding_sources : []);
       setCoordinators(nextCoordinators);
       if (dueResponse) setDueFollowUps(Array.isArray(dueResponse.data?.jobs) ? dueResponse.data.jobs : []);
       if (overdueResponse) setOverdueFollowUps(Array.isArray(overdueResponse.data?.jobs) ? overdueResponse.data.jobs : []);
@@ -522,9 +531,11 @@ export default function Maintenance() {
           current.maintenance_coordinator_id || nextCoordinators.find((coordinator) => coordinator.id === currentUser?.id)?.id || nextCoordinators[0]?.id || '',
         linked_expense_finance_account_id:
           current.linked_expense_finance_account_id || financeAccountsResponse?.data?.accounts?.find((account) => account.status === 'active')?.id || '',
+        linked_expense_funding_source_id:
+          current.linked_expense_funding_source_id || fundingSourcesResponse?.data?.funding_sources?.find((source) => source.active !== false)?.id || '',
       }));
 
-      const supportErrors = [faultsResult, vehiclesResult, driversResult, expensesResult, financeAccountsResult, coordinatorsResult]
+      const supportErrors = [faultsResult, vehiclesResult, driversResult, expensesResult, financeAccountsResult, fundingSourcesResult, coordinatorsResult]
         .map(getSettledError)
         .filter(Boolean);
       setSupportingDataError(supportErrors.length ? `Some form options could not be loaded: ${supportErrors.join(' ')}` : '');
@@ -619,6 +630,7 @@ export default function Maintenance() {
       driver_id: drivers.find((driver) => driver.role === 'driver')?.id || '',
       maintenance_coordinator_id: coordinators.find((coordinator) => coordinator.id === currentUser?.id)?.id || coordinators[0]?.id || '',
       linked_expense_finance_account_id: financeAccounts.find((account) => account.status === 'active')?.id || '',
+      linked_expense_funding_source_id: fundingSources.find((source) => source.active !== false)?.id || '',
     });
   };
 
@@ -656,6 +668,7 @@ export default function Maintenance() {
       linked_expense_category: 'repairs',
       linked_expense_amount: job.estimated_cost != null ? String(job.estimated_cost) : '',
       linked_expense_finance_account_id: financeAccounts.find((account) => account.status === 'active')?.id || '',
+      linked_expense_funding_source_id: fundingSources.find((source) => source.active !== false)?.id || '',
       linked_expense_payment_method: 'cash',
       linked_expense_date: job.start_date || new Date().toISOString().slice(0, 10),
     });
@@ -698,6 +711,8 @@ export default function Maintenance() {
         expense_category: formState.linked_expense_category,
         amount: formState.linked_expense_amount ? Number(formState.linked_expense_amount) : null,
         finance_account_id: formState.linked_expense_finance_account_id,
+        funding_source_id: formState.linked_expense_funding_source_id,
+        paid_by: currentUser?.id,
         payment_method: formState.linked_expense_payment_method,
         expense_date: formState.linked_expense_date,
         notes: `Linked from maintenance job: ${formState.title}`,
@@ -1467,7 +1482,7 @@ export default function Maintenance() {
               </div>
 
               {formState.create_linked_expense && (
-                <div className="grid grid-cols-1 gap-4 rounded-xl border border-gray-200 bg-gray-50 p-4 md:grid-cols-2 xl:grid-cols-5">
+                <div className="grid grid-cols-1 gap-4 rounded-xl border border-gray-200 bg-gray-50 p-4 md:grid-cols-2 xl:grid-cols-3">
                   <SelectField label="Expense Category" value={formState.linked_expense_category} onChange={(value) => setFormState((current) => ({ ...current, linked_expense_category: value as ExpenseCategory }))}>
                     {['repairs', 'servicing', 'tyres', 'battery', 'insurance', 'roadworthy', 'other'].map((category) => (
                       <option key={category} value={category}>
@@ -1482,6 +1497,12 @@ export default function Maintenance() {
                       <option key={account.id} value={account.id}>
                         {account.account_name} - {formatLabel(account.account_type)}
                       </option>
+                    ))}
+                  </SelectField>
+                  <SelectField label="Funding Source" value={formState.linked_expense_funding_source_id} onChange={(value) => setFormState((current) => ({ ...current, linked_expense_funding_source_id: value }))}>
+                    <option value="">Choose funding source...</option>
+                    {fundingSources.filter((source) => source.active !== false && source.name.toLowerCase() !== 'other').map((source) => (
+                      <option key={source.id} value={source.id}>{source.name}</option>
                     ))}
                   </SelectField>
                   <SelectField label="Payment Method" value={formState.linked_expense_payment_method} onChange={(value) => setFormState((current) => ({ ...current, linked_expense_payment_method: value as PaymentMethod }))}>

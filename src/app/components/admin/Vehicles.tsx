@@ -18,6 +18,7 @@ import {
 import { apiRequest, ApiRequestError } from '../../lib/api';
 import { fetchSystemSettings, type SystemSettingsRecord } from '../../lib/system-settings-api';
 import { useDebouncedValue } from '../../lib/use-debounced-value';
+import { useDataSync } from '../../lib/data-sync';
 
 interface VehiclesProps {
   onOpenVehicleDetails: (vehicleId: string) => void;
@@ -584,6 +585,9 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
   useEffect(() => {
     void loadVehicles();
   }, []);
+  useDataSync(['vehicles', 'vehicle_movements', 'drivers'], () => {
+    if (document.visibilityState === 'visible') void loadVehicles();
+  });
 
   useEffect(() => {
     void loadVehicleSupplementalData();

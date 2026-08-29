@@ -18,6 +18,11 @@ def serialize_expense(expense_document: dict) -> dict:
         "driver_id": _serialize_reference_id(expense_document.get("driver_id")),
         "finance_account_id": _serialize_reference_id(expense_document.get("finance_account_id")),
         "finance_account_snapshot": expense_document.get("finance_account_snapshot"),
+        "funding_source_id": _serialize_reference_id(expense_document.get("funding_source_id")),
+        "funding_source_snapshot": expense_document.get("funding_source_snapshot"),
+        "funding_source_description": expense_document.get("funding_source_description"),
+        "maintenance_job_id": _serialize_reference_id(expense_document.get("maintenance_job_id")),
+        "description": expense_document.get("description") or expense_document.get("expense_title"),
         "payment_method": expense_document.get("payment_method"),
         "reference_number": expense_document.get("reference_number"),
         "receipt_image": expense_document.get("receipt_image"),
@@ -26,6 +31,7 @@ def serialize_expense(expense_document: dict) -> dict:
         "requested_by": _serialize_reference_id(expense_document.get("requested_by")),
         "approved_by": _serialize_reference_id(expense_document.get("approved_by")),
         "paid_by": _serialize_reference_id(expense_document.get("paid_by")),
+        "paid_recorded_by": _serialize_reference_id(expense_document.get("paid_recorded_by")),
         "rejected_by": _serialize_reference_id(expense_document.get("rejected_by")),
         "approved_at": expense_document.get("approved_at").isoformat()
         if expense_document.get("approved_at")
@@ -41,4 +47,13 @@ def serialize_expense(expense_document: dict) -> dict:
         "updated_at": expense_document.get("updated_at").isoformat()
         if expense_document.get("updated_at")
         else None,
+        "idempotency_key": expense_document.get("idempotency_key"),
+        "audit_log": [
+            {
+                **entry,
+                "actor_id": _serialize_reference_id(entry.get("actor_id")),
+                "at": entry.get("at").isoformat() if hasattr(entry.get("at"), "isoformat") else entry.get("at"),
+            }
+            for entry in expense_document.get("audit_log", [])
+        ],
     }

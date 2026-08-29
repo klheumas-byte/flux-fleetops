@@ -23,6 +23,7 @@ from .driver_scope import driver_scope_bp
 from .expenses import expenses_bp
 from .faults import faults_bp
 from .finance_accounts import finance_accounts_bp
+from .finance_foundation import finance_foundation_bp
 from .fuel_logs import fuel_logs_bp
 from .fuel_stations import fuel_stations_bp
 from .fleet_owner_portal import fleet_owner_portal_bp
@@ -40,6 +41,7 @@ from .rides import rides_bp
 from .system_settings import system_settings_bp
 from .stock_transfers import stock_transfers_bp
 from .smart_living_deliveries import smart_living_deliveries_bp
+from .smart_living_integration import smart_living_integration_bp
 from .users import users_bp
 from .vehicles import vehicles_bp
 from .vehicle_movements import vehicle_movements_bp
@@ -74,6 +76,7 @@ def register_blueprints(app: Flask) -> None:
     app.register_blueprint(expenses_bp, url_prefix="/api/expenses")
     app.register_blueprint(faults_bp, url_prefix="/api/faults")
     app.register_blueprint(finance_accounts_bp, url_prefix="/api/finance")
+    app.register_blueprint(finance_foundation_bp, url_prefix="/api/finance")
     app.register_blueprint(fuel_logs_bp, url_prefix="/api/fuel-logs")
     app.register_blueprint(fuel_stations_bp, url_prefix="/api/fuel-stations")
     app.register_blueprint(fleet_owner_portal_bp, url_prefix="/api/fleet-owner")
@@ -91,6 +94,7 @@ def register_blueprints(app: Flask) -> None:
     app.register_blueprint(system_settings_bp, url_prefix="/api/system-settings")
     app.register_blueprint(stock_transfers_bp, url_prefix="/api/stock-transfers")
     app.register_blueprint(smart_living_deliveries_bp, url_prefix="/api/smart-living-deliveries")
+    app.register_blueprint(smart_living_integration_bp, url_prefix="/api/integrations/smartliving")
     app.register_blueprint(users_bp, url_prefix="/api/users")
     app.register_blueprint(vehicles_bp, url_prefix="/api/vehicles")
     app.register_blueprint(vehicle_movements_bp, url_prefix="/api/vehicle-movements")

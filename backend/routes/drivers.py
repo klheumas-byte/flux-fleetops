@@ -7,6 +7,7 @@ from services.user_service import (
     update_driver_approval_status_as,
     update_driver_profile_as,
     update_driver_status_as,
+    schedule_driver_target,
 )
 from utils.decorators import role_required
 from utils.responses import success_response
@@ -51,6 +52,18 @@ def update_driver_profile(driver_id: str):
         data={"driver": driver},
         message="Driver profile updated successfully.",
     )
+
+
+@drivers_bp.post("/<driver_id>/targets")
+@role_required("owner")
+def schedule_driver_target_route(driver_id: str):
+    driver = schedule_driver_target(
+        driver_id=driver_id,
+        payload=request.get_json(silent=True) or {},
+        current_user_id=get_jwt_identity(),
+        current_role=get_jwt().get("role"),
+    )
+    return success_response(data={"driver": driver}, message="Driver target scheduled successfully.", status_code=201)
 
 
 @drivers_bp.patch("/<driver_id>/approval-status")

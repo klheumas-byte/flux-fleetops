@@ -839,10 +839,20 @@ def approve_dispatch_opportunity(opportunity_id: str, payload: dict, *, current_
     normalized_role = _normalize_role(current_role) or current_role
     _assert_admin_review_role(normalized_role)
     document = _get_dispatch_opportunity_document(opportunity_id)
+    # Approval is safe to retry: a completed approval returns the canonical
+    # record instead of attempting a second transition/notification.
+    if document.get("status") == "approved":
+        return _batch_enrich_dispatch_opportunities([document])[0]
     if document.get("status") not in ADMIN_APPROVABLE_STATUSES:
         _raise_approval_state_error(document)
     merged_document = {**document, **_normalize_dispatch_opportunity_payload(payload or {}, partial=True)}
     _validate_complete_opportunity(merged_document)
+    classification = merged_document.get("dispatch_classification") or "COMMERCIAL"
+    approved_charge = merged_document.get("approved_charge")
+    if approved_charge is None:
+        approved_charge = merged_document.get("proposed_charge")
+    if classification != "COMMERCIAL":
+        approved_charge = 0.0
     timestamp = now_utc()
     update_fields = {
         "status": "approved",
@@ -864,7 +874,15 @@ def approve_dispatch_opportunity(opportunity_id: str, payload: dict, *, current_
         "updated_at": timestamp,
         "clarification_request": None,
     }
-    dispatch_opportunities_collection().update_one({"_id": document["_id"]}, {"$set": update_fields})
+    transition = dispatch_opportunities_collection().update_one(
+        {"_id": document["_id"], "status": {"$in": sorted(ADMIN_APPROVABLE_STATUSES)}},
+        {"$set": update_fields},
+    )
+    if transition.modified_count != 1:
+        current = _get_dispatch_opportunity_document(opportunity_id)
+        if current.get("status") == "approved":
+            return _batch_enrich_dispatch_opportunities([current])[0]
+        _raise_approval_state_error(current)
     document.update(update_fields)
     resolve_action_notifications("dispatch_opportunity", document["_id"], action_type="review_opportunity", completed_by=current_user_id)
     if isinstance(document.get("submitted_by_driver_id"), ObjectId):

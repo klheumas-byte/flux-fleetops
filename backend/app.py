@@ -25,6 +25,7 @@ from services.dispatch_planner_service import ensure_dispatch_planner_indexes
 from services.expense_service import ensure_expense_indexes
 from services.fault_service import ensure_fault_indexes, seed_default_fault_catalog
 from services.finance_account_service import ensure_finance_account_indexes
+from services.finance_foundation_service import ensure_finance_foundation_indexes
 from services.fuel_service import ensure_fuel_indexes, seed_default_fuel_stations
 from services.fleet_owner_service import ensure_fleet_owner_indexes
 from services.incident_service import ensure_incident_indexes
@@ -36,6 +37,7 @@ from services.personal_vehicle_service import ensure_personal_vehicle_indexes
 from services.stock_transfer_service import ensure_stock_transfer_indexes
 from services.driver_scope_service import ensure_driver_scope_indexes
 from services.smart_living_delivery_service import ensure_indexes as ensure_smart_living_delivery_indexes, reconcile_tomorrow_delivery_notifications
+from services.smart_living_integration_service import ensure_indexes as ensure_smart_living_integration_indexes
 from services.vehicle_operation_request_service import ensure_vehicle_operation_request_indexes
 from services.preventive_maintenance_service import (
     ensure_preventive_maintenance_indexes,
@@ -81,6 +83,16 @@ def create_app(config_name: str | None = None) -> Flask:
             len(delivery_routes),
             " | ".join(sorted(delivery_routes)),
         )
+        smartliving_routes = [
+            f"{','.join(sorted(rule.methods - {'HEAD', 'OPTIONS'}))} {rule.rule}"
+            for rule in app.url_map.iter_rules()
+            if rule.rule.startswith("/api/integrations/smartliving")
+        ]
+        app.logger.info(
+            "[SmartLiving Route Audit] registered=%s routes=%s",
+            len(smartliving_routes),
+            " | ".join(sorted(smartliving_routes)),
+        )
     register_error_handlers(app)
     register_cli_commands(app)
 
@@ -115,6 +127,7 @@ def create_app(config_name: str | None = None) -> Flask:
                     ("expenses", ensure_expense_indexes),
                     ("faults", ensure_fault_indexes),
                     ("finance_accounts", ensure_finance_account_indexes),
+                    ("finance_foundation", ensure_finance_foundation_indexes),
                     ("fuel", ensure_fuel_indexes),
                     ("fleet_owners", ensure_fleet_owner_indexes),
                     ("incidents", ensure_incident_indexes),
@@ -126,6 +139,7 @@ def create_app(config_name: str | None = None) -> Flask:
                     ("stock_transfers", ensure_stock_transfer_indexes),
                     ("driver_scope", ensure_driver_scope_indexes),
                     ("smart_living_deliveries", ensure_smart_living_delivery_indexes),
+                    ("smart_living_integration", ensure_smart_living_integration_indexes),
                     ("preventive_maintenance", ensure_preventive_maintenance_indexes),
                     ("reports", ensure_report_indexes),
                     ("rbac", ensure_rbac_indexes),

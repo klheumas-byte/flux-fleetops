@@ -1,3 +1,5 @@
+from datetime import date
+
 from bson import ObjectId
 
 
@@ -19,6 +21,16 @@ def serialize_driver_profile(user_document: dict) -> dict | None:
         return None
 
     driver_profile = user_document.get("driver_profile") or {}
+    effective_target = None
+    for target in driver_profile.get("target_history", []):
+        try:
+            starts = date.fromisoformat(str(target.get("effective_from"))[:10])
+            ends = date.fromisoformat(str(target.get("effective_to"))[:10]) if target.get("effective_to") else None
+        except (TypeError, ValueError):
+            continue
+        if starts <= date.today() and (ends is None or date.today() <= ends):
+            if effective_target is None or starts > effective_target[0]:
+                effective_target = (starts, target)
     legacy_guarantor = user_document.get("guarantor")
     guarantor = driver_profile.get("guarantor") if isinstance(driver_profile, dict) else None
 
@@ -45,15 +57,15 @@ def serialize_driver_profile(user_document: dict) -> dict | None:
         "assigned_vehicle_id": _serialize_reference_id(driver_profile.get("assigned_vehicle_id")),
         "operating_mode": driver_profile.get("operating_mode") or "hybrid",
         "target_enabled": driver_profile.get("target_enabled", True),
-        "target_amount": driver_profile.get("target_amount"),
-        "target_frequency": driver_profile.get("target_frequency") or "weekly",
+        "target_amount": effective_target[1].get("target_amount") if effective_target else driver_profile.get("target_amount"),
+        "target_frequency": effective_target[1].get("target_frequency") if effective_target else driver_profile.get("target_frequency") or "weekly",
         "private_finance_enabled": driver_profile.get("private_finance_enabled", False),
         "manual_availability_status": driver_profile.get("manual_availability_status") or "available",
         "manual_availability_reason": driver_profile.get("manual_availability_reason"),
         "manual_availability_updated_at": driver_profile.get("manual_availability_updated_at").isoformat()
         if hasattr(driver_profile.get("manual_availability_updated_at"), "isoformat")
         else driver_profile.get("manual_availability_updated_at"),
-        "settings_effective_date": driver_profile.get("settings_effective_date"),
+        "settings_effective_date": effective_target[1].get("effective_from") if effective_target else driver_profile.get("settings_effective_date"),
         "settings_history": [
             {
                 **entry,
@@ -63,6 +75,16 @@ def serialize_driver_profile(user_document: dict) -> dict | None:
                 else entry.get("changed_at"),
             }
             for entry in driver_profile.get("settings_history", [])
+        ],
+        "target_history": [
+            {
+                **entry,
+                "changed_by": _serialize_reference_id(entry.get("changed_by")),
+                "changed_at": entry.get("changed_at").isoformat()
+                if hasattr(entry.get("changed_at"), "isoformat")
+                else entry.get("changed_at"),
+            }
+            for entry in driver_profile.get("target_history", [])
         ],
         "guarantor": guarantor,
     }
@@ -106,6 +128,9 @@ def serialize_user(user_document: dict) -> dict:
         "operational_scope": user_document.get("operational_scope") or ("BRANCH" if user_document.get("home_branch_id") or user_document.get("primary_branch_id") else "COMPANY_WIDE"),
         "home_branch_id": _serialize_reference_id(user_document.get("home_branch_id") or user_document.get("primary_branch_id")),
         "created_by": _serialize_reference_id(user_document.get("created_by")),
+        "manager_id": _serialize_reference_id(user_document.get("manager_id")),
+        "smartliving_agent_id": user_document.get("smartliving_agent_id"),
+        "smartliving_manager_id": user_document.get("smartliving_manager_id"),
         "permission_grants": user_document.get("permission_grants", []),
         "permission_denials": user_document.get("permission_denials", []),
         "status": user_document.get("status"),
@@ -114,6 +139,7 @@ def serialize_user(user_document: dict) -> dict:
         "created_at": user_document.get("created_at").isoformat() if user_document.get("created_at") else None,
         "updated_at": user_document.get("updated_at").isoformat() if user_document.get("updated_at") else None,
         "must_change_password": bool(user_document.get("must_change_password", False)),
+        "default_password_active": bool(user_document.get("default_password_active", False)),
         "password_changed_at": user_document.get("password_changed_at").isoformat() if user_document.get("password_changed_at") else None,
         "driver_profile": serialize_driver_profile(user_document),
     }

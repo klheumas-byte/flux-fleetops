@@ -6,6 +6,7 @@ import mongomock
 import pytest
 from bson import ObjectId
 from flask import Flask
+from flask_jwt_extended import JWTManager, create_access_token
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
@@ -13,7 +14,9 @@ if str(BACKEND_DIR) not in sys.path:
 
 import services.branch_access_service as branch_access
 import services.smart_living_delivery_service as delivery
+from routes.smart_living_deliveries import smart_living_deliveries_bp
 from utils.api_error import ApiError
+from utils.errors import register_error_handlers
 
 
 @pytest.fixture
@@ -127,6 +130,151 @@ def test_daily_run_manual_order_publish_lock_and_assigned_visibility(scheduler):
     assert delivery.list_daily_runs(str(scheduler["manager"]), {}, loading_only=True)["count"] == 1
 
 
+def test_draft_is_private_and_publish_is_idempotent_for_assigned_driver(scheduler):
+    order = delivery.create_certified_order(
+        order_payload(scheduler, "PUBLISH-BOUNDARY", scheduler["agent_a"]),
+        str(scheduler["manager"]),
+    )
+    run = make_run(scheduler, [order])
+
+    assert delivery.list_daily_runs(
+        str(scheduler["driver"]), {}, assigned_only=True,
+    )["count"] == 0
+    assert delivery.list_daily_runs(
+        str(scheduler["other_driver"]), {}, assigned_only=True,
+    )["count"] == 0
+    before_publish = delivery.list_field_agent_deliveries(
+        str(scheduler["agent_a"]), {},
+    )["deliveries"][0]
+    assert before_publish["planning_status"] == "AWAITING_PLANNING"
+    assert before_publish["driver"] is None
+    assert before_publish["vehicle"] is None
+    assert before_publish["delivery_date"] is None
+
+    published = delivery.publish_daily_run(run["id"], str(scheduler["manager"]))
+    repeated = delivery.publish_daily_run(run["id"], str(scheduler["manager"]))
+
+    assert published["status"] == repeated["status"] == "PUBLISHED"
+    stored = scheduler["db"].delivery_batches.find_one({"_id": ObjectId(run["id"])})
+    assert len(stored["route_versions"]) == 1
+    assert delivery.list_daily_runs(
+        str(scheduler["driver"]), {}, assigned_only=True,
+    )["count"] == 1
+    assert delivery.list_daily_runs(
+        str(scheduler["other_driver"]), {}, assigned_only=True,
+    )["count"] == 0
+    after_publish = delivery.list_field_agent_deliveries(
+        str(scheduler["agent_a"]), {},
+    )["deliveries"][0]
+    assert after_publish["planning_status"] == "PUBLISHED"
+    assert after_publish["driver"]["name"] == "Driver One"
+    assert after_publish["vehicle"]["name"] == "GT-1"
+    assert after_publish["stop_sequence"] == 1
+
+
+def test_driver_cannot_open_planning_queue_or_unscoped_runs(scheduler):
+    with pytest.raises(ApiError) as queue_error:
+        delivery.list_scheduler_queue(str(scheduler["driver"]), {})
+    assert queue_error.value.status_code == 403
+    with pytest.raises(ApiError) as run_error:
+        delivery.list_daily_runs(str(scheduler["driver"]), {})
+    assert run_error.value.status_code == 403
+
+
+def test_driver_workspace_overrides_inherited_planner_permissions(scheduler):
+    scheduler["db"].users.update_one(
+        {"_id": scheduler["driver"]},
+        {"$set": {
+            "role_ids": ["driver", "operations_manager"],
+            "selected_workspace": "driver",
+        }},
+    )
+    order = delivery.create_certified_order(
+        order_payload(scheduler, "DRIVER-WORKSPACE"), str(scheduler["manager"])
+    )
+    run = make_run(scheduler, [order])
+
+    with pytest.raises(ApiError) as queue_error:
+        delivery.list_scheduler_queue(str(scheduler["driver"]), {})
+    assert queue_error.value.status_code == 403
+    with pytest.raises(ApiError) as runs_error:
+        delivery.list_daily_runs(str(scheduler["driver"]), {})
+    assert runs_error.value.status_code == 403
+    with pytest.raises(ApiError) as publish_error:
+        delivery.publish_daily_run(run["id"], str(scheduler["driver"]))
+    assert publish_error.value.status_code == 403
+    assert delivery.list_daily_runs(
+        str(scheduler["driver"]), {}, assigned_only=True
+    )["count"] == 0
+
+    delivery.publish_daily_run(run["id"], str(scheduler["manager"]))
+    assert delivery.list_daily_runs(
+        str(scheduler["driver"]), {}, assigned_only=True
+    )["count"] == 1
+    assert delivery.list_daily_runs(
+        str(scheduler["driver"]), {}, loading_only=True
+    )["count"] == 1
+
+
+def test_planner_workspace_keeps_multi_role_admin_access(scheduler):
+    scheduler["db"].users.update_one(
+        {"_id": scheduler["manager"]},
+        {"$set": {
+            "role_ids": ["operations_manager", "driver"],
+            "selected_workspace": "operations_manager",
+        }},
+    )
+    delivery.create_certified_order(
+        order_payload(scheduler, "PLANNER-WORKSPACE"), str(scheduler["manager"])
+    )
+    assert delivery.list_scheduler_queue(
+        str(scheduler["manager"]), {}
+    )["pagination"]["total"] == 1
+
+
+def test_driver_direct_http_calls_cannot_bypass_assignment_scope(scheduler):
+    scheduler["db"].users.update_one(
+        {"_id": scheduler["driver"]},
+        {"$set": {
+            "role_ids": ["driver", "operations_manager"],
+            "selected_workspace": "driver",
+        }},
+    )
+    order = delivery.create_certified_order(
+        order_payload(scheduler, "HTTP-SCOPE"), str(scheduler["manager"])
+    )
+    make_run(scheduler, [order])
+    app = Flask(__name__)
+    app.config.update(
+        JWT_SECRET_KEY="delivery-scheduler-scope-test-secret-32",
+        TESTING=True,
+    )
+    JWTManager(app)
+    register_error_handlers(app)
+    app.register_blueprint(
+        smart_living_deliveries_bp, url_prefix="/api/smart-living-deliveries"
+    )
+    with app.app_context():
+        token = create_access_token(
+            identity=str(scheduler["driver"]),
+            additional_claims={"role": "driver"},
+        )
+    headers = {"Authorization": f"Bearer {token}"}
+    with patch("utils.decorators.get_collection", side_effect=lambda name: scheduler["db"][name]):
+        client = app.test_client()
+        assert client.get(
+            "/api/smart-living-deliveries/scheduler/queue", headers=headers
+        ).status_code == 403
+        assert client.get(
+            "/api/smart-living-deliveries/scheduler/runs", headers=headers
+        ).status_code == 403
+        assigned = client.get(
+            "/api/smart-living-deliveries/scheduler/assigned", headers=headers
+        )
+    assert assigned.status_code == 200
+    assert assigned.get_json()["data"]["count"] == 0
+
+
 def test_driver_and_vehicle_conflicts_prevent_publish(scheduler):
     first = delivery.create_certified_order(order_payload(scheduler, "CERT-1"), str(scheduler["manager"]))
     delivery.publish_daily_run(make_run(scheduler, [first])["id"], str(scheduler["manager"]))
@@ -141,6 +289,54 @@ def test_driver_and_vehicle_conflicts_prevent_publish(scheduler):
     with pytest.raises(ApiError) as vehicle_error:
         delivery.publish_daily_run(vehicle_conflict["id"], str(scheduler["manager"]))
     assert "vehicle" in " ".join(vehicle_error.value.errors).lower()
+
+
+def test_open_vehicle_movement_returns_actionable_publish_error_without_partial_publish(scheduler):
+    order = delivery.create_certified_order(
+        order_payload(scheduler, "OPEN-MOVEMENT"), str(scheduler["manager"])
+    )
+    run = make_run(scheduler, [order])
+    scheduler["db"].vehicle_movements.insert_one(
+        {
+            "_id": ObjectId(),
+            "movement_id": "VM-OPEN-1",
+            "vehicle_id": scheduler["vehicle"],
+            "status": "approved",
+            "source_key": "dispatch_job:existing",
+        }
+    )
+
+    with pytest.raises(ApiError) as error:
+        delivery.publish_daily_run(run["id"], str(scheduler["manager"]))
+
+    assert error.value.status_code == 409
+    assert "VM-OPEN-1" in error.value.message
+    assert "close or return" in error.value.message.lower()
+    stored_run = scheduler["db"].delivery_batches.find_one(
+        {"_id": ObjectId(run["id"])}
+    )
+    stored_order = scheduler["db"].delivery_orders.find_one(
+        {"_id": ObjectId(order["id"])}
+    )
+    assert stored_run["status"] == "DRAFT"
+    assert stored_order["status"] == "CERTIFIED"
+
+
+def test_scheduler_dtos_resolve_readable_names(scheduler):
+    order = delivery.create_certified_order(
+        order_payload(scheduler, "READABLE", scheduler["agent_a"]),
+        str(scheduler["manager"]),
+    )
+    queue_order = delivery.list_scheduler_queue(
+        str(scheduler["manager"]), {}
+    )["orders"][0]
+    assert queue_order["branch"]["name"] == "Head Office"
+    assert queue_order["agent"]["name"] == "Agent A"
+    assert queue_order["source_reference"] == "READABLE"
+    run = make_run(scheduler, [order])
+    assert run["branch"]["name"] == "Head Office"
+    assert run["driver"]["name"] == "Driver One"
+    assert run["vehicle"]["name"] == "GT-1"
 
 
 def test_post_publish_update_increments_version_and_locked_override_is_guarded(scheduler):

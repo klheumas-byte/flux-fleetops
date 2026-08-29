@@ -41,6 +41,7 @@ import {
 } from '../../lib/vehicle-movement-api';
 import { useDebouncedValue } from '../../lib/use-debounced-value';
 import { usePageToastFeedback } from '../../lib/use-page-toast-feedback';
+import { useDataSync } from '../../lib/data-sync';
 import { normalizeFuelLevelEighths } from '../../lib/fuel-gauge';
 import { FuelGaugeSelector } from '../shared/FuelGaugeSelector';
 import { Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle } from '../ui/drawer';
@@ -312,6 +313,12 @@ export default function VehicleMovements() {
   useEffect(() => {
     void loadMovements();
   }, [currentPage, debouncedSearchQuery, movementTypeFilter, statusFilter, vehicleFilter, driverFilter, dateFrom, dateTo]);
+  useDataSync(['vehicle_movements', 'vehicles', 'drivers'], () => {
+    if (document.visibilityState === 'visible') {
+      void loadMovements({ refresh: true });
+      void loadOptions();
+    }
+  });
 
   const openCreateModal = async () => {
     setFormError('');

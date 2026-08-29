@@ -81,7 +81,7 @@ def _enrich_finance_account(account_document: dict) -> dict:
 
 def list_finance_accounts(current_role: str) -> list[dict]:
     query = {}
-    if current_role == "admin":
+    if current_role != "owner":
         query["status"] = "active"
     documents = finance_accounts_collection().find(query).sort(
         [("account_type", ASCENDING), ("account_name", ASCENDING)]
@@ -126,6 +126,7 @@ def create_finance_account(payload: dict, current_user_id: str) -> dict:
         "created_by": _to_object_id(current_user_id, "created_by"),
         "created_at": timestamp,
         "updated_at": timestamp,
+        "audit_log": [{"action": "finance_account_created", "actor_id": _to_object_id(current_user_id, "created_by"), "actor_role": "owner", "at": timestamp}],
     }
     result = finance_accounts_collection().insert_one(document)
     document["_id"] = result.inserted_id
@@ -160,8 +161,10 @@ def update_finance_account(account_id: str, payload: dict, current_user_id: str)
         update_fields["branch"] = (payload.get("branch") or "").strip() or None
 
     update_fields["updated_at"] = now_utc()
-    finance_accounts_collection().update_one({"_id": document["_id"]}, {"$set": update_fields})
+    audit = {"action": "finance_account_updated", "actor_id": _to_object_id(current_user_id, "current_user_id"), "actor_role": "owner", "at": update_fields["updated_at"], "fields": sorted(update_fields.keys())}
+    finance_accounts_collection().update_one({"_id": document["_id"]}, {"$set": update_fields, "$push": {"audit_log": audit}})
     document.update(update_fields)
+    document.setdefault("audit_log", []).append(audit)
     return _enrich_finance_account(document)
 
 
@@ -178,24 +181,30 @@ def update_finance_account_status(account_id: str, status: str, current_user_id:
         "status": next_status,
         "updated_at": now_utc(),
     }
-    finance_accounts_collection().update_one({"_id": document["_id"]}, {"$set": update_fields})
+    audit = {"action": "finance_account_status_changed", "actor_id": _to_object_id(current_user_id, "current_user_id"), "actor_role": "owner", "at": update_fields["updated_at"], "status": next_status}
+    finance_accounts_collection().update_one({"_id": document["_id"]}, {"$set": update_fields, "$push": {"audit_log": audit}})
     document.update(update_fields)
+    document.setdefault("audit_log", []).append(audit)
     return _enrich_finance_account(document)
 
 
-def increment_finance_account_balance(account_id: str | ObjectId, amount: float):
+def increment_finance_account_balance(account_id: str | ObjectId, amount: float, *, actor_id=None, reference_type=None, reference_id=None):
     account_object_id = _to_object_id(account_id, "finance_account_id")
     amount_value = _validate_non_negative_amount(amount, "amount")
+    timestamp = now_utc()
+    operation = {
+        "$inc": {"current_balance": amount_value},
+        "$set": {"updated_at": timestamp},
+    }
+    if actor_id:
+        operation["$push"] = {"audit_log": {"action": "balance_increased", "actor_id": _to_object_id(actor_id, "actor_id"), "at": timestamp, "amount": amount_value, "reference_type": reference_type, "reference_id": str(reference_id) if reference_id else None}}
     finance_accounts_collection().update_one(
         {"_id": account_object_id},
-        {
-            "$inc": {"current_balance": amount_value},
-            "$set": {"updated_at": now_utc()},
-        },
+        operation,
     )
 
 
-def decrement_finance_account_balance(account_id: str | ObjectId, amount: float):
+def decrement_finance_account_balance(account_id: str | ObjectId, amount: float, *, actor_id=None, reference_type=None, reference_id=None):
     account_object_id = _to_object_id(account_id, "finance_account_id")
     amount_value = _validate_non_negative_amount(amount, "amount")
     account_document = get_finance_account_document(account_object_id)
@@ -203,12 +212,13 @@ def decrement_finance_account_balance(account_id: str | ObjectId, amount: float)
     if amount_value > current_balance:
         raise ApiError("Finance account balance is insufficient.", status_code=400)
 
+    timestamp = now_utc()
+    operation = {"$inc": {"current_balance": -amount_value}, "$set": {"updated_at": timestamp}}
+    if actor_id:
+        operation["$push"] = {"audit_log": {"action": "balance_decreased", "actor_id": _to_object_id(actor_id, "actor_id"), "at": timestamp, "amount": amount_value, "reference_type": reference_type, "reference_id": str(reference_id) if reference_id else None}}
     finance_accounts_collection().update_one(
         {"_id": account_object_id},
-        {
-            "$inc": {"current_balance": -amount_value},
-            "$set": {"updated_at": now_utc()},
-        },
+        operation,
     )
 
 

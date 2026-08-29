@@ -32,6 +32,7 @@ export type AppModule =
   | 'deposits'
   | 'expenses'
   | 'finance-accounts'
+  | 'funding-ledger'
   | 'revenue'
   | 'driver-wallet'
   | 'accountability'
@@ -51,6 +52,7 @@ export type AppModule =
   | 'branches'
   | 'audit-logs'
   | 'smart-living-deliveries'
+  | 'smart-living-integration'
   | 'branch-operations'
   | 'branch-team'
   | 'my-vehicle'
@@ -123,12 +125,22 @@ const NO_ACCESS: RolePermissions = {
   can_view_sensitive_finance: false,
 };
 
+export const SMARTLIVING_GLOBAL_ADMIN_ROLES: readonly SessionUserRole[] = ['owner', 'admin'];
+
+export function canManageSmartLiving(role: SessionUserRole | null | undefined) {
+  return Boolean(role && SMARTLIVING_GLOBAL_ADMIN_ROLES.includes(role));
+}
+
 export const MODULE_ACCESS_MATRIX: Record<AppModule, RoleMatrix> = {
   users: { owner: FULL_ACCESS },
   'roles-permissions': { owner: FULL_ACCESS },
   branches: { owner: FULL_ACCESS },
   'audit-logs': { owner: FULL_ACCESS },
   'smart-living-deliveries': { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: DRIVER_ACCESS },
+  'smart-living-integration': {
+    owner: FULL_ACCESS,
+    admin: OPERATIONAL_ADMIN,
+  },
   'branch-operations': { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN },
   'branch-team': { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN },
   dashboard: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: DRIVER_ACCESS, fleet_owner: { ...NO_ACCESS, can_view: true } },
@@ -175,8 +187,9 @@ export const MODULE_ACCESS_MATRIX: Record<AppModule, RoleMatrix> = {
   },
   collections: { owner: FULL_ACCESS, admin: { ...OPERATIONAL_ADMIN, can_approve: true }, driver: NO_ACCESS },
   deposits: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
-  expenses: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
+  expenses: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, finance_officer: OPERATIONAL_ADMIN, driver: NO_ACCESS },
   'finance-accounts': { owner: FULL_ACCESS, admin: NO_ACCESS, driver: NO_ACCESS },
+  'funding-ledger': { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, finance_officer: OPERATIONAL_ADMIN, driver: NO_ACCESS },
   revenue: { owner: FULL_ACCESS, admin: NO_ACCESS, driver: NO_ACCESS },
   'driver-wallet': { owner: NO_ACCESS, admin: NO_ACCESS, driver: NO_ACCESS },
   accountability: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
@@ -220,6 +233,9 @@ export function canAccessModule(
   if (!role) {
     return false;
   }
+  if (moduleId === 'smart-living-integration') {
+    return canManageSmartLiving(role) && Boolean(MODULE_ACCESS_MATRIX[moduleId]?.[role]?.[capability]);
+  }
   if (moduleId === 'dashboard') return true;
   const requiredPermission = MODULE_REQUIRED_PERMISSION[moduleId];
   if (requiredPermission && typeof localStorage !== 'undefined') {
@@ -248,10 +264,12 @@ const MODULE_REQUIRED_PERMISSION: Partial<Record<AppModule, string | string[]>> 
   reports: 'operations.reports', notifications: 'notifications.view', settings: 'system.configure',
   security: 'security.manage', expenses: 'expenses.manage', fuel: 'fuel.expenses',
   'finance-accounts': 'finance.view', 'my-dispatches': 'delivery.view_own',
+  'funding-ledger': 'finance.view',
   'my-operational-tasks': 'delivery.view_own', 'my-vehicle': 'vehicle.view_assigned',
   'personal-vehicle-use': 'personal_vehicle_use.create',
   'report-fault': 'fault.report', 'ride-history': 'trip.view_own',
   'smart-living-deliveries': ['delivery_scheduler.view','delivery_schedule.view_assigned','loading_schedule.view','deliveries.view','deliveries.view_own','deliveries.view_assigned'],
+  'smart-living-integration': 'integrations.manage',
   'branch-operations': 'branch_operations.view',
   'branch-team': 'branch_operations.manage_team',
 };

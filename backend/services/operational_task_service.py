@@ -10,7 +10,10 @@ from utils.api_error import ApiError
 
 TRANSFER_ACTIVE_STATUSES = ["scheduled", "released", "in_transit", "awaiting_receipt"]
 REQUEST_ACTIVE_STATUSES = ["scheduled", "movement_in_progress", "awaiting_verification"]
-DELIVERY_ACTIVE_STATUSES = ["scheduled", "awaiting_issue", "issued", "accepted", "in_progress", "returning", "awaiting_reconciliation"]
+DELIVERY_ACTIVE_STATUSES = [
+    "scheduled", "awaiting_issue", "issued", "accepted", "in_progress", "returning", "awaiting_reconciliation",
+    "PUBLISHED", "LOCKED", "ACCEPTED", "ITEMS_ISSUED", "IN_PROGRESS", "EXECUTION_COMPLETED", "AWAITING_RECONCILIATION", "AWAITING_RETURN_RECONCILIATION",
+]
 
 TRANSFER_PROJECTION = {
     "transfer_id": 1,
@@ -230,8 +233,26 @@ def _request_summary(document: dict, vehicles: dict) -> dict:
 
 def _delivery_summary(document: dict, vehicles: dict) -> dict:
     status = _text(document.get("status"), "scheduled")
-    action = {"scheduled": {"key":"view","label":"View Schedule"}, "awaiting_issue":{"key":"acknowledge","label":"Acknowledge Items"}, "issued":{"key":"accept","label":"Accept Batch"}, "accepted":{"key":"start","label":"Start Trip"}, "in_progress":{"key":"continue","label":"Continue Deliveries"}, "returning":{"key":"return","label":"Return Products"}, "awaiting_reconciliation":{"key":"view","label":"Await Reconciliation"}}.get(status,{"key":"view","label":"View Batch"})
-    return {"id":str(document["_id"]),"task_key":f"smart_living_delivery:{document['_id']}","operation_type":"smart_living_delivery","operation_label":"Smart Living Delivery","reference":document.get("batch_number"),"title":f"{len(document.get('delivery_order_ids') or [])} customer delivery batch","schedule":document.get("delivery_date"),"origin":"Assigned branch","destination":"Delivery route","vehicle":_vehicle_payload(document,vehicles),"status":status,"status_label":_label(status),"current_action":action,"linked_waybill_id":None,"updated_at":_value(document.get("updated_at"))}
+    action_key = str(status).casefold()
+    action = {"scheduled": {"key":"view","label":"View Schedule"}, "published":{"key":"accept","label":"Accept Assignment"}, "locked":{"key":"accept","label":"Accept Assignment"}, "awaiting_issue":{"key":"acknowledge","label":"Acknowledge Items"}, "items_issued":{"key":"accept","label":"Accept Items"}, "issued":{"key":"accept","label":"Accept Batch"}, "accepted":{"key":"start","label":"Start Trip"}, "in_progress":{"key":"continue","label":"Continue Deliveries"}, "returning":{"key":"return","label":"Return Products"}, "awaiting_reconciliation":{"key":"view","label":"Await Reconciliation"}, "awaiting_return_reconciliation":{"key":"view","label":"Await Reconciliation"}}.get(action_key,{"key":"view","label":"View Batch"})
+    order_rows = list(get_collection("delivery_orders").find({"_id": {"$in": document.get("delivery_order_ids") or []}}))
+    order_map = {row["_id"]: row for row in order_rows}
+    agent_ids = {item.get("agent_id") for item in document.get("stops") or [] if item.get("agent_id")}
+    agents = {row["_id"]: row.get("full_name") or row.get("username") for row in get_collection("users").find({"_id": {"$in": list(agent_ids)}})} if agent_ids else {}
+    branch = get_collection("branches").find_one({"_id": document.get("branch_id")}, {"name": 1}) or {}
+    stops = []
+    for stop in sorted(document.get("stops") or [], key=lambda item: item.get("sequence_number", 0)):
+        order = order_map.get(stop.get("delivery_order_id")) or {}
+        stops.append({
+            "sequence": stop.get("sequence_number"), "customer": order.get("customer_name") or stop.get("customer_name"),
+            "phone": order.get("phone") or order.get("customer_phone") or stop.get("customer_phone"),
+            "location": order.get("delivery_address") or stop.get("address"),
+            "products": [{"name": line.get("product_name"), "quantity": line.get("quantity", line.get("quantity_requested"))} for line in order.get("product_lines") or []],
+            "field_agent": agents.get(stop.get("agent_id")), "branch": branch.get("name"),
+            "date": document.get("delivery_date"), "time": stop.get("expected_arrival_time") or document.get("planned_departure_time"),
+            "status": stop.get("status"),
+        })
+    return {"id":str(document["_id"]),"task_key":f"smart_living_delivery:{document['_id']}","operation_type":"smart_living_delivery","operation_label":"Smart Living Delivery","reference":document.get("run_number") or document.get("batch_number"),"title":f"{len(document.get('delivery_order_ids') or [])} customer delivery batch","schedule":document.get("delivery_date"),"origin":branch.get("name") or "Assigned branch","destination":"Delivery route","vehicle":_vehicle_payload(document,vehicles),"status":status,"status_label":_label(status),"current_action":action,"linked_waybill_id":None,"stops":stops,"updated_at":_value(document.get("updated_at"))}
 
 
 def _sort_value(task: dict) -> tuple:

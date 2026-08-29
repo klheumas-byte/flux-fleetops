@@ -13,8 +13,9 @@ from extensions import get_collection
 from models.smart_living_delivery import serialize_batch, serialize_custody, serialize_delivery
 from services.branch_access_service import assert_branch_access, assert_user_in_branch, branch_query, current_user, object_id
 from services.notification_service import create_notification
+from services.movement_source_service import ensure_movement_for_source
 from services.driver_scope_service import driver_ids_visible_to_branch_user
-from services.rbac_service import user_has_permission, user_role_codes, write_audit
+from services.rbac_service import primary_workspace, user_has_permission, user_role_codes, write_audit
 from utils.api_error import ApiError
 from utils.file_validation import validate_attachment_list
 
@@ -24,6 +25,7 @@ BATCH_STATUSES = {"draft", "scheduled", "awaiting_issue", "issued", "accepted", 
 FINAL_BATCH_STATUSES = {"reconciled", "cancelled"}
 AGENT_ROLE_CODES = {"field_agent", "sales_agent", "responsible_agent", "agent"}
 TRANSPORT_METHODS = {"VEHICLE", "KAYA", "OTHER_MANUAL"}
+OPEN_VEHICLE_MOVEMENT_STATUSES = {"draft", "pending_approval", "approved", "checked_out", "in_progress"}
 
 
 def now_utc(): return datetime.now(timezone.utc)
@@ -34,6 +36,19 @@ def returns(): return get_collection("item_returns")
 def exceptions(): return get_collection("delivery_exceptions")
 def investigations(): return get_collection("delivery_exception_investigations")
 def users(): return get_collection("users")
+
+
+def _is_driver_workspace(actor: dict) -> bool:
+    """Use the selected workspace as the record-scope boundary for multi-role users."""
+    return primary_workspace(actor) == "driver"
+
+
+def _assert_planner_workspace(actor: dict) -> None:
+    if _is_driver_workspace(actor):
+        raise ApiError(
+            "Driver workspace accounts cannot access delivery planning controls. Switch to an authorized planning workspace.",
+            status_code=403,
+        )
 
 
 @contextmanager
@@ -62,10 +77,37 @@ def _session(session):
     return {"session": session} if session is not None else {}
 
 
+def ensure_source_identity_unique_index():
+    fields = ("source_system", "source_type", "source_record_id")
+    seen = set(); duplicates = []
+    for row in orders().find({}, {field: 1 for field in fields}):
+        values = tuple(row.get(field) for field in fields)
+        if not all(isinstance(value, str) for value in values):
+            continue
+        if values in seen and values not in duplicates:
+            duplicates.append(values)
+            if len(duplicates) >= 10:
+                break
+        seen.add(values)
+    if duplicates:
+        raise RuntimeError(f"Cannot create external_source_identity_unique; duplicate source identities exist: {duplicates}")
+    orders().create_index(
+        [("source_system", ASCENDING), ("source_type", ASCENDING), ("source_record_id", ASCENDING)],
+        name="external_source_identity_unique",
+        unique=True,
+        partialFilterExpression={
+            "source_system": {"$type": "string"},
+            "source_type": {"$type": "string"},
+            "source_record_id": {"$type": "string"},
+        },
+    )
+
+
 def ensure_indexes():
     get_collection("branches").create_index([("code", ASCENDING)], unique=True)
     get_collection("branches").create_index([("status", ASCENDING), ("name", ASCENDING)])
     orders().create_index([("external_source", ASCENDING), ("external_reference", ASCENDING)], unique=True)
+    ensure_source_identity_unique_index()
     orders().create_index([("branch_id", ASCENDING), ("status", ASCENDING), ("requested_delivery_date", ASCENDING)])
     orders().create_index([("assigned_field_agent_id", ASCENDING), ("status", ASCENDING)])
     batches().create_index([("batch_number", ASCENDING)], unique=True)
@@ -412,8 +454,9 @@ def _scheduler_line(payload: dict, index: int) -> dict:
     }
 
 
-def create_certified_order(payload: dict, actor_id: str) -> dict:
+def create_certified_order(payload: dict, actor_id: str, *, external_identity: dict | None = None) -> dict:
     actor = current_user(actor_id)
+    _assert_planner_workspace(actor)
     branch_id = assert_branch_access(actor, payload.get("branch_id"), require_active=True)
     reference = str(payload.get("reference_number") or payload.get("external_reference") or "").strip()
     if not reference:
@@ -427,15 +470,21 @@ def create_certified_order(payload: dict, actor_id: str) -> dict:
     sales_agent_id = object_id(payload.get("sales_agent_id"), "sales_agent_id") if payload.get("sales_agent_id") else None
     if sales_agent_id:
         assert_user_in_branch(sales_agent_id, branch_id, AGENT_ROLE_CODES)
+    manager_id = object_id(payload.get("manager_id"), "manager_id") if payload.get("manager_id") else None
+    if manager_id:
+        assert_user_in_branch(manager_id, branch_id, {"branch_manager"})
     required = {"customer_name": str(payload.get("customer_name") or "").strip(), "phone": str(payload.get("phone") or payload.get("customer_phone") or "").strip(), "delivery_address": str(payload.get("delivery_address") or "").strip()}
     if not all(required.values()):
         raise ApiError("Customer name, phone, and delivery address are required.", status_code=400)
     latitude = payload.get("latitude"); longitude = payload.get("longitude")
     timestamp = now_utc()
+    source_alias = "FleetOps Manual"
+    if external_identity:
+        source_alias = f"{external_identity['source_system']}:{external_identity['source_type']}"
     document = {
-        "reference_number": reference, "external_reference": reference, "external_source": "FleetOps Manual",
+        "reference_number": reference, "external_reference": reference, "external_source": source_alias,
         **required, "customer_phone": required["phone"], "alternative_phone": str(payload.get("alternative_phone") or "").strip() or None,
-        "branch_id": branch_id, "sales_agent_id": sales_agent_id, "assigned_field_agent_id": sales_agent_id,
+        "branch_id": branch_id, "sales_agent_id": sales_agent_id, "assigned_field_agent_id": sales_agent_id, "manager_id": manager_id,
         "landmark": str(payload.get("landmark") or "").strip() or None, "latitude": latitude, "longitude": longitude,
         "gps_location": {"latitude": latitude, "longitude": longitude} if latitude is not None and longitude is not None else None,
         "requested_delivery_date": str(payload.get("requested_delivery_date") or "").strip() or None,
@@ -443,6 +492,32 @@ def create_certified_order(payload: dict, actor_id: str) -> dict:
         "certified_by": object_id(actor_id) if status in {"CERTIFIED", "WAITING_SCHEDULING"} else None,
         "product_lines": lines, "created_by": object_id(actor_id), "created_at": timestamp, "updated_at": timestamp, "locked": False,
     }
+    if external_identity:
+        document.update({
+            "source_system": external_identity["source_system"],
+            "source_type": external_identity["source_type"],
+            "source_record_id": external_identity["source_record_id"],
+            "source_synced_at": external_identity["source_synced_at"],
+            "source_branch_id": (payload.get("branch_reference") or {}).get("external_id"),
+            "source_branch_name": (payload.get("branch_reference") or {}).get("external_display_name"),
+            "source_agent_id": (payload.get("agent_reference") or {}).get("external_id"),
+            "source_agent_name": (payload.get("agent_reference") or {}).get("external_display_name"),
+            "source_manager_id": (payload.get("manager_reference") or {}).get("external_id"),
+            "source_manager_name": (payload.get("manager_reference") or {}).get("external_display_name"),
+        })
+        if external_identity.get("source_date") is not None:
+            document["source_date"] = external_identity["source_date"]
+            document["source_date_field"] = external_identity.get("source_date_field")
+        import_metadata = payload.get("import_metadata")
+        if isinstance(import_metadata, dict):
+            document.update({
+                "imported_at": timestamp,
+                "imported_by": object_id(actor_id),
+                "import_batch_id": str(import_metadata.get("batch_id") or "").strip() or None,
+                "import_source": str(import_metadata.get("source") or "").strip() or None,
+                "import_from_date": str(import_metadata.get("from_date") or "").strip() or None,
+                "import_to_date": str(import_metadata.get("to_date") or "").strip() or None,
+            })
     try:
         result = orders().insert_one(document)
     except DuplicateKeyError:
@@ -450,11 +525,13 @@ def create_certified_order(payload: dict, actor_id: str) -> dict:
     document["_id"] = result.inserted_id
     _audit("certified_delivery_created", actor_id, "delivery_order", result.inserted_id, branch_id, new=document)
     _notify_branch_managers(branch_id, "New branch delivery", f"{document['customer_name']} was added to the branch delivery queue.", "certified-created", result.inserted_id)
+    if sales_agent_id:
+        create_notification(sales_agent_id, "New Smart Living delivery", f"{document['customer_name']} is awaiting delivery planning.", category="operations", module="smart-living-deliveries", priority="medium", reference_type="delivery_order", reference_id=result.inserted_id, action_url="smart-living-deliveries", action_label="View Delivery", dedupe_key=f"smartliving-order:{result.inserted_id}:agent:{sales_agent_id}")
     return serialize_delivery(document)
 
 
 def certify_order(order_id: str, actor_id: str) -> dict:
-    actor = current_user(actor_id); oid = object_id(order_id, "order_id")
+    actor = current_user(actor_id); _assert_planner_workspace(actor); oid = object_id(order_id, "order_id")
     document = orders().find_one({"_id": oid, **branch_query(actor)})
     if not document:
         raise ApiError("Delivery order not found.", status_code=404)
@@ -469,7 +546,10 @@ def certify_order(order_id: str, actor_id: str) -> dict:
 
 
 def list_scheduler_queue(actor_id: str, filters: dict) -> dict:
-    actor = current_user(actor_id); query = {**branch_query(actor), "status": {"$in": ["CERTIFIED", "WAITING_SCHEDULING", "ready_for_planning"]}, "$or": [{"batch_id": None}, {"batch_id": {"$exists": False}}]}
+    actor = current_user(actor_id)
+    if _is_driver_workspace(actor):
+        raise ApiError("Drivers cannot access the certified delivery planning queue.", status_code=403)
+    query = {**branch_query(actor), "status": {"$in": ["CERTIFIED", "WAITING_SCHEDULING", "ready_for_planning"]}, "$or": [{"batch_id": None}, {"batch_id": {"$exists": False}}]}
     if filters.get("branch_id"): query["branch_id"] = assert_branch_access(actor, filters["branch_id"])
     if filters.get("agent_id"): query["$and"] = [{"$or": [{"sales_agent_id": object_id(filters["agent_id"])}, {"assigned_field_agent_id": object_id(filters["agent_id"])}]}]
     if filters.get("delivery_date"): query["requested_delivery_date"] = filters["delivery_date"]
@@ -482,11 +562,48 @@ def list_scheduler_queue(actor_id: str, filters: dict) -> dict:
     try: page = max(int(filters.get("page") or 1), 1); size = min(max(int(filters.get("page_size") or 50), 1), 100)
     except ValueError: page, size = 1, 50
     total = orders().count_documents(query); rows = orders().find(query).sort([("requested_delivery_date", ASCENDING), ("created_at", ASCENDING)]).skip((page - 1) * size).limit(size)
-    return {"orders": [serialize_delivery(row) for row in rows], "pagination": {"page": page, "page_size": size, "total": total}}
+    return {"orders": [_enrich_delivery(row) for row in rows], "pagination": {"page": page, "page_size": size, "total": total}}
+
+
+def list_field_agent_deliveries(actor_id: str, filters: dict) -> dict:
+    """One canonical, assignment-only view across unplanned and planned orders."""
+    actor = current_user(actor_id)
+    identity = object_id(actor_id)
+    query = {**branch_query(actor), "assigned_field_agent_id": identity}
+    if filters.get("status"):
+        query["status"] = filters["status"]
+    rows = list(orders().find(query).sort([("requested_delivery_date", ASCENDING), ("created_at", ASCENDING)]).limit(200))
+    batch_ids = {row.get("batch_id") for row in rows if row.get("batch_id")}
+    run_map = {row["_id"]: row for row in batches().find({"_id": {"$in": list(batch_ids)}})} if batch_ids else {}
+    driver_ids = {run.get("driver_id") for run in run_map.values() if run.get("driver_id")}
+    people = {row["_id"]: row for row in users().find({"_id": {"$in": list(driver_ids)}})} if driver_ids else {}
+    vehicle_ids = {run.get("vehicle_id") for run in run_map.values() if run.get("vehicle_id")}
+    vehicles = {row["_id"]: row for row in get_collection("vehicles").find({"_id": {"$in": list(vehicle_ids)}})} if vehicle_ids else {}
+    final_statuses = {"DELIVERED", "FAILED", "UNDELIVERED", "PARTIALLY_DELIVERED", "CANCELLED", "RECONCILED", "CLOSED"}
+    deliveries = []
+    for order in rows:
+        run = run_map.get(order.get("batch_id"))
+        published_run = run if (run or {}).get("status") in VISIBLE_RUN_STATUSES else None
+        stop = next((item for item in (published_run or {}).get("stops", []) if item.get("delivery_order_id") == order["_id"]), None)
+        driver = people.get((published_run or {}).get("driver_id"))
+        vehicle = vehicles.get((published_run or {}).get("vehicle_id"))
+        item = _enrich_delivery(order)
+        item.update({
+            "planning_status": (published_run or {}).get("status") or "AWAITING_PLANNING",
+            "delivery_date": (published_run or {}).get("delivery_date"),
+            "delivery_time": (stop or {}).get("expected_arrival_time") or (published_run or {}).get("planned_departure_time"),
+            "driver": {"id": str(driver["_id"]), "name": driver.get("full_name") or driver.get("username") or "Name unavailable"} if driver else None,
+            "vehicle": {"id": str(vehicle["_id"]), "name": vehicle.get("registration_number") or vehicle.get("vehicle_number") or vehicle.get("make") or "Name unavailable"} if vehicle else None,
+            "stop_sequence": (stop or {}).get("sequence_number"),
+            "stop_status": (stop or {}).get("status"),
+        })
+        deliveries.append(item)
+    upcoming = sum(str(item.get("status") or "").upper() not in final_statuses for item in rows)
+    return {"deliveries": deliveries, "count": len(deliveries), "counts": {"upcoming": upcoming, "delivered": sum(str(item.get("status") or "").upper() == "DELIVERED" for item in rows)}}
 
 
 def scheduler_metadata(actor_id: str, branch_id=None) -> dict:
-    actor = current_user(actor_id); branch_filter = branch_query(actor, "_id")
+    actor = current_user(actor_id); _assert_planner_workspace(actor); branch_filter = branch_query(actor, "_id")
     if branch_id:
         selected = assert_branch_access(actor, branch_id); branch_filter = {"_id": selected}
     branch_rows = list(get_collection("branches").find({**branch_filter, "status": "active"}).sort("name", ASCENDING))
@@ -523,12 +640,22 @@ def scheduler_metadata(actor_id: str, branch_id=None) -> dict:
     vehicle_active_statuses = {"available", "active", "assigned", "in_service"}
     vehicles_active = [item for item in vehicles_all if str(item.get("status") or ("active" if item.get("active", True) else "inactive")).lower() in vehicle_active_statuses]
     vehicles_scoped = [item for item in vehicles_active if not item.get("branch_id") or item.get("branch_id") in set(([selected_branch] if selected_branch else allowed_ids))]
+    open_movements = {
+        item["vehicle_id"]: item
+        for item in get_collection("vehicle_movements").find({
+            "vehicle_id": {"$in": [vehicle["_id"] for vehicle in vehicles_scoped]},
+            "status": {"$in": list(OPEN_VEHICLE_MOVEMENT_STATUSES)},
+        })
+    } if vehicles_scoped else {}
     vehicles = []
     for item in vehicles_scoped:
         label = item.get("registration_number") or item.get("vehicle_number") or item.get("make") or "Vehicle"
         status = str(item.get("status") or "available").lower(); disabled = None
         if status not in {"available", "active", "in_service"}:
             disabled = "Assigned to another driver" if item.get("assigned_driver_id") else f"Vehicle status is {status.replace('_', ' ')}"
+        elif item["_id"] in open_movements:
+            movement = open_movements[item["_id"]]
+            disabled = f"Open movement {movement.get('movement_id') or 'Reference unavailable'} must be closed first"
         vehicles.append({"id": str(item["_id"]), "label": label, "name": label, "status": status, "branch": branch_names.get(item.get("branch_id")) or "Unassigned", "branch_id": str(item.get("branch_id")) if item.get("branch_id") else None, "assigned_driver_id": str(item.get("assigned_driver_id")) if item.get("assigned_driver_id") else None, "disabled_reason": disabled})
     drivers = [user_item(item) for item in driver_rows]; agents = [user_item(item) for item in agent_rows]
     diagnostics = {
@@ -631,7 +758,7 @@ def _assert_driver_for_branch(actor: dict, driver_id, branch_id):
 
 
 def create_daily_run(payload: dict, actor_id: str) -> dict:
-    actor = current_user(actor_id); branch_id = assert_branch_access(actor, payload.get("branch_id"), require_active=True)
+    actor = current_user(actor_id); _assert_planner_workspace(actor); branch_id = assert_branch_access(actor, payload.get("branch_id"), require_active=True)
     delivery_ids = list(dict.fromkeys(object_id(value, "delivery_order_id") for value in payload.get("delivery_order_ids") or []))
     if not delivery_ids:
         raise ApiError("Select at least one certified delivery.", status_code=400)
@@ -721,16 +848,42 @@ def review_run(run: dict) -> dict:
 def _person(person_id):
     if not person_id: return None
     item = get_collection("users").find_one({"_id": person_id}, {"full_name": 1, "phone": 1, "email": 1})
-    return {"id": str(person_id), "name": item.get("full_name"), "phone": item.get("phone"), "email": item.get("email")} if item else {"id": str(person_id), "name": "Unavailable user"}
+    return {"id": str(person_id), "name": item.get("full_name") or "Name unavailable", "phone": item.get("phone"), "email": item.get("email")} if item else {"id": str(person_id), "name": "Name unavailable"}
+
+
+def _branch_summary(branch_id):
+    if not branch_id:
+        return None
+    item = get_collection("branches").find_one({"_id": branch_id}, {"name": 1, "code": 1})
+    return {
+        "id": str(branch_id),
+        "name": (item or {}).get("name") or "Name unavailable",
+        "code": (item or {}).get("code"),
+    }
+
+
+def _enrich_delivery(document: dict) -> dict:
+    result = dict(document)
+    agent_id = document.get("assigned_field_agent_id") or document.get("sales_agent_id")
+    result["branch"] = _branch_summary(document.get("branch_id"))
+    result["agent"] = _person(agent_id)
+    result["manager"] = _person(document.get("manager_id"))
+    result["source_reference"] = (
+        document.get("reference_number")
+        or document.get("external_reference")
+        or "Reference unavailable"
+    )
+    return serialize_delivery(result)
 
 
 def _enrich_run(document: dict) -> dict:
     result = dict(document)
     order_rows = list(orders().find({"_id": {"$in": document.get("delivery_order_ids", [])}})); order_map = {item["_id"]: item for item in order_rows}
-    result["delivery_orders"] = [serialize_delivery(order_map[item]) for item in document.get("delivery_order_ids", []) if item in order_map]
+    result["delivery_orders"] = [_enrich_delivery(order_map[item]) for item in document.get("delivery_order_ids", []) if item in order_map]
+    result["branch"] = _branch_summary(document.get("branch_id"))
     result["driver"] = _person(document.get("driver_id")); result["agents"] = [_person(item) for item in document.get("assigned_agent_ids", [])]
     vehicle = get_collection("vehicles").find_one({"_id": document.get("vehicle_id")}) if document.get("vehicle_id") else None
-    result["vehicle"] = {"id": str(vehicle["_id"]), "name": vehicle.get("registration_number") or vehicle.get("vehicle_number") or vehicle.get("make") or "Vehicle"} if vehicle else None
+    result["vehicle"] = {"id": str(vehicle["_id"]), "name": vehicle.get("registration_number") or vehicle.get("vehicle_number") or vehicle.get("make") or "Name unavailable"} if vehicle else None
     enriched_stops = []
     for stop in sorted(document.get("stops", []), key=lambda item: item.get("sequence_number", 0)):
         order = order_map.get(stop.get("delivery_order_id")); enriched_stops.append({**stop, "agent": _person(stop.get("agent_id")), "phone": order.get("phone") or order.get("customer_phone") if order else None, "products": order.get("product_lines", []) if order else []})
@@ -740,8 +893,17 @@ def _enrich_run(document: dict) -> dict:
 
 
 def get_daily_run(run_id: str, actor_id: str, assigned_only=False) -> dict:
-    actor = current_user(actor_id); query = {"_id": object_id(run_id, "run_id"), **branch_query(actor)}
-    if assigned_only: query["$or"] = [{"driver_id": object_id(actor_id)}, {"assigned_agent_ids": object_id(actor_id)}]
+    actor = current_user(actor_id)
+    driver_actor = _is_driver_workspace(actor)
+    assigned_only = assigned_only or driver_actor
+    query = {"_id": object_id(run_id, "run_id"), **branch_query(actor)}
+    if assigned_only:
+        identity = object_id(actor_id)
+        if driver_actor:
+            query["driver_id"] = identity
+        else:
+            query["$or"] = [{"driver_id": identity}, {"assigned_agent_ids": identity}]
+    if assigned_only: query["status"] = {"$in": list(VISIBLE_RUN_STATUSES)}
     run = batches().find_one(query)
     if not run: raise ApiError("Delivery run not found.", status_code=404)
     if assigned_only and set(user_role_codes(actor)) & AGENT_ROLE_CODES and run.get("driver_id") != object_id(actor_id):
@@ -751,7 +913,13 @@ def get_daily_run(run_id: str, actor_id: str, assigned_only=False) -> dict:
 
 
 def list_daily_runs(actor_id: str, filters: dict, assigned_only=False, loading_only=False) -> dict:
-    actor = current_user(actor_id); query = branch_query(actor)
+    actor = current_user(actor_id)
+    driver_actor = _is_driver_workspace(actor)
+    if driver_actor and not assigned_only and not loading_only:
+        raise ApiError("Drivers can only access their own published delivery runs.", status_code=403)
+    if driver_actor and loading_only:
+        assigned_only = True
+    query = branch_query(actor)
     if filters.get("branch_id"): query["branch_id"] = assert_branch_access(actor, filters["branch_id"])
     if filters.get("status"): query["status"] = filters["status"]
     if filters.get("date_from") or filters.get("date_to"):
@@ -759,7 +927,11 @@ def list_daily_runs(actor_id: str, filters: dict, assigned_only=False, loading_o
         if filters.get("date_from"): query["delivery_date"]["$gte"] = filters["date_from"]
         if filters.get("date_to"): query["delivery_date"]["$lte"] = filters["date_to"]
     if assigned_only:
-        identity = object_id(actor_id); query["status"] = {"$in": list(VISIBLE_RUN_STATUSES)}; query["$or"] = [{"driver_id": identity}, {"assigned_agent_ids": identity}]
+        identity = object_id(actor_id); query["status"] = {"$in": list(VISIBLE_RUN_STATUSES)}
+        if driver_actor:
+            query["driver_id"] = identity
+        else:
+            query["$or"] = [{"driver_id": identity}, {"assigned_agent_ids": identity}]
     if loading_only: query["status"] = {"$in": list(VISIBLE_RUN_STATUSES - {"COMPLETED"})}
     try: page = max(int(filters.get("page") or 1), 1); size = min(max(int(filters.get("page_size") or 50), 1), 100)
     except (TypeError, ValueError): page, size = 1, 50
@@ -779,6 +951,64 @@ def _notify_run(run: dict, title: str, message: str, event: str, previous_recipi
         create_notification(recipient, title, f"{message} Current version: v{run.get('version', 1)}.", category="operations", module="smart-living-deliveries", priority="high", reference_type="delivery_run", reference_id=run["_id"], action_url="smart-living-deliveries", action_label="View Schedule", dedupe_key=f"delivery-run:{run['_id']}:{event}:v{run.get('version', 1)}:{recipient}")
 
 
+def _ensure_run_vehicle_movement(run: dict, actor_id: str, *, session=None) -> dict | None:
+    if _transport_method(run) != "VEHICLE" or not run.get("driver_id") or not run.get("vehicle_id"):
+        return None
+    movement_collection = get_collection("vehicle_movements")
+    source_key = f"delivery_run:{run['_id']}"
+    conflict = movement_collection.find_one(
+        {
+            "vehicle_id": run["vehicle_id"],
+            "status": {"$in": list(OPEN_VEHICLE_MOVEMENT_STATUSES)},
+            "source_key": {"$ne": source_key},
+        },
+        **_session(session),
+    )
+    if conflict:
+        reference = conflict.get("movement_id") or "Reference unavailable"
+        raise ApiError(
+            f"The selected vehicle has open movement {reference}. Close or return that movement before publishing this run.",
+            status_code=409,
+        )
+    linked = movement_collection.find_one(
+        {"_id": run.get("linked_vehicle_movement_id")},
+        **_session(session),
+    ) if run.get("linked_vehicle_movement_id") else None
+    destination = " → ".join(
+        str(item.get("address") or item.get("customer_name") or "Delivery stop").strip()
+        for item in sorted(run.get("stops", []), key=lambda item: item.get("sequence_number", 0))
+    )
+    result = ensure_movement_for_source(
+        source_type="delivery_run",
+        source_record_id=run["_id"],
+        source_reference=run.get("run_number") or run.get("batch_number"),
+        existing_movement=linked,
+        legacy_query={"delivery_run_id": run["_id"]},
+        movement_collection=movement_collection,
+        session=session,
+        movement_defaults={
+            "vehicle_id": run["vehicle_id"], "driver_id": run["driver_id"],
+            "movement_custodian_id": run["driver_id"], "branch_id": run["branch_id"],
+            "delivery_run_id": run["_id"], "movement_type": "smart_living_delivery",
+            "movement_category": "INTERNAL_DELIVERY", "status": "approved",
+            "requested_departure_time": f"{run.get('delivery_date')}T{run.get('planned_departure_time')}" if run.get("delivery_date") and run.get("planned_departure_time") else None,
+            "origin": "FleetOps branch", "destination": destination or "Delivery route",
+            "purpose": run.get("run_number") or run.get("batch_number"),
+            "delivery_status": "pending", "created_by": object_id(actor_id),
+            "approved_by": object_id(actor_id), "approved_at": now_utc(),
+        },
+    )
+    movement = result["movement"]
+    if run.get("linked_vehicle_movement_id") != movement["_id"]:
+        batches().update_one(
+            {"_id": run["_id"]},
+            {"$set": {"linked_vehicle_movement_id": movement["_id"], "updated_at": now_utc()}},
+            **_session(session),
+        )
+        run["linked_vehicle_movement_id"] = movement["_id"]
+    return movement
+
+
 def _notify_phase5(run: dict, title: str, message: str, event: str, permission: str, *, priority="high", extra_recipients=None):
     recipients = {item for item in (extra_recipients or []) if item}
     for user in users().find({"status": "active"}):
@@ -794,7 +1024,7 @@ def _notify_phase5(run: dict, title: str, message: str, event: str, permission: 
 
 
 def update_daily_run(run_id: str, payload: dict, actor_id: str) -> dict:
-    actor = current_user(actor_id); run = batches().find_one({"_id": object_id(run_id, "run_id"), **branch_query(actor)})
+    actor = current_user(actor_id); _assert_planner_workspace(actor); run = batches().find_one({"_id": object_id(run_id, "run_id"), **branch_query(actor)})
     if not run: raise ApiError("Delivery run not found.", status_code=404)
     if run.get("status") in {"EXECUTION_COMPLETED", "AWAITING_RECONCILIATION", "AWAITING_RETURN_RECONCILIATION", "COMPLETED", "CANCELLED"}: raise ApiError("This delivery run can no longer be edited.", status_code=409)
     allowed = {"delivery_date", "planned_departure_time", "transport_method", "manual_transport", "driver_id", "vehicle_id", "notes", "stops", "stop_order", "status"}
@@ -878,21 +1108,54 @@ def update_daily_run(run_id: str, payload: dict, actor_id: str) -> dict:
 
 
 def publish_daily_run(run_id: str, actor_id: str) -> dict:
-    actor = current_user(actor_id); run = batches().find_one({"_id": object_id(run_id, "run_id"), **branch_query(actor)})
+    actor = current_user(actor_id); _assert_planner_workspace(actor); run = batches().find_one({"_id": object_id(run_id, "run_id"), **branch_query(actor)})
     if not run: raise ApiError("Delivery run not found.", status_code=404)
+    if run.get("published_at") and run.get("status") in VISIBLE_RUN_STATUSES:
+        return _enrich_run(run)
     if run.get("status") not in {"DRAFT", "READY_FOR_REVIEW"}: raise ApiError("Only a draft or reviewed run can be published.", status_code=409)
     validation = review_run(run)
-    if not validation["valid"]: raise ApiError("Resolve publishing errors before publishing this run.", status_code=409, errors=validation["errors"])
+    if not validation["valid"]:
+        details = " ".join(validation["errors"])
+        raise ApiError(f"Cannot publish this run: {details}", status_code=409, errors=validation["errors"])
     timestamp = now_utc(); updates = {"status": "PUBLISHED", "route_status": "PUBLISHED", "published_at": timestamp, "published_by": object_id(actor_id), "updated_at": timestamp}
     status_event = {"from": run.get("status"), "to": "PUBLISHED", "actor_id": object_id(actor_id), "timestamp": timestamp}
     route_version = {"version": int(run.get("version") or 1), "stops": run.get("stops", []), "driver_id": run.get("driver_id"), "vehicle_id": run.get("vehicle_id"), "published_by": object_id(actor_id), "published_at": timestamp}
-    batches().update_one({"_id": run["_id"]}, {"$set": updates, "$push": {"status_history": status_event, "route_versions": route_version}}); orders().update_many({"_id": {"$in": run["delivery_order_ids"]}}, {"$set": {"status": "SCHEDULED", "updated_at": timestamp}}); run.update(updates)
-    _audit("delivery_run_published", actor_id, "delivery_run", run["_id"], run["branch_id"], new=updates); _notify_run(run, "Delivery run published", f"{run['run_number']} is scheduled for {run['delivery_date']}.", "published")
+    with _transaction() as session:
+        current = batches().find_one({"_id": run["_id"]}, **_session(session))
+        if current and current.get("published_at") and current.get("status") in VISIBLE_RUN_STATUSES:
+            return _enrich_run(current)
+        if not current or current.get("status") not in {"DRAFT", "READY_FOR_REVIEW"}:
+            raise ApiError("The run changed while publishing. Refresh it and try again.", status_code=409)
+        _ensure_run_vehicle_movement(current, actor_id, session=session)
+        transition = batches().update_one(
+            {"_id": current["_id"], "status": {"$in": ["DRAFT", "READY_FOR_REVIEW"]}, "published_at": None},
+            {"$set": updates, "$push": {"status_history": status_event, "route_versions": route_version}},
+            **_session(session),
+        )
+        if transition.modified_count != 1:
+            raise ApiError("The run was already changed by another publish request. Refresh to see its current status.", status_code=409)
+        delivery_update = orders().update_many(
+            {"_id": {"$in": current["delivery_order_ids"]}, "batch_id": current["_id"], "status": {"$in": ["CERTIFIED", "WAITING_SCHEDULING", "ready_for_planning"]}},
+            {"$set": {"status": "SCHEDULED", "updated_at": timestamp}},
+            **_session(session),
+        )
+        if delivery_update.matched_count != len(current["delivery_order_ids"]):
+            raise ApiError("One or more deliveries are no longer awaiting planning. Refresh the run before publishing.", status_code=409)
+        run = current
+        run.update(updates)
+    try:
+        _audit("delivery_run_published", actor_id, "delivery_run", run["_id"], run["branch_id"], new=updates)
+    except Exception:
+        current_app.logger.exception("[Delivery Scheduler] Publish audit write failed for run %s", run.get("run_number"))
+    try:
+        _notify_run(run, "Delivery run published", f"{run['run_number']} is scheduled for {run['delivery_date']}.", "published")
+    except Exception:
+        current_app.logger.exception("[Delivery Scheduler] Publish notification enqueue failed for run %s", run.get("run_number"))
     return _enrich_run(run)
 
 
 def lock_daily_run(run_id: str, actor_id: str) -> dict:
-    actor = current_user(actor_id); run = batches().find_one({"_id": object_id(run_id, "run_id"), **branch_query(actor)})
+    actor = current_user(actor_id); _assert_planner_workspace(actor); run = batches().find_one({"_id": object_id(run_id, "run_id"), **branch_query(actor)})
     if not run: raise ApiError("Delivery run not found.", status_code=404)
     if run.get("status") != "PUBLISHED": raise ApiError("Only a published run can be locked.", status_code=409)
     timestamp = now_utc(); updates = {"status": "LOCKED", "locked_at": timestamp, "locked_by": object_id(actor_id), "updated_at": timestamp}
@@ -902,7 +1165,7 @@ def lock_daily_run(run_id: str, actor_id: str) -> dict:
 
 
 def cancel_daily_run(run_id: str, reason: str, actor_id: str) -> dict:
-    actor = current_user(actor_id); run = batches().find_one({"_id": object_id(run_id, "run_id"), **branch_query(actor)})
+    actor = current_user(actor_id); _assert_planner_workspace(actor); run = batches().find_one({"_id": object_id(run_id, "run_id"), **branch_query(actor)})
     if not run: raise ApiError("Delivery run not found.", status_code=404)
     if run.get("status") in STARTED_RUN_STATUSES | {"COMPLETED", "CANCELLED"}: raise ApiError("This run can no longer be cancelled.", status_code=409)
     reason = str(reason or "").strip()
@@ -1068,6 +1331,8 @@ def start_scheduler_run(run_id: str, payload: dict, actor_id: str) -> dict:
     if not accepted and not (reason and (user_has_permission(actor, "delivery_execution.override") or user_has_permission(actor, "delivery_execution.override_custody"))):
         raise ApiError("Accept issued-item custody before starting this run.", status_code=409)
     _run_transition(run, "IN_PROGRESS", actor_id, "delivery_run_started", {"route_status": "IN_PROGRESS", "started_at": now_utc(), "custody_override_reason": reason or None}, reason=reason or None, enrich=False)
+    if run.get("linked_vehicle_movement_id"):
+        get_collection("vehicle_movements").update_one({"_id": run["linked_vehicle_movement_id"], "status": {"$in": ["approved", "checked_out", "in_progress"]}}, {"$set": {"status": "in_progress", "actual_departure_at": now_utc(), "departure_time": now_utc(), "updated_at": now_utc()}})
     _notify_run(run, "Delivery route started", f"{run.get('run_number')} has started its route.", "started")
     return _enrich_run(run)
 
@@ -1135,6 +1400,10 @@ def update_scheduler_stop(run_id: str, stop_id: str, payload: dict, actor_id: st
         _notify_run(run, "Delivery stop updated", f"Stop {stop.get('sequence_number')} is {stop.get('status')}.", f"stop-{stop_id}-{stop.get('status')}")
     if became_awaiting and sum(item["expected_return_quantity"] for item in _phase5_lines(run)) > 0:
         _notify_phase5(run, "Outstanding delivery returns", f"{run.get('run_number') or run.get('batch_number')} has items awaiting return receiving.", "outstanding-returns", "returns.receive")
+    if became_awaiting and run.get("linked_vehicle_movement_id"):
+        order_rows = list(orders().find({"_id": {"$in": run.get("delivery_order_ids", [])}}, {"status": 1}))
+        delivered = bool(order_rows) and all(str(item.get("status") or "").upper() == "DELIVERED" for item in order_rows)
+        get_collection("vehicle_movements").update_one({"_id": run["linked_vehicle_movement_id"]}, {"$set": {"delivery_status": "delivered" if delivered else "completed_with_exceptions", "delivered_at": now_utc(), "updated_at": now_utc()}})
     return _enrich_run(run)
 
 
@@ -1149,6 +1418,10 @@ def complete_scheduler_run(run_id: str, actor_id: str) -> dict:
         raise ApiError("Record an outcome for every route stop before completing the run.", status_code=409)
     _run_transition(run, "EXECUTION_COMPLETED", actor_id, "delivery_execution_completed", {"route_status": "COMPLETED", "execution_completed_at": now_utc()}, enrich=False)
     result = _run_transition(run, "AWAITING_RECONCILIATION", actor_id, "delivery_awaiting_reconciliation", {"awaiting_reconciliation_at": now_utc()})
+    if run.get("linked_vehicle_movement_id"):
+        order_rows = list(orders().find({"_id": {"$in": run.get("delivery_order_ids", [])}}, {"status": 1}))
+        delivered = bool(order_rows) and all(str(item.get("status") or "").upper() == "DELIVERED" for item in order_rows)
+        get_collection("vehicle_movements").update_one({"_id": run["linked_vehicle_movement_id"]}, {"$set": {"delivery_status": "delivered" if delivered else "completed_with_exceptions", "delivered_at": now_utc(), "updated_at": now_utc()}})
     if sum(item["expected_return_quantity"] for item in _phase5_lines(run)) > 0:
         _notify_phase5(run, "Outstanding delivery returns", f"{run.get('run_number') or run.get('batch_number')} has items awaiting return receiving.", "outstanding-returns", "returns.receive")
     return result
@@ -1200,6 +1473,8 @@ def _phase5_lines(run: dict) -> list[dict]:
 
 def list_accountability_batches(actor_id: str, filters: dict) -> dict:
     actor = current_user(actor_id); query = {**branch_query(actor), "status": {"$in": list(PHASE5_BATCH_STATUSES)}}
+    if _is_driver_workspace(actor):
+        query["driver_id"] = object_id(actor_id)
     if filters.get("branch_id"): query["branch_id"] = assert_branch_access(actor, filters["branch_id"])
     if filters.get("status"): query["status"] = filters["status"]
     if filters.get("driver_id"): query["driver_id"] = object_id(filters["driver_id"], "driver_id")

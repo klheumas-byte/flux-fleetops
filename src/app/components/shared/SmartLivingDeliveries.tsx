@@ -25,6 +25,7 @@ import {
 import { toast } from "sonner";
 import { apiRequest } from "../../lib/api";
 import { getStoredSessionUser } from "../../lib/auth-session";
+import { useDataSync } from "../../lib/data-sync";
 import {
   Dialog,
   DialogContent,
@@ -80,6 +81,19 @@ type Order = {
   notes?: string;
   status: string;
   product_lines: Line[];
+  source_reference?: string;
+  branch?: { id: string; name: string; code?: string } | null;
+  agent?: { id: string; name: string } | null;
+  manager?: { id: string; name: string } | null;
+};
+type FieldDelivery = Order & {
+  planning_status: string;
+  delivery_date?: string;
+  delivery_time?: string;
+  driver?: { id: string; name: string } | null;
+  vehicle?: { id: string; name: string } | null;
+  stop_sequence?: number | null;
+  stop_status?: string | null;
 };
 type Stop = {
   stop_id: string;
@@ -127,6 +141,7 @@ type Run = {
   review?: { valid: boolean; errors: string[]; warnings: string[] };
   assignment_status?: string;
   custody_status?: string;
+  branch?: { id: string; name: string; code?: string } | null;
 };
 type Meta = {
   branches: { id: string; code: string; name: string }[];
@@ -229,12 +244,17 @@ export default function SmartLivingDeliveries() {
       user?.permissions?.includes("*") ||
       user?.permissions?.includes(permission),
     );
-  const canManage = has("delivery_scheduler.manage");
-  const canViewScheduler = has("delivery_scheduler.view");
-  const canCreate = has("deliveries.create");
-  const canPublish = has("delivery_runs.publish");
-  const canLock = has("delivery_runs.lock");
-  const canLoading = has("loading_schedule.view");
+  const isDriverWorkspace =
+    String(user?.selected_workspace || user?.role || "").toLowerCase() ===
+    "driver";
+  const canManage = !isDriverWorkspace && has("delivery_scheduler.manage");
+  const canViewScheduler =
+    !isDriverWorkspace && has("delivery_scheduler.view");
+  const canCreate = !isDriverWorkspace && has("deliveries.create");
+  const canPublish = !isDriverWorkspace && has("delivery_runs.publish");
+  const canLock = !isDriverWorkspace && has("delivery_runs.lock");
+  const canLoading =
+    !isDriverWorkspace && has("loading_schedule.view");
   const canIssue = has("delivery_items.issue") || has("items.issue");
   const canAcceptExecution =
     has("delivery_routes.execute") || has("delivery_execution.accept");
@@ -253,9 +273,11 @@ export default function SmartLivingDeliveries() {
   const canReconcile = has("reconciliation.manage");
   const canCloseBatch = has("delivery_batches.close");
   const canReopenBatch = has("delivery_batches.reopen");
-  const canAccountability = canReceiveReturns || canManageReturns || canManageExceptions || canReconcile;
+  const canAccountability = !isDriverWorkspace && (canReceiveReturns || canManageReturns || canManageExceptions || canReconcile);
   const assignedOnly =
-    has("delivery_schedule.view_assigned") && !canViewScheduler;
+    isDriverWorkspace ||
+    (has("delivery_schedule.view_assigned") && !canViewScheduler);
+  const isFieldAgent = Boolean(user?.role_ids?.includes("field_agent") || user?.role === "field_agent");
 
   const [tab, setTab] = useState<SchedulerTab>(
     canManage ? "queue" : canLoading && !assignedOnly ? "loading" : "runs",
@@ -264,6 +286,8 @@ export default function SmartLivingDeliveries() {
   const [meta, setMeta] = useState<Meta>(EMPTY_META);
   const [queue, setQueue] = useState<Order[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [fieldDeliveries, setFieldDeliveries] = useState<FieldDelivery[]>([]);
+  const [fieldDeliveryCounts, setFieldDeliveryCounts] = useState({ upcoming: 0, delivered: 0 });
   const [loadingRuns, setLoadingRuns] = useState<Run[]>([]);
   const [accountabilityBatches, setAccountabilityBatches] = useState<AccountabilityBatch[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
@@ -289,6 +313,9 @@ export default function SmartLivingDeliveries() {
   });
   const [activeRun, setActiveRun] = useState<Run | null>(null);
   const [saving, setSaving] = useState(false);
+  const [savingAction, setSavingAction] = useState<
+    "delivery" | "create-run" | "confirm" | ""
+  >("");
   const [busyAction, setBusyAction] = useState("");
   const runMutationLock = useRef(false);
   const [actionFeedback, setActionFeedback] = useState<ActionFeedback>(null);
@@ -339,10 +366,15 @@ export default function SmartLivingDeliveries() {
             ).data.runs || [],
           );
       } else if (assignedOnly) {
-        setRuns(
-          (await apiRequest<any>("/smart-living-deliveries/scheduler/assigned"))
-            .data.runs || [],
-        );
+        const [assigned, fieldSchedule] = await Promise.all([
+          apiRequest<any>("/smart-living-deliveries/scheduler/assigned"),
+          isFieldAgent ? apiRequest<any>("/smart-living-deliveries/field-schedule") : Promise.resolve(null),
+        ]);
+        setRuns(assigned.data.runs || []);
+        if (fieldSchedule) {
+          setFieldDeliveries(fieldSchedule.data.deliveries || []);
+          setFieldDeliveryCounts(fieldSchedule.data.counts || { upcoming: 0, delivered: 0 });
+        }
       } else if (canLoading) {
         setLoadingRuns(
           (await apiRequest<any>("/smart-living-deliveries/scheduler/loading"))
@@ -368,6 +400,9 @@ export default function SmartLivingDeliveries() {
   useEffect(() => {
     void load();
   }, []);
+  useDataSync(['deliveries', 'delivery_runs', 'vehicle_movements', 'returns'], () => {
+    if (document.visibilityState === 'visible') void load();
+  });
 
   const filteredQueue = useMemo(
     () =>
@@ -449,6 +484,7 @@ export default function SmartLivingDeliveries() {
         "Complete all required delivery and customer fields.",
       );
     setSaving(true);
+    setSavingAction("delivery");
     try {
       await apiRequest("/smart-living-deliveries/scheduler/orders", {
         method: "POST",
@@ -472,6 +508,7 @@ export default function SmartLivingDeliveries() {
       );
     } finally {
       setSaving(false);
+      setSavingAction("");
     }
   };
 
@@ -490,6 +527,7 @@ export default function SmartLivingDeliveries() {
     if (builder.stops.some((stop) => !stop.agent_id))
       return setFormError("Every customer stop needs a responsible agent.");
     setSaving(true);
+    setSavingAction("create-run");
     try {
       const response = await apiRequest<any>(
         "/smart-living-deliveries/scheduler/runs",
@@ -515,6 +553,7 @@ export default function SmartLivingDeliveries() {
       );
     } finally {
       setSaving(false);
+      setSavingAction("");
     }
   };
 
@@ -919,7 +958,7 @@ export default function SmartLivingDeliveries() {
                     {filteredQueue.length} certified deliveries waiting
                   </p>
                   <button
-                    disabled={!selected.length}
+                    disabled={!selected.length || saving}
                     onClick={openBuilder}
                     className="flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-40 sm:w-auto"
                   >
@@ -932,6 +971,7 @@ export default function SmartLivingDeliveries() {
                   selected={selected}
                   setSelected={setSelected}
                   meta={meta}
+                  disabled={saving}
                 />
                 <div className="hidden overflow-x-auto rounded-xl border bg-white md:block">
                   <table className="w-full min-w-[900px] text-left text-sm">
@@ -969,6 +1009,7 @@ export default function SmartLivingDeliveries() {
                                 type="checkbox"
                                 aria-label={`Select ${order.customer_name}`}
                                 checked={selected.includes(order.id)}
+                                disabled={saving}
                                 onChange={(event) =>
                                   setSelected(
                                     event.target.checked
@@ -986,13 +1027,14 @@ export default function SmartLivingDeliveries() {
                               </strong>
                               <span className="text-xs text-slate-500">
                                 {order.reference_number ||
-                                  order.external_reference}
+                                  order.external_reference ||
+                                  "Reference unavailable"}
                               </span>
                             </td>
                             <td className="p-3">
-                              {agent?.name || (
+                              {order.agent?.name || agent?.name || (
                                 <span className="text-amber-700">
-                                  Agent needed
+                                  Name unavailable
                                 </span>
                               )}
                             </td>
@@ -1014,7 +1056,7 @@ export default function SmartLivingDeliveries() {
                               {order.requested_delivery_date || "Flexible"}
                             </td>
                             <td className="p-3">
-                              {branch?.name || "Unassigned"}
+                              {order.branch?.name || branch?.name || "Name unavailable"}
                             </td>
                             <td className="p-3">
                               <span className="rounded-full bg-emerald-50 px-2 py-1 text-xs text-emerald-700">
@@ -1042,11 +1084,16 @@ export default function SmartLivingDeliveries() {
             )}
 
             {(tab === "runs" || !canViewScheduler) && (
-              <RunCards
-                runs={assignedOnly ? assignedRuns : runs}
-                onOpen={(run) => void openRun(run)}
-                assigned={!canViewScheduler}
-              />
+              <div className="space-y-4">
+                {assignedOnly && isFieldAgent && (
+                  <FieldAgentDeliveryCards deliveries={fieldDeliveries} counts={fieldDeliveryCounts} />
+                )}
+                <RunCards
+                  runs={assignedOnly ? assignedRuns : runs}
+                  onOpen={(run) => void openRun(run)}
+                  assigned={!canViewScheduler}
+                />
+              </div>
             )}
             {canViewScheduler && tab === "week" && (
               <section className="grid gap-4 lg:grid-cols-2">
@@ -1477,7 +1524,9 @@ export default function SmartLivingDeliveries() {
                 className="flex min-h-11 items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm text-white disabled:opacity-50"
               >
                 {saving && <Loader2 className="h-4 w-4 animate-spin" />}
-                {saving ? "Saving delivery…" : "Save certified delivery"}
+                {savingAction === "delivery"
+                  ? "Saving delivery…"
+                  : "Save certified delivery"}
               </button>
             </div>
           </form>
@@ -1573,6 +1622,7 @@ export default function SmartLivingDeliveries() {
                       )}
                     >
                       {vehicle.label || vehicle.name} · {vehicle.branch || "Unassigned"} · {vehicle.status}
+                      {vehicle.disabled_reason ? ` · ${vehicle.disabled_reason}` : ""}
                     </option>
                   ))}
                 </select>
@@ -1622,7 +1672,9 @@ export default function SmartLivingDeliveries() {
                 className="flex min-h-11 items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm text-white disabled:opacity-50"
               >
                 {saving && <Loader2 className="h-4 w-4 animate-spin" />}
-                {saving ? "Saving draft…" : "Save draft run"}
+                {savingAction === "create-run"
+                  ? "Creating draft run…"
+                  : "Save draft run"}
               </button>
             </div>
           </form>
@@ -1726,6 +1778,7 @@ export default function SmartLivingDeliveries() {
                         )}
                       >
                         {vehicle.label || vehicle.name} · {vehicle.branch || "Unassigned"}
+                        {vehicle.disabled_reason ? ` · ${vehicle.disabled_reason}` : ""}
                       </option>
                     ))}
                   </select>
@@ -1774,11 +1827,15 @@ export default function SmartLivingDeliveries() {
                 {planningEditable && (
                     <button
                       onClick={() => void saveRun()}
-                      disabled={busyAction === "save"}
+                      disabled={Boolean(busyAction)}
                       className="flex min-h-11 items-center justify-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium disabled:opacity-50"
                     >
                       {busyAction === "save" && <Loader2 className="h-4 w-4 animate-spin" />}
-                      {activeRun.status === "PUBLISHED" ? "Save & notify team" : "Save changes"}
+                      {busyAction === "save"
+                        ? "Saving changes…"
+                        : activeRun.status === "PUBLISHED"
+                          ? "Save & notify team"
+                          : "Save changes"}
                     </button>
                   )}
                 {canManage && activeRun.status === "DRAFT" && (
@@ -1789,7 +1846,7 @@ export default function SmartLivingDeliveries() {
                         setCancelTarget(activeRun);
                         setActiveRun(null);
                       }}
-                      disabled={busyAction === "cancel"}
+                      disabled={Boolean(busyAction)}
                       className="min-h-11 rounded-lg border border-red-200 px-4 py-2 text-sm font-medium text-red-700 disabled:opacity-50"
                     >
                       Cancel run
@@ -1806,7 +1863,7 @@ export default function SmartLivingDeliveries() {
                           action: () => transition(activeRun, "publish"),
                         })
                       }
-                      disabled={!activeRun.review?.valid || busyAction === "publish"}
+                      disabled={!activeRun.review?.valid || Boolean(busyAction)}
                       className="flex min-h-11 items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-40"
                     >
                       {busyAction === "publish" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
@@ -1823,7 +1880,7 @@ export default function SmartLivingDeliveries() {
                         action: () => transition(activeRun, "lock"),
                       })
                     }
-                    disabled={busyAction === "lock"}
+                    disabled={Boolean(busyAction)}
                     className="flex min-h-11 items-center justify-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
                   >
                     <Lock className="h-4 w-4" />
@@ -1926,10 +1983,12 @@ export default function SmartLivingDeliveries() {
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
+              disabled={saving || Boolean(busyAction)}
               onClick={async (event) => {
                 event.preventDefault();
                 if (!confirm) return;
                 setSaving(true);
+                setSavingAction("confirm");
                 try {
                   await confirm.action();
                   setConfirm(null);
@@ -1937,10 +1996,17 @@ export default function SmartLivingDeliveries() {
                   // The mutation reports its specific inline and toast error.
                 } finally {
                   setSaving(false);
+                  setSavingAction("");
                 }
               }}
             >
-              {saving ? "Working…" : "Confirm"}
+              {busyAction === "publish"
+                ? "Publishing…"
+                : busyAction === "lock"
+                  ? "Locking schedule…"
+                  : savingAction === "confirm"
+                    ? "Working…"
+                    : "Confirm"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -1993,11 +2059,13 @@ function CertifiedOrderCards({
   selected,
   setSelected,
   meta,
+  disabled,
 }: {
   orders: Order[];
   selected: string[];
   setSelected: (ids: string[]) => void;
   meta: Meta;
+  disabled?: boolean;
 }) {
   if (!orders.length)
     return (
@@ -2021,6 +2089,7 @@ function CertifiedOrderCards({
                 type="checkbox"
                 className="mt-1 h-5 w-5"
                 checked={checked}
+                disabled={disabled}
                 onChange={(event) =>
                   setSelected(
                     event.target.checked
@@ -2034,7 +2103,9 @@ function CertifiedOrderCards({
                   <div>
                     <strong className="block text-slate-900">{order.customer_name}</strong>
                     <span className="text-xs text-slate-500">
-                      {order.reference_number || order.external_reference}
+                      {order.reference_number ||
+                        order.external_reference ||
+                        "Reference unavailable"}
                     </span>
                   </div>
                   <span className="rounded-full bg-emerald-50 px-2 py-1 text-xs text-emerald-700">
@@ -2043,7 +2114,8 @@ function CertifiedOrderCards({
                 </div>
                 <p className="mt-3 text-sm text-slate-700">{order.delivery_address}</p>
                 <p className="text-xs text-slate-500">
-                  {order.landmark || "No landmark"} · {branch?.name || "Unassigned"}
+                  {order.landmark || "No landmark"} ·{" "}
+                  {order.branch?.name || branch?.name || "Name unavailable"}
                 </p>
                 {order.latitude == null && (
                   <p className="mt-1 text-xs text-amber-700">
@@ -2058,7 +2130,7 @@ function CertifiedOrderCards({
                   ))}
                 </div>
                 <p className="mt-3 text-xs text-slate-500">
-                  Agent: {agent?.name || "Needed"} · Requested {order.requested_delivery_date || "Flexible"}
+                  Agent: {order.agent?.name || agent?.name || "Name unavailable"} · Requested {order.requested_delivery_date || "Flexible"}
                 </p>
               </div>
             </div>
@@ -2066,6 +2138,44 @@ function CertifiedOrderCards({
         );
       })}
     </div>
+  );
+}
+
+function FieldAgentDeliveryCards({
+  deliveries,
+  counts,
+}: {
+  deliveries: FieldDelivery[];
+  counts: { upcoming: number; delivered: number };
+}) {
+  return (
+    <section className="space-y-3">
+      <div className="grid grid-cols-2 gap-3 sm:max-w-md">
+        <div className="rounded-xl border bg-white p-4"><p className="text-xs text-slate-500">Upcoming</p><strong className="mt-1 block text-2xl text-slate-900">{counts.upcoming}</strong></div>
+        <div className="rounded-xl border bg-white p-4"><p className="text-xs text-slate-500">Delivered</p><strong className="mt-1 block text-2xl text-emerald-700">{counts.delivered}</strong></div>
+      </div>
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {deliveries.map((delivery) => (
+          <article key={delivery.id} className="rounded-xl border bg-white p-4 shadow-sm">
+            <div className="flex items-start justify-between gap-2">
+              <div><h3 className="font-semibold text-slate-900">{delivery.customer_name}</h3><p className="text-sm text-slate-500">{delivery.phone || delivery.customer_phone || 'No phone'}</p></div>
+              <span className={`rounded-full px-2 py-1 text-xs ${statusTone(delivery.status.toUpperCase())}`}>{delivery.status.replaceAll('_', ' ')}</span>
+            </div>
+            <p className="mt-3 flex items-start gap-2 text-sm text-slate-600"><MapPin className="mt-0.5 h-4 w-4 shrink-0" />{delivery.delivery_address}</p>
+            <p className="mt-2 text-sm text-slate-700">{delivery.product_lines.map((line) => `${line.product_name} × ${quantity(line)}`).join(', ')}</p>
+            <dl className="mt-3 grid grid-cols-2 gap-2 text-xs">
+              <div><dt className="text-slate-400">Planning</dt><dd className="font-medium text-slate-700">{delivery.planning_status.replaceAll('_', ' ')}</dd></div>
+              <div><dt className="text-slate-400">Date / time</dt><dd>{delivery.delivery_date || 'Not planned'} {delivery.delivery_time || ''}</dd></div>
+              <div><dt className="text-slate-400">Driver</dt><dd>{delivery.driver?.name || 'Not assigned'}</dd></div>
+              <div><dt className="text-slate-400">Vehicle</dt><dd>{delivery.vehicle?.name || 'Not assigned'}</dd></div>
+              <div><dt className="text-slate-400">Stop</dt><dd>{delivery.stop_sequence ? `#${delivery.stop_sequence}` : 'Not sequenced'}</dd></div>
+              <div><dt className="text-slate-400">Stop status</dt><dd>{delivery.stop_status?.replaceAll('_', ' ') || 'Pending planning'}</dd></div>
+            </dl>
+          </article>
+        ))}
+        {!deliveries.length && <p className="rounded-xl border border-dashed bg-white p-8 text-center text-sm text-slate-500 md:col-span-2 xl:col-span-3">No Smart Living deliveries are assigned to you.</p>}
+      </div>
+    </section>
   );
 }
 
@@ -2169,10 +2279,11 @@ function RunSummary({ run }: { run: Run }) {
     .flatMap((order) => order.product_lines || [])
     .reduce((sum, line) => sum + quantity(line), 0);
   return (
-    <section className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6" aria-label="Run summary">
+    <section className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-7" aria-label="Run summary">
       {[
+        ["Branch", run.branch?.name || "Name unavailable"],
         ["Transport", (run.transport_method || "VEHICLE").replaceAll("_", " ")],
-        [(run.transport_method || "VEHICLE") === "VEHICLE" ? "Driver" : "Handler", (run.transport_method || "VEHICLE") === "VEHICLE" ? run.driver?.name || "Unassigned" : run.manual_transport?.provider_name || run.manual_transport?.handler_name || "Unassigned"],
+        [(run.transport_method || "VEHICLE") === "VEHICLE" ? "Driver" : "Handler", (run.transport_method || "VEHICLE") === "VEHICLE" ? run.driver?.name || "Name unavailable" : run.manual_transport?.provider_name || run.manual_transport?.handler_name || "Name unavailable"],
         ["Departure", run.planned_departure_time || "Not set"],
         ["Customers", String(run.stops?.length || 0)],
         ["Products", String(productCount)],

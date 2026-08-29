@@ -42,6 +42,11 @@ SOURCE_MOVEMENT_OWNERSHIP = {
         "owning_module": "supplier_pickups",
         "source_module": "inventory",
     },
+    "smart_living_delivery": {
+        "source_type": "delivery_run",
+        "owning_module": "smart_living_deliveries",
+        "source_module": "smart_living_deliveries",
+    },
     "stock_return": {
         "source_type": "delivery_return_request",
         "owning_module": "stock_transfers",
@@ -163,7 +168,11 @@ def _source_fields(
     }
 
 
-def _attach_source_traceability(movement: dict, source_fields: dict) -> dict:
+def _attach_source_traceability(movement: dict, source_fields: dict, *, collection=None, session=None) -> dict:
+    # PyMongo Collection deliberately has no truth value. Using ``collection or``
+    # raises NotImplementedError in production even though mongomock accepts it.
+    movement_collection = collection if collection is not None else vehicle_movements_collection()
+    session_options = {"session": session} if session is not None else {}
     existing_key = movement.get("source_key")
     if existing_key and existing_key != source_fields["source_key"]:
         raise ApiError(
@@ -177,7 +186,7 @@ def _attach_source_traceability(movement: dict, source_fields: dict) -> dict:
     }
     if missing_fields:
         try:
-            vehicle_movements_collection().update_one(
+            movement_collection.update_one(
                 {
                     "_id": movement["_id"],
                     "$or": [
@@ -187,9 +196,13 @@ def _attach_source_traceability(movement: dict, source_fields: dict) -> dict:
                     ],
                 },
                 {"$set": {**missing_fields, "updated_at": now_utc()}},
+                **session_options,
             )
         except DuplicateKeyError:
-            winner = vehicle_movements_collection().find_one({"source_key": source_fields["source_key"]})
+            winner = movement_collection.find_one(
+                {"source_key": source_fields["source_key"]},
+                **session_options,
+            )
             if winner:
                 return winner
             raise ApiError("Vehicle movement source is already linked.", status_code=409) from None
@@ -205,6 +218,8 @@ def ensure_movement_for_source(
     source_reference: str | None = None,
     existing_movement: dict | None = None,
     legacy_query: dict | None = None,
+    movement_collection=None,
+    session=None,
 ) -> dict:
     """Return one movement for a source, creating it atomically when absent.
 
@@ -228,15 +243,23 @@ def ensure_movement_for_source(
         source_reference=source_reference,
     )
 
+    collection = movement_collection if movement_collection is not None else vehicle_movements_collection()
+    session_options = {"session": session} if session is not None else {}
     movement = existing_movement
     if movement is None:
-        movement = vehicle_movements_collection().find_one(
-            {"source_key": source_fields["source_key"]}
+        movement = collection.find_one(
+            {"source_key": source_fields["source_key"]},
+            **session_options,
         )
     if movement is None and legacy_query:
-        movement = vehicle_movements_collection().find_one(legacy_query)
+        movement = collection.find_one(legacy_query, **session_options)
     if movement is not None:
-        movement = _attach_source_traceability(movement, source_fields)
+        movement = _attach_source_traceability(
+            movement,
+            source_fields,
+            collection=collection,
+            session=session,
+        )
         return {
             "movement": movement,
             "created": False,
@@ -253,24 +276,38 @@ def ensure_movement_for_source(
         "updated_at": timestamp,
     }
     try:
-        document["_id"] = vehicle_movements_collection().insert_one(document).inserted_id
+        document["_id"] = collection.insert_one(document, **session_options).inserted_id
         return {
             "movement": document,
             "created": True,
             "source_key": source_fields["source_key"],
         }
     except DuplicateKeyError:
-        winner = vehicle_movements_collection().find_one(
-            {"source_key": source_fields["source_key"]}
+        if session is not None:
+            # A duplicate write aborts a Mongo transaction, so do not issue a
+            # follow-up query on that dead transaction. The caller can safely
+            # retry after resolving the vehicle/source conflict.
+            raise ApiError(
+                "Vehicle already has another open movement.",
+                status_code=409,
+            ) from None
+        winner = collection.find_one(
+            {"source_key": source_fields["source_key"]},
+            **session_options,
         )
         if winner is None and legacy_query:
-            winner = vehicle_movements_collection().find_one(legacy_query)
+            winner = collection.find_one(legacy_query, **session_options)
         if winner is None:
             raise ApiError(
                 "Vehicle already has another open movement.",
                 status_code=409,
             ) from None
-        winner = _attach_source_traceability(winner, source_fields)
+        winner = _attach_source_traceability(
+            winner,
+            source_fields,
+            collection=collection,
+            session=session,
+        )
         return {
             "movement": winner,
             "created": False,

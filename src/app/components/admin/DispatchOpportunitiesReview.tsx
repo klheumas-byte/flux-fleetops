@@ -26,8 +26,9 @@ import {
   requestDispatchOpportunityClarification,
   reviewDispatchOpportunity,
 } from '../../lib/dispatch-opportunity-api';
-import { Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle } from '../ui/drawer';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../ui/dialog';
 import { Skeleton } from '../ui/skeleton';
+import { useDataSync } from '../../lib/data-sync';
 
 type ReviewFormState = {
   proposed_charge: string;
@@ -160,6 +161,9 @@ export default function DispatchOpportunitiesReview() {
   useEffect(() => {
     void loadItems();
   }, [currentPage, statusFilter]);
+  useDataSync('dispatch_opportunities', () => {
+    if (document.visibilityState === 'visible' && activeAction === null) void loadItems({ refresh: true });
+  });
 
   const openDetail = async (opportunityId: string) => {
     setSelectedOpportunityId(opportunityId);
@@ -454,14 +458,14 @@ export default function DispatchOpportunitiesReview() {
         )}
       </div>
 
-      <Drawer open={Boolean(selectedOpportunityId)} onOpenChange={(open) => { if (!open) setSelectedOpportunityId(null); }}>
-        <DrawerContent className="max-h-[100dvh] overflow-hidden border-t border-gray-200 bg-white sm:max-h-[92vh]">
-          <DrawerHeader className="border-b border-gray-200 px-4 py-4 text-left sm:px-6">
-            <DrawerTitle>{detail?.opportunity_id || 'Dispatch Opportunity Review'}</DrawerTitle>
-            <DrawerDescription>
+      <Dialog open={Boolean(selectedOpportunityId)} onOpenChange={(open) => { if (!open) setSelectedOpportunityId(null); }}>
+        <DialogContent className="flex h-[92vh] max-h-[92vh] w-[calc(100vw-1rem)] max-w-none flex-col gap-0 overflow-hidden rounded-2xl border border-slate-200 bg-white p-0 shadow-2xl sm:h-[min(85vh,900px)] sm:max-h-[85vh] sm:w-[80vw] sm:max-w-[1150px]">
+          <DialogHeader className="sticky top-0 z-10 shrink-0 border-b border-slate-200 bg-white px-5 py-4 text-left sm:px-7">
+            <DialogTitle className="text-base font-semibold tracking-tight text-slate-900">{detail?.opportunity_id || 'Dispatch Opportunity Review'}</DialogTitle>
+            <DialogDescription className="text-xs leading-relaxed text-slate-500">
               Keep review and conversion under operations control while preserving a clean handoff into the existing dispatch request workflow.
-            </DrawerDescription>
-          </DrawerHeader>
+            </DialogDescription>
+          </DialogHeader>
 
           <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6">
             {isLoadingDetail ? (
@@ -524,7 +528,7 @@ export default function DispatchOpportunitiesReview() {
             ) : null}
           </div>
 
-          <div className="border-t border-gray-200 bg-white px-4 py-4 sm:px-6">
+          <div className="sticky bottom-0 z-10 shrink-0 border-t border-slate-200 bg-white/95 px-4 py-3 shadow-[0_-8px_20px_rgba(15,23,42,0.06)] backdrop-blur sm:px-7">
             <div className="flex flex-col-reverse gap-3 sm:flex-row sm:flex-wrap sm:justify-between">
               <button
                 type="button"
@@ -593,8 +597,8 @@ export default function DispatchOpportunitiesReview() {
               ) : null}
             </div>
           </div>
-        </DrawerContent>
-      </Drawer>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

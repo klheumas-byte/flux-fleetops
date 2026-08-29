@@ -13,6 +13,17 @@ jwt = JWTManager()
 _mongo_client = None
 
 
+def reset_mongo_client() -> None:
+    """Drop a failed client so the next request performs a fresh connection attempt."""
+    global _mongo_client
+    client, _mongo_client = _mongo_client, None
+    if client is not None:
+        try:
+            client.close()
+        except Exception:
+            current_app.logger.debug("[Flux DB] Failed to close stale MongoDB client.", exc_info=True)
+
+
 def init_extensions(app):
     cors.init_app(
         app,
@@ -20,7 +31,7 @@ def init_extensions(app):
             r"/api/.*": {
                 "origins": app.config["CORS_ORIGINS"],
                 "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-                "allow_headers": ["Content-Type", "Authorization"],
+                "allow_headers": ["Content-Type", "Authorization", "Idempotency-Key"],
             }
         },
         supports_credentials=False,
@@ -117,6 +128,7 @@ def get_database_connection_status() -> dict:
             "message": "MongoDB connection is healthy.",
         }
     except (ServerSelectionTimeoutError, ConnectionFailure, PyMongoError) as error:
+        reset_mongo_client()
         current_app.logger.warning("[Flux Health] Database connectivity check failed: %s", error)
         return {
             "status": "disconnected",

@@ -43,6 +43,7 @@ export interface SessionUser {
   active?: boolean;
   driver_profile?: SessionDriverProfile | null;
   must_change_password?: boolean;
+  default_password_active?: boolean;
   created_at?: string | null;
   last_login?: string | null;
   password_changed_at?: string | null;

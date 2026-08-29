@@ -13,6 +13,7 @@ from services.finance_account_service import (
     decrement_finance_account_balance,
     get_finance_account_document,
 )
+from services.master_data_service import resolve_master_data_item
 from utils.api_error import ApiError
 from utils.file_validation import validate_file_reference
 from utils.mongo_indexes import ensure_indexes_for_collection
@@ -55,6 +56,10 @@ def finance_accounts_collection():
     return get_collection("finance_accounts")
 
 
+def maintenance_jobs_collection():
+    return get_collection("maintenance_jobs")
+
+
 def ensure_expense_indexes():
     ensure_indexes_for_collection(
         expenses_collection(),
@@ -65,6 +70,9 @@ def ensure_expense_indexes():
             {"keys": [("vehicle_id", ASCENDING)]},
             {"keys": [("driver_id", ASCENDING)]},
             {"keys": [("finance_account_id", ASCENDING)]},
+            {"keys": [("funding_source_id", ASCENDING)]},
+            {"keys": [("maintenance_job_id", ASCENDING)], "options": {"sparse": True}},
+            {"keys": [("idempotency_key", ASCENDING)], "options": {"unique": True, "sparse": True}},
             {"keys": [("requested_by", ASCENDING)]},
             {"keys": [("approved_by", ASCENDING)]},
             {"keys": [("paid_by", ASCENDING)]},
@@ -210,11 +218,17 @@ def get_expense_by_id(expense_id: str, current_user_id: str, current_role: str) 
     return _enrich_expense(document)
 
 
-def create_expense(payload: dict, current_user_id: str, current_role: str) -> dict:
-    if current_role not in {"owner", "admin", "driver"}:
+def create_expense(payload: dict, current_user_id: str, current_role: str, idempotency_key: str | None = None) -> dict:
+    if current_role not in {"owner", "admin", "finance", "finance_officer", "driver"}:
         raise ApiError("You do not have permission to create expenses.", status_code=403)
 
-    expense_title = (payload.get("expense_title") or "").strip()
+    key = str(idempotency_key or payload.get("idempotency_key") or "").strip() or None
+    if key:
+        existing = expenses_collection().find_one({"idempotency_key": key})
+        if existing:
+            return _enrich_expense(existing)
+
+    expense_title = (payload.get("expense_title") or payload.get("description") or "").strip()
     if not expense_title:
         raise ApiError("expense_title is required.", status_code=400)
 
@@ -228,6 +242,16 @@ def create_expense(payload: dict, current_user_id: str, current_role: str) -> di
     finance_account_document = get_finance_account_document(payload.get("finance_account_id"))
     if finance_account_document.get("status") != "active":
         raise ApiError("Selected finance account is inactive.", status_code=400)
+
+    funding_source = resolve_master_data_item("funding_sources", payload.get("funding_source_id"), active_only=True)
+    if not funding_source:
+        raise ApiError("funding_source_id is required.", status_code=400)
+    funding_source_description = (payload.get("funding_source_description") or "").strip() or None
+    if str(funding_source.get("name") or "").strip().lower() == "other" and not funding_source_description:
+        raise ApiError("funding_source_description is required when Funding Source is Other.", status_code=400)
+
+    paid_by_object_id = _to_object_id(payload.get("paid_by"), "paid_by")
+    _get_user_document(paid_by_object_id)
 
     driver_object_id = _to_object_id(payload.get("driver_id"), "driver_id", required=False)
     vehicle_object_id = _to_object_id(payload.get("vehicle_id"), "vehicle_id", required=False)
@@ -253,6 +277,19 @@ def create_expense(payload: dict, current_user_id: str, current_role: str) -> di
     if vehicle_object_id is not None:
         _get_vehicle_document(vehicle_object_id)
 
+    maintenance_job_id = _to_object_id(payload.get("maintenance_job_id"), "maintenance_job_id", required=False)
+    maintenance_document = None
+    if maintenance_job_id:
+        maintenance_document = maintenance_jobs_collection().find_one({"_id": maintenance_job_id, "record_scope": {"$ne": "personal"}})
+        if not maintenance_document:
+            raise ApiError("Maintenance job not found.", status_code=404)
+        if maintenance_document.get("expense_id"):
+            raise ApiError("Maintenance job already has a linked expense.", status_code=409)
+        if vehicle_object_id and maintenance_document.get("vehicle_id") != vehicle_object_id:
+            raise ApiError("Expense vehicle must match the maintenance job vehicle.", status_code=400)
+        if not vehicle_object_id:
+            vehicle_object_id = maintenance_document.get("vehicle_id")
+
     receipt_image = validate_file_reference(
         payload.get("receipt_image"),
         field_name="receipt_image",
@@ -269,6 +306,11 @@ def create_expense(payload: dict, current_user_id: str, current_role: str) -> di
         "driver_id": driver_object_id,
         "finance_account_id": finance_account_document["_id"],
         "finance_account_snapshot": serialize_finance_account_snapshot(finance_account_document),
+        "funding_source_id": funding_source["_id"],
+        "funding_source_snapshot": {"id": str(funding_source["_id"]), "name": funding_source.get("name")},
+        "funding_source_description": funding_source_description,
+        "maintenance_job_id": maintenance_job_id,
+        "description": expense_title,
         "payment_method": payment_method,
         "reference_number": (payload.get("reference_number") or "").strip() or None,
         "receipt_image": receipt_image,
@@ -276,7 +318,8 @@ def create_expense(payload: dict, current_user_id: str, current_role: str) -> di
         "status": "pending",
         "requested_by": _to_object_id(current_user_id, "requested_by"),
         "approved_by": None,
-        "paid_by": None,
+        "paid_by": paid_by_object_id,
+        "paid_recorded_by": None,
         "rejected_by": None,
         "approved_at": None,
         "rejected_at": None,
@@ -284,9 +327,24 @@ def create_expense(payload: dict, current_user_id: str, current_role: str) -> di
         "rejection_reason": None,
         "created_at": timestamp,
         "updated_at": timestamp,
+        "idempotency_key": key,
+        "audit_log": [{"action": "expense_requested", "actor_id": _to_object_id(current_user_id, "requested_by"), "actor_role": current_role, "at": timestamp}],
     }
-    result = expenses_collection().insert_one(document)
+    try:
+        result = expenses_collection().insert_one(document)
+    except Exception as error:
+        if key and expenses_collection().find_one({"idempotency_key": key}):
+            return _enrich_expense(expenses_collection().find_one({"idempotency_key": key}))
+        raise error
     document["_id"] = result.inserted_id
+    if maintenance_document:
+        linked = maintenance_jobs_collection().update_one(
+            {"_id": maintenance_job_id, "$or": [{"expense_id": None}, {"expense_id": {"$exists": False}}]},
+            {"$set": {"expense_id": document["_id"], "updated_at": timestamp}},
+        )
+        if linked.modified_count != 1:
+            expenses_collection().delete_one({"_id": document["_id"], "status": "pending"})
+            raise ApiError("Maintenance job was linked to another expense concurrently.", status_code=409)
     return _enrich_expense(document)
 
 
@@ -301,6 +359,8 @@ def approve_expense(expense_id: str, current_user_id: str) -> dict:
         raise ApiError("Paid expenses cannot be approved again.", status_code=400)
     if document.get("status") == "rejected":
         raise ApiError("Rejected expenses cannot be approved.", status_code=400)
+    if str(document.get("requested_by")) == str(current_user_id):
+        raise ApiError("You cannot approve your own expense request.", status_code=403)
 
     timestamp = now_utc()
     update_fields = {
@@ -312,8 +372,10 @@ def approve_expense(expense_id: str, current_user_id: str) -> dict:
         "rejection_reason": None,
         "updated_at": timestamp,
     }
-    expenses_collection().update_one({"_id": expense_object_id}, {"$set": update_fields})
+    audit = {"action": "expense_approved", "actor_id": _to_object_id(current_user_id, "approved_by"), "actor_role": "owner", "at": timestamp}
+    expenses_collection().update_one({"_id": expense_object_id}, {"$set": update_fields, "$push": {"audit_log": audit}})
     document.update(update_fields)
+    document.setdefault("audit_log", []).append(audit)
     return _enrich_expense(document)
 
 
@@ -341,12 +403,14 @@ def reject_expense(expense_id: str, current_user_id: str, rejection_reason: str 
         "rejection_reason": reason,
         "updated_at": timestamp,
     }
-    expenses_collection().update_one({"_id": expense_object_id}, {"$set": update_fields})
+    audit = {"action": "expense_rejected", "actor_id": _to_object_id(current_user_id, "rejected_by"), "actor_role": "owner", "at": timestamp, "reason": reason}
+    expenses_collection().update_one({"_id": expense_object_id}, {"$set": update_fields, "$push": {"audit_log": audit}})
     document.update(update_fields)
+    document.setdefault("audit_log", []).append(audit)
     return _enrich_expense(document)
 
 
-def mark_expense_paid(expense_id: str, current_user_id: str) -> dict:
+def mark_expense_paid(expense_id: str, current_user_id: str, paid_by: str | None = None) -> dict:
     expense_object_id = _to_object_id(expense_id, "expense_id")
     document = expenses_collection().find_one({"_id": expense_object_id, "record_scope": {"$ne": "personal"}})
     if not document:
@@ -366,14 +430,21 @@ def mark_expense_paid(expense_id: str, current_user_id: str) -> dict:
         raise ApiError("Finance account balance is insufficient to pay this expense.", status_code=400)
 
     timestamp = now_utc()
+    payer_id = _to_object_id(paid_by, "paid_by", required=False) or document.get("paid_by")
+    if not payer_id:
+        raise ApiError("paid_by is required.", status_code=400)
+    _get_user_document(payer_id)
     update_fields = {
         "status": "paid",
-        "paid_by": _to_object_id(current_user_id, "paid_by"),
+        "paid_by": payer_id,
+        "paid_recorded_by": _to_object_id(current_user_id, "paid_recorded_by"),
         "paid_at": timestamp,
         "finance_account_snapshot": serialize_finance_account_snapshot(finance_account_document),
         "updated_at": timestamp,
     }
-    expenses_collection().update_one({"_id": expense_object_id}, {"$set": update_fields})
-    decrement_finance_account_balance(finance_account_document["_id"], amount)
+    audit = {"action": "expense_paid", "actor_id": _to_object_id(current_user_id, "paid_recorded_by"), "actor_role": "owner", "at": timestamp, "paid_by": str(payer_id)}
+    expenses_collection().update_one({"_id": expense_object_id}, {"$set": update_fields, "$push": {"audit_log": audit}})
+    decrement_finance_account_balance(finance_account_document["_id"], amount, actor_id=current_user_id, reference_type="expense", reference_id=expense_object_id)
     document.update(update_fields)
+    document.setdefault("audit_log", []).append(audit)
     return _enrich_expense(document)

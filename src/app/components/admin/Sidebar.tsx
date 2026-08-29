@@ -22,6 +22,7 @@ import {
   Receipt,
   Search,
   Settings,
+  Plug,
   Shield,
   ShieldAlert,
   ShieldCheck,
@@ -32,7 +33,7 @@ import {
   Wrench,
 } from 'lucide-react';
 import type { UserRole } from '../../App';
-import { filterAccessibleModules, type AppModule } from '../../lib/role-access';
+import { canManageSmartLiving, filterAccessibleModules, type AppModule } from '../../lib/role-access';
 import { SIDEBAR_COUNT_KEY_BY_MODULE, type WorkQueueModuleCount } from '../../lib/notification-count';
 import MobileBottomNav from '../shared/MobileBottomNav';
 
@@ -74,6 +75,12 @@ const DASHBOARD_ITEM: SidebarItem = {
   id: 'dashboard',
   label: 'Dashboard',
   icon: LayoutDashboard,
+};
+
+const SMARTLIVING_ITEM: SidebarItem = {
+  id: 'smart-living-integration',
+  label: 'SmartLiving Integration',
+  icon: Plug,
 };
 
 const SECTIONS: SidebarSection[] = [
@@ -135,6 +142,7 @@ const SECTIONS: SidebarSection[] = [
       { id: 'collections', label: 'Collections', icon: DollarSign },
       { id: 'deposits', label: 'Deposits', icon: Landmark },
       { id: 'finance-accounts', label: 'Finance Accounts', icon: Building2 },
+      { id: 'funding-ledger', label: 'Funding Ledger', icon: Landmark },
       { id: 'expenses', label: 'Expenses', icon: Receipt },
     ],
   },
@@ -243,10 +251,18 @@ export default function Sidebar({
   );
 
   const canViewDashboard = Boolean(filterAccessibleModules(userRole, [DASHBOARD_ITEM]).length);
+  const canViewSmartLiving = canManageSmartLiving(userRole);
   const mobileGroups = useMemo(() => [
-    ...(canViewDashboard ? [{ id: 'overview', title: 'Overview', items: [DASHBOARD_ITEM] }] : []),
+    ...((canViewDashboard || canViewSmartLiving) ? [{
+      id: 'overview',
+      title: 'Overview',
+      items: [
+        ...(canViewDashboard ? [DASHBOARD_ITEM] : []),
+        ...(canViewSmartLiving ? [SMARTLIVING_ITEM] : []),
+      ],
+    }] : []),
     ...visibleSections,
-  ], [canViewDashboard, visibleSections]);
+  ], [canViewDashboard, canViewSmartLiving, visibleSections]);
   const mobilePrimaryItems = useMemo(() => mobileGroups.flatMap((group) => group.items).slice(0, 5), [mobileGroups]);
   const portalLabel =
     userRole === 'system_administrator' ? 'System Administration' : userRole === 'operations_administrator' ? 'Operations Administration' : userRole === 'operations_manager' ? 'Operations Management' : userRole === 'finance_officer' ? 'Finance Portal' : userRole === 'field_agent' ? 'Field Agent Portal' : userRole === 'issuing_receiving_officer' ? 'Issuing / Receiving' : userRole === 'owner'
@@ -300,10 +316,21 @@ export default function Sidebar({
 
         <nav className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain px-3 py-5">
           {canViewDashboard && (
-            <div className="mb-5">
+            <div className={canViewSmartLiving ? 'mb-2' : 'mb-5'}>
               <SidebarLink
                 item={DASHBOARD_ITEM}
                 isActive={activeSection === DASHBOARD_ITEM.id}
+                onClick={handleNavigate}
+                isCompact={isCollapsed}
+              />
+            </div>
+          )}
+
+          {canViewSmartLiving && (
+            <div className="mb-5">
+              <SidebarLink
+                item={SMARTLIVING_ITEM}
+                isActive={activeSection === SMARTLIVING_ITEM.id}
                 onClick={handleNavigate}
                 isCompact={isCollapsed}
               />

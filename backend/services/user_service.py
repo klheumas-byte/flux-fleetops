@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from bson import ObjectId
 
@@ -367,6 +367,94 @@ def update_driver_profile_as(
             metadata={"changes": list(changed_settings)},
         )
     return serialize_user(target_user)
+
+
+def schedule_driver_target(*, driver_id: str, payload: dict, current_user_id: str, current_role: str) -> dict:
+    """Append an effective-dated target to the existing embedded driver target settings."""
+    if current_role != "owner":
+        raise ApiError("Only the owner can manage driver targets.", status_code=403)
+    driver = get_driver_user_document(driver_id)
+    amount = payload.get("target_amount")
+    if isinstance(amount, bool) or not isinstance(amount, (int, float)) or amount < 0:
+        raise ApiError("target_amount must be a non-negative number.", status_code=400)
+    frequency = str(payload.get("target_frequency") or "weekly").strip().lower()
+    if frequency not in ALLOWED_TARGET_FREQUENCIES:
+        raise ApiError("target_frequency must be daily or weekly.", status_code=400)
+    effective_from_text = str(payload.get("effective_from") or "").strip()
+    try:
+        effective_from = date.fromisoformat(effective_from_text)
+    except ValueError:
+        raise ApiError("effective_from must be a valid YYYY-MM-DD date.", status_code=400) from None
+    effective_to_text = str(payload.get("effective_to") or "").strip() or None
+    try:
+        effective_to = date.fromisoformat(effective_to_text) if effective_to_text else None
+    except ValueError:
+        raise ApiError("effective_to must be a valid YYYY-MM-DD date.", status_code=400) from None
+    if effective_to and effective_to < effective_from:
+        raise ApiError("effective_to cannot be before effective_from.", status_code=400)
+    reason = str(payload.get("reason") or payload.get("notes") or "").strip()
+    if not reason:
+        raise ApiError("reason is required.", status_code=400)
+    if len(reason) > 500:
+        raise ApiError("reason cannot exceed 500 characters.", status_code=400)
+
+    profile = dict(driver.get("driver_profile") or {})
+    history = [dict(item) for item in profile.get("target_history") or []]
+    # Bootstrap the existing target as the first historical period instead of replacing it.
+    if not history and profile.get("target_amount") is not None:
+        created_value = driver.get("created_at") or now_utc()
+        created_date = created_value.date().isoformat() if hasattr(created_value, "date") else str(created_value)[:10]
+        legacy_from = str(profile.get("settings_effective_date") or created_date)[:10]
+        history.append({
+            "target_amount": float(profile.get("target_amount") or 0),
+            "target_frequency": profile.get("target_frequency") or "weekly",
+            "effective_from": legacy_from,
+            "effective_to": None,
+            "reason": "Existing target migrated into effective-dated history",
+            "changed_by": None,
+            "changed_by_name": "System migration",
+            "changed_at": driver.get("updated_at") or driver.get("created_at") or now_utc(),
+        })
+    for item in history:
+        if str(item.get("effective_from"))[:10] == effective_from_text:
+            raise ApiError("A target already starts on effective_from; add a new non-overlapping period.", status_code=409)
+
+    later_starts = sorted(date.fromisoformat(str(item["effective_from"])[:10]) for item in history if date.fromisoformat(str(item["effective_from"])[:10]) > effective_from)
+    if not effective_to and later_starts:
+        effective_to = later_starts[0] - timedelta(days=1)
+        effective_to_text = effective_to.isoformat()
+    for item in history:
+        item_start = date.fromisoformat(str(item["effective_from"])[:10])
+        item_end = date.fromisoformat(str(item["effective_to"])[:10]) if item.get("effective_to") else None
+        overlaps = effective_from <= (item_end or date.max) and item_start <= (effective_to or date.max)
+        if overlaps:
+            if item_start < effective_from and (item_end is None or item_end >= effective_from):
+                item["effective_to"] = (effective_from - timedelta(days=1)).isoformat()
+            else:
+                raise ApiError("Target period overlaps an existing target.", status_code=409)
+
+    timestamp = now_utc()
+    actor = users_collection().find_one({"_id": ObjectId(current_user_id)}, {"full_name": 1}) or {}
+    entry = {
+        "target_amount": round(float(amount), 2),
+        "target_frequency": frequency,
+        "effective_from": effective_from_text,
+        "effective_to": effective_to_text,
+        "reason": reason,
+        "notes": str(payload.get("notes") or "").strip() or None,
+        "changed_by": ObjectId(current_user_id),
+        "changed_by_name": actor.get("full_name") or "Unknown user",
+        "changed_at": timestamp,
+    }
+    history.append(entry)
+    history.sort(key=lambda item: str(item.get("effective_from") or ""))
+    profile["target_history"] = history
+    if effective_from <= timestamp.date() and (effective_to is None or timestamp.date() <= effective_to):
+        profile.update({"target_amount": entry["target_amount"], "target_frequency": frequency, "target_enabled": True, "settings_effective_date": effective_from_text})
+    users_collection().update_one({"_id": driver["_id"]}, {"$set": {"driver_profile": profile, "updated_at": timestamp}})
+    get_collection("fleet_owner_audit").insert_one({"actor_id": ObjectId(current_user_id), "actor_role": current_role, "action": "driver_target_scheduled", "entity_type": "driver", "entity_id": driver["_id"], "after": entry, "reason": reason, "created_at": timestamp, "immutable": True})
+    driver["driver_profile"] = profile; driver["updated_at"] = timestamp
+    return serialize_user(driver)
 
 
 def list_drivers_for_role(current_user_id: str, current_role: str) -> list[dict]:

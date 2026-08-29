@@ -9,7 +9,7 @@ import {
   TrendingUp,
   Wrench,
 } from 'lucide-react';
-import { ApiRequestError } from '../../lib/api';
+import { apiRequest, ApiRequestError } from '../../lib/api';
 import { fetchDriverAnalyticsDetail, type DriverPerformanceRecord } from '../../lib/analytics-api';
 import { getStoredSessionUser } from '../../lib/auth-session';
 
@@ -37,6 +37,7 @@ export default function MyPerformance() {
   const [startDate, setStartDate] = useState(defaultRange.start);
   const [endDate, setEndDate] = useState(defaultRange.end);
   const [record, setRecord] = useState<DriverPerformanceRecord | null>(null);
+  const [reconciliation, setReconciliation] = useState<any | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [pageError, setPageError] = useState('');
 
@@ -51,11 +52,12 @@ export default function MyPerformance() {
       setIsLoading(true);
       setPageError('');
       try {
-        const response = await fetchDriverAnalyticsDetail(currentUser.id, {
-          start_date: startDate,
-          end_date: endDate,
-        });
+        const [response, financeResponse] = await Promise.all([
+          fetchDriverAnalyticsDetail(currentUser.id, { start_date: startDate, end_date: endDate }),
+          apiRequest<{ data: { drivers: any[] } }>(`/finance/reconciliation?start_date=${startDate}&end_date=${endDate}`),
+        ]);
         setRecord(response.driver_performance);
+        setReconciliation(financeResponse.data.drivers?.[0] || null);
       } catch (error) {
         if (error instanceof ApiRequestError) {
           setPageError(error.message);
@@ -123,6 +125,16 @@ export default function MyPerformance() {
         </div>
       ) : record ? (
         <>
+          {reconciliation && <div className="rounded-xl border border-blue-200 bg-blue-50 p-5">
+            <h2 className="font-semibold text-blue-950">Collection & Submission Reconciliation</h2>
+            <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <div><div className="text-xs text-blue-700">Gross collections</div><div className="font-semibold">{formatCurrency(reconciliation.gross_collections)}</div></div>
+              <div><div className="text-xs text-blue-700">Amount submitted</div><div className="font-semibold">{formatCurrency(reconciliation.amount_submitted)}</div></div>
+              <div><div className="text-xs text-blue-700">Expected cash after collection-funded expenses</div><div className="font-semibold">{formatCurrency(reconciliation.expected_cash_submission)}</div></div>
+              <div><div className="text-xs text-blue-700">Outstanding / unsubmitted</div><div className="font-semibold">{formatCurrency(reconciliation.outstanding_unsubmitted_amount)}</div></div>
+            </div>
+            <details className="mt-4 text-sm"><summary className="cursor-pointer font-medium text-blue-900">View submissions and associated expenses</summary><div className="mt-3 grid gap-4 md:grid-cols-2"><div><div className="font-medium">Submission history</div>{reconciliation.submission_history.map((item: any) => <div key={item.id} className="mt-1">{item.collection_date}: {formatCurrency(item.submitted_amount ?? item.amount)} · {item.status}</div>)}</div><div><div className="font-medium">Expenses</div>{reconciliation.expenses.map((item: any) => <div key={item.id} className="mt-1">{item.expense_category} · {item.funding_source_snapshot?.name || 'Legacy'} · {formatCurrency(item.amount)}</div>)}</div></div></details>
+          </div>}
           <div className="grid grid-cols-1 gap-6 md:grid-cols-4">
             <div className="rounded-xl border border-gray-200 bg-white p-6">
               <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-lg bg-blue-100">

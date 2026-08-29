@@ -17,7 +17,8 @@ import {
   ArrowDown,
   Clock,
   Calendar,
-  Shield
+  Shield,
+  Plug,
 } from 'lucide-react';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { apiRequestSafe } from '../../lib/api';
@@ -338,9 +339,19 @@ export default function Dashboard({ onNavigate, userRole }: DashboardProps) {
   return (
     <div className="p-6 space-y-6">
       {/* Page Header */}
-      <div>
-        <h1 className="text-2xl font-semibold text-gray-900">{userRole === 'owner' ? 'Owner Dashboard' : 'Admin Dashboard'}</h1>
-        <p className="text-gray-500 mt-1">Welcome back! Here's what's happening with your fleet today.</p>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold text-gray-900">{userRole === 'owner' ? 'Owner Dashboard' : 'Admin Dashboard'}</h1>
+          <p className="text-gray-500 mt-1">Welcome back! Here's what's happening with your fleet today.</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => onNavigate('smart-living-integration')}
+          className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 text-sm font-semibold text-white shadow-sm hover:bg-blue-700"
+        >
+          <Plug className="h-4 w-4" />
+          SmartLiving Integration
+        </button>
       </div>
 
       {faultError && (

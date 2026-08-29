@@ -115,6 +115,7 @@ def test_access_control_user_list_uses_live_multi_role_authority():
         {"full_name": "System", "role": "driver", "role_ids": ["driver", "system_administrator"], "status": "active"},
         {"full_name": "Finance", "role": "finance_officer", "status": "active"},
         {"full_name": "Driver", "role": "Driver", "status": "active"},
+        {"full_name": "Archived Duplicate", "role": "branch_manager", "status": "inactive", "archived": True},
     ])
     actor = db.users.find_one({"full_name": "System"})
     with patch.object(auth_service, "users_collection", return_value=db.users):

@@ -154,6 +154,25 @@ def now_utc():
     return datetime.now(timezone.utc)
 
 
+def _serialize_planner_datetime(value, field: str, warnings: list[str]):
+    """Return stable ISO strings at the mixed-operation Planner boundary."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, str):
+        candidate = value.strip()
+        try:
+            if "T" not in candidate and " " not in candidate:
+                raise ValueError
+            datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+            return candidate
+        except ValueError:
+            pass
+    warnings.append(f"{field} is unavailable because the stored value is invalid.")
+    return None
+
+
 def dispatch_requests_collection():
     return get_collection("dispatch_requests")
 
@@ -288,6 +307,67 @@ def _parse_datetime(value, field_name: str, *, required: bool = False) -> dateti
     except ValueError as error:
         raise ApiError(f"{field_name} must be a valid ISO datetime.", status_code=400) from error
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _schedule_validation_error(message: str) -> ApiError:
+    return ApiError(
+        message,
+        status_code=400,
+        errors=[{"code": "dispatch_schedule_correction_required"}],
+    )
+
+
+def validate_dispatch_schedule(
+    document: dict,
+    *,
+    departure_reference=None,
+    require_expected_return: bool = True,
+) -> dict:
+    """Validate the canonical dispatch window using complete UTC-aware datetimes."""
+    try:
+        scheduled_start = _parse_datetime(
+            document.get("scheduled_start_time"),
+            "scheduled_start_time",
+            required=True,
+        )
+    except ApiError as error:
+        raise _schedule_validation_error(
+            "Schedule needs correction: a valid departure date and time are required."
+        ) from error
+
+    try:
+        expected_return = _parse_datetime(
+            document.get("expected_return_time"),
+            "expected_return_time",
+            required=require_expected_return,
+        )
+    except ApiError as error:
+        raise _schedule_validation_error(
+            "Schedule needs correction: a valid expected return date and time are required."
+        ) from error
+
+    try:
+        comparison_start = (
+            _parse_datetime(departure_reference, "departure_time", required=True)
+            if departure_reference is not None
+            else scheduled_start
+        )
+    except ApiError as error:
+        raise _schedule_validation_error(
+            "Schedule needs correction: a valid departure date and time are required."
+        ) from error
+
+    if expected_return is not None and expected_return <= comparison_start:
+        qualifier = "actual departure" if departure_reference is not None else "departure"
+        raise _schedule_validation_error(
+            f"Schedule needs correction: expected return must be after {qualifier}."
+        )
+
+    return {
+        "scheduled_start_time": scheduled_start,
+        "expected_return_time": expected_return,
+        "departure_reference": comparison_start,
+    }
 
 
 def _parse_date(value, field_name: str, *, required: bool = False) -> str | None:
@@ -441,6 +521,17 @@ def _enrich_dispatch_job(document: dict, *, user_lookup: dict | None = None, veh
     payload["updated_by_user"] = serialize_user(users[document["updated_by"]]) if users.get(document.get("updated_by")) else None
     payload["vehicle"] = serialize_vehicle(vehicles[document["vehicle_id"]]) if vehicles.get(document.get("vehicle_id")) else None
     payload["primary_assignment"] = serialize_assignment(assignments[document["primary_assignment_id"]]) if assignments.get(document.get("primary_assignment_id")) else None
+    try:
+        validate_dispatch_schedule(
+            document,
+            departure_reference=now_utc() if document.get("status") == "accepted" else None,
+            require_expected_return=True,
+        )
+        payload["schedule_valid"] = True
+        payload["schedule_warning"] = None
+    except ApiError as error:
+        payload["schedule_valid"] = False
+        payload["schedule_warning"] = error.message.replace("Schedule needs correction: ", "", 1)
     return payload
 
 
@@ -499,6 +590,7 @@ def _serialize_request_list_item(document: dict) -> dict:
 
 
 def _serialize_operation_request_item(document: dict, operation_type: str) -> dict:
+    date_warnings: list[str] = []
     if operation_type in {"supplier_pickup", "stock_transfer"}:
         supplier = document.get("supplier") if isinstance(document.get("supplier"), dict) else {}
         origin = (
@@ -511,7 +603,7 @@ def _serialize_operation_request_item(document: dict, operation_type: str) -> di
             if operation_type == "supplier_pickup"
             else "Stock Transfer"
         )
-        return {
+        payload = {
             "id": str(document["_id"]),
             "planner_source_id": str(document["_id"]),
             "planner_operation_type": operation_type,
@@ -523,16 +615,18 @@ def _serialize_operation_request_item(document: dict, operation_type: str) -> di
             "destination": document.get("receiving_location"),
             "status": document.get("status"),
             "planning_status": "unplanned" if document.get("status") == "approved" else document.get("status"),
-            "scheduled_start_time": document.get("scheduled_at"),
+            "scheduled_start_time": _serialize_planner_datetime(document.get("scheduled_at"), "scheduled_at", date_warnings),
             "expected_return_time": None,
             "vehicle_id": str(document["vehicle_id"]) if document.get("vehicle_id") else None,
             "driver_id": str(document["driver_id"]) if document.get("driver_id") else None,
             "linked_vehicle_movement_id": str(document["linked_vehicle_movement_id"]) if document.get("linked_vehicle_movement_id") else None,
             "urgency": document.get("priority") or "normal",
-            "created_at": document.get("created_at"),
-            "updated_at": document.get("updated_at"),
+            "created_at": _serialize_planner_datetime(document.get("created_at"), "created_at", date_warnings),
+            "updated_at": _serialize_planner_datetime(document.get("updated_at"), "updated_at", date_warnings),
         }
-    return {
+        payload["date_warnings"] = date_warnings
+        return payload
+    payload = {
         "id": str(document["_id"]),
         "planner_source_id": str(document["_id"]),
         "planner_operation_type": "operational_request",
@@ -544,15 +638,17 @@ def _serialize_operation_request_item(document: dict, operation_type: str) -> di
         "destination": document.get("destination"),
         "status": document.get("status"),
         "planning_status": "unplanned" if document.get("status") == "approved" else document.get("status"),
-        "scheduled_start_time": document.get("planned_departure_at"),
-        "expected_return_time": document.get("expected_return_at"),
+        "scheduled_start_time": _serialize_planner_datetime(document.get("planned_departure_at"), "planned_departure_at", date_warnings),
+        "expected_return_time": _serialize_planner_datetime(document.get("expected_return_at"), "expected_return_at", date_warnings),
         "vehicle_id": str(document["vehicle_id"]) if document.get("vehicle_id") else None,
         "driver_id": str(document["driver_id"]) if document.get("driver_id") else None,
         "linked_vehicle_movement_id": str(document["linked_vehicle_movement_id"]) if document.get("linked_vehicle_movement_id") else None,
         "urgency": document.get("priority") or "normal",
-        "created_at": document.get("created_at"),
-        "updated_at": document.get("updated_at"),
+        "created_at": _serialize_planner_datetime(document.get("created_at"), "created_at", date_warnings),
+        "updated_at": _serialize_planner_datetime(document.get("updated_at"), "updated_at", date_warnings),
     }
+    payload["date_warnings"] = date_warnings
+    return payload
 
 
 def _generate_dispatch_job_id() -> str:
@@ -755,8 +851,7 @@ def _validate_planning_payload(request_document: dict, planning_payload: dict):
     planning_payload["scheduled_start_time"] = scheduled_start_time
     if planning_payload.get("expected_arrival_time") and planning_payload["expected_arrival_time"] <= scheduled_start_time:
         raise ApiError("expected_arrival_time must be after scheduled_start_time.", status_code=400)
-    if planning_payload.get("expected_return_time") and planning_payload["expected_return_time"] <= scheduled_start_time:
-        raise ApiError("expected_return_time must be after scheduled_start_time.", status_code=400)
+    validate_dispatch_schedule(planning_payload, require_expected_return=False)
     if request_document.get("status") != "approved":
         raise ApiError("Only approved dispatch requests can be planned.", status_code=400)
     stop_sequences = [stop.get("stop_sequence") for stop in (planning_payload.get("stops") or []) if stop.get("stop_sequence") is not None]
@@ -887,10 +982,15 @@ def detect_dispatch_conflicts(
     exclude_job_id: str | None = None,
     exclude_movement_id: str | None = None,
 ) -> dict:
-    start_time = _parse_datetime(scheduled_start_time, "scheduled_start_time", required=True)
-    end_time = _parse_datetime(expected_return_time, "expected_return_time", required=True)
-    if end_time <= start_time:
-        raise ApiError("expected_return_time must be after scheduled_start_time.", status_code=400)
+    schedule = validate_dispatch_schedule(
+        {
+            "scheduled_start_time": scheduled_start_time,
+            "expected_return_time": expected_return_time,
+        },
+        require_expected_return=True,
+    )
+    start_time = schedule["scheduled_start_time"]
+    end_time = schedule["expected_return_time"]
     exclude_job_object_id = _to_object_id(exclude_job_id, "exclude_job_id", required=False) if exclude_job_id else None
     exclude_movement_object_id = _to_object_id(exclude_movement_id, "exclude_movement_id", required=False) if exclude_movement_id else None
 
@@ -1517,6 +1617,15 @@ def save_dispatch_job_draft(request_id: str, payload: dict, *, current_user_id: 
     _validate_planning_payload(request_document, planning_payload)
     existing_job_id = payload.get("job_id")
     existing_job = _get_dispatch_job_document(existing_job_id) if existing_job_id else None
+    if existing_job and existing_job.get("status") == "accepted":
+        if normalized_role not in OWNER_ADMIN_ROLES:
+            raise ApiError("Only an Owner or Admin can return an accepted dispatch to planning.", status_code=403)
+        return reassign_dispatch_job(
+            existing_job_id,
+            payload,
+            current_user_id=current_user_id,
+            current_role=normalized_role,
+        )
     if existing_job and existing_job.get("status") not in {"draft", "reserved", "assigned", "clarification_requested", "rejected"}:
         raise ApiError("This dispatch job can no longer be updated as a draft.", status_code=400)
     document = _build_job_document(
@@ -1543,16 +1652,20 @@ def reserve_dispatch_resources(job_id: str, *, current_user_id: str, current_rol
         raise ApiError("Only draft-style dispatch jobs can reserve resources.", status_code=400)
     if not job_document.get("vehicle_id") or not job_document.get("driver_id"):
         raise ApiError("Vehicle and driver are required before reserving resources.", status_code=400)
-    start_time = job_document.get("scheduled_start_time")
-    end_time = job_document.get("expected_return_time")
-    if not start_time or not end_time:
-        raise ApiError("Scheduling window is required before reserving resources.", status_code=400)
+    schedule = validate_dispatch_schedule(job_document, require_expected_return=True)
+    start_time = schedule["scheduled_start_time"]
+    end_time = schedule["expected_return_time"]
     conflict_summary = detect_dispatch_conflicts(
         vehicle_id=str(job_document["vehicle_id"]),
         driver_id=str(job_document["driver_id"]),
         scheduled_start_time=start_time,
         expected_return_time=end_time,
         exclude_job_id=str(job_document["_id"]),
+        exclude_movement_id=(
+            str(job_document["linked_vehicle_movement_id"])
+            if isinstance(job_document.get("linked_vehicle_movement_id"), ObjectId)
+            else None
+        ),
     )
     if conflict_summary["has_conflicts"]:
         raise ApiError("Resource conflict detected. Resolve conflicts before reserving resources.", status_code=409)
@@ -1611,6 +1724,7 @@ def assign_dispatch_job(job_id: str, *, current_user_id: str, current_role: str)
     job_document = _get_dispatch_job_document(job_id)
     if job_document.get("status") not in {"reserved", "draft", "rejected", "clarification_requested"}:
         raise ApiError("This dispatch job cannot be assigned from its current state.", status_code=400)
+    validate_dispatch_schedule(job_document, require_expected_return=True)
     if not job_document.get("vehicle_reservation_id") or not job_document.get("driver_reservation_id"):
         job_document = reserve_dispatch_resources(job_id, current_user_id=current_user_id, current_role=current_role)
         job_document = _get_dispatch_job_document(job_id)
@@ -1752,6 +1866,41 @@ def reassign_dispatch_job(job_id: str, payload: dict, *, current_user_id: str, c
             job_document=job_document,
         )
     return _batch_enrich_dispatch_jobs([job_document])[0]
+
+
+def correct_dispatch_job_schedule(job_id: str, payload: dict, *, current_user_id: str, current_role: str) -> dict:
+    """Return a pre-start assignment to the existing planning flow, validate, and reassign it."""
+    normalized_role = _normalize_role(current_role) or current_role
+    if normalized_role not in OWNER_ADMIN_ROLES:
+        raise ApiError("Only an Owner or Admin can correct an assigned dispatch schedule.", status_code=403)
+    job_document = _get_dispatch_job_document(job_id)
+    if job_document.get("status") not in {"assigned", "accepted", "clarification_requested", "rejected", "reserved"}:
+        raise ApiError("Only a dispatch that has not started can return to planning.", status_code=400)
+
+    correction_payload = {
+        **(payload or {}),
+        "reassignment_reason": (payload or {}).get("reassignment_reason") or "Schedule corrected by Operations",
+    }
+    request_document = _get_dispatch_request_document(str(job_document["dispatch_request_id"]))
+    planning_payload = _normalize_planning_payload(
+        {**serialize_dispatch_job(job_document), **correction_payload},
+        partial=False,
+    )
+    _validate_planning_payload(request_document, planning_payload)
+    validate_dispatch_schedule(planning_payload, require_expected_return=True)
+    if not planning_payload.get("vehicle_id") or not planning_payload.get("driver_id"):
+        raise ApiError("Vehicle and driver are required before correcting the assignment.", status_code=400)
+    reassign_dispatch_job(
+        job_id,
+        correction_payload,
+        current_user_id=current_user_id,
+        current_role=normalized_role,
+    )
+    return assign_dispatch_job(
+        job_id,
+        current_user_id=current_user_id,
+        current_role=normalized_role,
+    )
 
 
 def cancel_dispatch_job(job_id: str, payload: dict, *, current_user_id: str, current_role: str) -> dict:
@@ -2064,6 +2213,7 @@ def accept_driver_dispatch_job(job_id: str, *, current_user_id: str) -> dict:
     if job_document.get("status") not in {"assigned", "clarification_requested"}:
         raise ApiError("This dispatch assignment can no longer be accepted.", status_code=400)
     timestamp = now_utc()
+    validate_dispatch_schedule(job_document, departure_reference=timestamp, require_expected_return=True)
     update_fields = {
         "status": "accepted",
         "driver_workflow_status": "accepted",
@@ -2176,12 +2326,13 @@ def update_driver_dispatch_job_workflow(job_id: str, payload: dict, *, current_u
     if action == "start":
         if job_document.get("status") != "accepted":
             raise ApiError("Only accepted dispatches can be started.", status_code=400)
+        validate_dispatch_schedule(job_document, departure_reference=timestamp, require_expected_return=True)
         from services.dispatch_fuel_service import assert_dispatch_opening_confirmed
 
         movement = assert_dispatch_opening_confirmed(job_document)
         from services.vehicle_movement_service import start_vehicle_movement
         start_vehicle_movement(
-            str(movement["_id"]), {},
+            str(movement["_id"]), {"departure_time": timestamp},
             current_user_id=current_user_id, current_role="driver",
         )
         update_fields.update(

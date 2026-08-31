@@ -40,6 +40,7 @@ export interface PlannerRequestRecord {
   stops_count?: number;
   created_at?: string | null;
   updated_at?: string | null;
+  date_warnings?: string[];
 }
 
 export interface PlannerUserSummary {
@@ -114,6 +115,8 @@ export interface DispatchPlannerJobRecord {
   scheduled_start_time?: string | null;
   expected_arrival_time?: string | null;
   expected_return_time?: string | null;
+  schedule_valid?: boolean;
+  schedule_warning?: string | null;
   distance_estimate_km?: number | null;
   goods_description?: string | null;
   quantity?: string | null;
@@ -239,11 +242,13 @@ export async function fetchPlannerRequests(params: {
   planning_status?: string;
   urgency?: string;
   operation_type?: 'dispatch' | 'supplier_pickup' | 'stock_transfer' | 'operational_request' | 'all';
+  force?: boolean;
 } = {}) {
-  const query = toQueryString(params);
+  const { force = false, ...queryParams } = params;
+  const query = toQueryString(queryParams);
   const response = await apiRequest<PlannerRequestsEnvelope>(`/dispatch-planner/requests${query}`, {
-    cacheTtlMs: 4000,
-    dedupeKey: `dispatch-planner-requests:${query || 'default'}`,
+    cacheTtlMs: force ? 0 : 4000,
+    dedupeKey: `dispatch-planner-requests:${query || 'default'}${force ? ':refresh' : ''}`,
     componentName: 'DispatchPlanner',
     requestLabel: 'requests',
     cancelGroup: 'dispatch-planner-requests',
@@ -262,10 +267,10 @@ export async function fetchPlannerOptions() {
   return response.data;
 }
 
-export async function fetchPlannerAvailability() {
+export async function fetchPlannerAvailability(force = false) {
   const response = await apiRequest<PlannerAvailabilityEnvelope>('/dispatch-planner/availability', {
-    cacheTtlMs: 5000,
-    dedupeKey: 'dispatch-planner-availability',
+    cacheTtlMs: force ? 0 : 5000,
+    dedupeKey: `dispatch-planner-availability${force ? ':refresh' : ''}`,
     componentName: 'DispatchPlanner',
     requestLabel: 'availability',
   });
@@ -284,11 +289,13 @@ export async function fetchDispatchPlannerJobs(params: {
   page?: number;
   page_size?: number;
   status?: string;
+  force?: boolean;
 } = {}) {
-  const query = toQueryString(params);
+  const { force = false, ...queryParams } = params;
+  const query = toQueryString(queryParams);
   const response = await apiRequest<PlannerJobsEnvelope>(`/dispatch-planner/jobs${query}`, {
-    cacheTtlMs: 3000,
-    dedupeKey: `dispatch-planner-jobs:${query || 'default'}`,
+    cacheTtlMs: force ? 0 : 3000,
+    dedupeKey: `dispatch-planner-jobs:${query || 'default'}${force ? ':refresh' : ''}`,
     componentName: 'DispatchPlanner',
     requestLabel: 'jobs',
     cancelGroup: 'dispatch-planner-jobs',
@@ -297,10 +304,10 @@ export async function fetchDispatchPlannerJobs(params: {
   return response.data;
 }
 
-export async function fetchDispatchPlannerJob(jobId: string) {
+export async function fetchDispatchPlannerJob(jobId: string, force = false) {
   const response = await apiRequest<PlannerJobEnvelope>(`/dispatch-planner/jobs/${jobId}`, {
-    cacheTtlMs: 3000,
-    dedupeKey: `dispatch-planner-job:${jobId}`,
+    cacheTtlMs: force ? 0 : 3000,
+    dedupeKey: `dispatch-planner-job:${jobId}${force ? ':refresh' : ''}`,
     componentName: 'DispatchPlanner',
     requestLabel: 'job-detail',
   });
@@ -331,6 +338,14 @@ export async function assignDispatchPlannerJob(jobId: string) {
 
 export async function reassignDispatchPlannerJob(jobId: string, payload: Record<string, unknown>) {
   const response = await apiRequest<PlannerJobEnvelope>(`/dispatch-planner/jobs/${jobId}/reassign`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+  return response.data.job;
+}
+
+export async function correctDispatchPlannerJobSchedule(jobId: string, payload: Record<string, unknown>) {
+  const response = await apiRequest<PlannerJobEnvelope>(`/dispatch-planner/jobs/${jobId}/schedule`, {
     method: 'PATCH',
     body: JSON.stringify(payload),
   });

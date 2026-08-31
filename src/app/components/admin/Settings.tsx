@@ -38,6 +38,7 @@ import {
   setNotificationSoundsEnabled,
   unlockNotificationSound,
 } from '../../lib/notification-sound';
+import DispatchFinanceRateSettings from './DispatchFinanceRateSettings';
 
 type SettingsTab =
   | 'master-data'
@@ -984,10 +985,7 @@ export default function Settings() {
                   />
                 </div>
               </div>
-              <EmptyState
-                title="Revenue settings shell preserved"
-                description="Ride revenue and trip analytics now come from live ride data, while configurable pricing defaults can continue here."
-              />
+              <DispatchFinanceRateSettings isOwner={isOwner} />
             </div>
           )}
 

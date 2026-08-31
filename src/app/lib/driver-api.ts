@@ -287,6 +287,8 @@ export interface DriverDispatchJob {
   scheduled_start_time?: string | null;
   expected_arrival_time?: string | null;
   expected_return_time?: string | null;
+  schedule_valid?: boolean;
+  schedule_warning?: string | null;
   pickup?: string | null;
   destination?: string | null;
   goods_description?: string | null;

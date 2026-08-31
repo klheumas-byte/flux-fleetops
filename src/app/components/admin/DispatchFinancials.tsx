@@ -31,6 +31,8 @@ import {
 } from '../../lib/dispatch-financial-api';
 import { Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle } from '../ui/drawer';
 import { Skeleton } from '../ui/skeleton';
+import DispatchFinanceSnapshotPanel from './DispatchFinanceSnapshotPanel';
+import DispatchFinanceAnalytics from './DispatchFinanceAnalytics';
 
 function formatCurrency(value?: number | null) {
   const amount = typeof value === 'number' && !Number.isNaN(value) ? value : 0;
@@ -85,6 +87,7 @@ const initialIncidentCreateState = {
   incident_type: 'other',
   incident_date: new Date().toISOString().slice(0, 10),
   incident_location: '',
+  duration_minutes: '',
   amount: '',
   responsibility_type: 'under_investigation',
   company_share: '',
@@ -129,6 +132,10 @@ export default function DispatchFinancials() {
     dispatch_financial_types?: string[];
     partner_billing_methods?: string[];
     driver_compensation_types?: string[];
+    drivers?: Array<{id:string;name:string}>;
+    vehicles?: Array<{id:string;name:string}>;
+    branches?: Array<{id:string;name:string}>;
+    funding_sources?: Array<{id:string;name:string}>;
   } | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -388,6 +395,7 @@ export default function DispatchFinancials() {
       const response = await createDispatchFinancialIncident(detail.job?.id || detail.record.dispatch_job_id, {
         ...newIncident,
         amount,
+        duration_minutes: Number(newIncident.duration_minutes || 0),
         company_share: companyShare,
         driver_share: driverShare,
       });
@@ -434,7 +442,7 @@ export default function DispatchFinancials() {
         <div>
           <h1 className="text-2xl font-semibold text-[#0F172A]">Dispatch Financials</h1>
           <p className="mt-1 text-gray-600">
-            Review dispatch money submissions, approve expenses, resolve financial incidents, and close dispatch financial accountability without posting into wallet or collections.
+            Review dispatch-linked collections and submissions, approve expenses, resolve incidents, and lock historical finance snapshots.
           </p>
         </div>
         <button
@@ -447,6 +455,8 @@ export default function DispatchFinancials() {
           {isLoading ? 'Loading…' : isRefreshing ? 'Refreshing…' : 'Refresh'}
         </button>
       </div>
+
+      <DispatchFinanceAnalytics options={options || undefined} />
 
       {isLoading ? (
         <div role="status" className="flex items-center gap-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm font-medium text-blue-800">
@@ -615,6 +625,7 @@ export default function DispatchFinancials() {
               <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{detailError}</div>
             ) : detail ? (
               <div className="space-y-6">
+                <DispatchFinanceSnapshotPanel detail={detail} onChanged={() => refreshDetail(detail.job?.id || detail.record.dispatch_job_id)} />
                 <Section title="Overview">
                   <Grid>
                     <Info label="Dispatch" value={detail.job?.dispatch_job_id || '-'} />
@@ -744,6 +755,7 @@ export default function DispatchFinancials() {
                       </SelectField>
                       <InputField label="Incident Date" type="date" value={newIncident.incident_date} onChange={(value) => setNewIncident((current) => ({ ...current, incident_date: value }))} />
                       <InputField label="Incident Location" value={newIncident.incident_location} onChange={(value) => setNewIncident((current) => ({ ...current, incident_location: value }))} />
+                      <InputField label="Duration (minutes)" type="number" value={newIncident.duration_minutes} onChange={(value) => setNewIncident((current) => ({ ...current, duration_minutes: value }))} />
                       <InputField label="Amount" type="number" value={newIncident.amount} onChange={(value) => setNewIncident((current) => ({ ...current, amount: value }))} />
                       <SelectField label="Responsibility" value={newIncident.responsibility_type} onChange={(value) => setNewIncident((current) => ({ ...current, responsibility_type: value }))}>
                         {(options?.responsibility_types || []).map((type) => (

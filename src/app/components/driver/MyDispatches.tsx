@@ -14,6 +14,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { formatDateTimeSafe } from '../../lib/date-time';
 import {
   acceptDriverDispatchJob,
   clarifyDriverDispatchJob,
@@ -70,14 +71,7 @@ const SECTION_CONFIG: DispatchSectionConfig[] = [
 ];
 
 function formatDateTime(value?: string | null) {
-  if (!value) {
-    return 'Not scheduled';
-  }
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return value;
-  }
-  return parsed.toLocaleString();
+  return formatDateTimeSafe(value);
 }
 
 function workflowLabel(job: DriverDispatchJob) {
@@ -330,7 +324,11 @@ export default function MyDispatches() {
       toast.success('Dispatch updated.');
       await refreshAfterAction(action === 'end' ? ['active', 'completed'] : ['active']);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Unable to update this dispatch right now.');
+      const backendMessage = error instanceof Error ? error.message : '';
+      const message = action === 'start' && /schedule|expected return|departure/i.test(backendMessage)
+        ? 'Schedule needs correction by Operations'
+        : backendMessage || 'Unable to update this dispatch right now.';
+      toast.error(message);
     } finally {
       setActionJobId('');
     }
@@ -484,6 +482,13 @@ export default function MyDispatches() {
                       <MiniInfo icon={Package} label="Goods" value={job.goods_description || 'Not provided'} />
                       <MiniInfo icon={Phone} label="Customer Contact" value={job.customer_contact || 'Not provided'} />
                     </div>
+
+                    {job.schedule_valid === false ? (
+                      <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                        <div className="font-semibold">Schedule needs correction by Operations</div>
+                        <div className="mt-1 text-amber-800">{job.schedule_warning || 'Departure and expected return must be corrected before this dispatch can start.'}</div>
+                      </div>
+                    ) : null}
 
                     {job.status === 'accepted' ? (
                       job.fuel_accountability?.opening_fuel_recorded_at ? (

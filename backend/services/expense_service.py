@@ -72,6 +72,7 @@ def ensure_expense_indexes():
             {"keys": [("finance_account_id", ASCENDING)]},
             {"keys": [("funding_source_id", ASCENDING)]},
             {"keys": [("maintenance_job_id", ASCENDING)], "options": {"sparse": True}},
+            {"keys": [("dispatch_job_id", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("idempotency_key", ASCENDING)], "options": {"unique": True, "sparse": True}},
             {"keys": [("requested_by", ASCENDING)]},
             {"keys": [("approved_by", ASCENDING)]},
@@ -278,6 +279,17 @@ def create_expense(payload: dict, current_user_id: str, current_role: str, idemp
         _get_vehicle_document(vehicle_object_id)
 
     maintenance_job_id = _to_object_id(payload.get("maintenance_job_id"), "maintenance_job_id", required=False)
+    dispatch_job_id = _to_object_id(payload.get("dispatch_job_id"), "dispatch_job_id", required=False)
+    if dispatch_job_id:
+        dispatch_job = get_collection("dispatch_jobs").find_one({"_id": dispatch_job_id})
+        if not dispatch_job:
+            raise ApiError("Dispatch job not found.", status_code=404)
+        if vehicle_object_id and dispatch_job.get("vehicle_id") != vehicle_object_id:
+            raise ApiError("Expense vehicle must match the dispatch job vehicle.", status_code=400)
+        if driver_object_id and dispatch_job.get("driver_id") != driver_object_id:
+            raise ApiError("Expense driver must match the dispatch job driver.", status_code=400)
+        vehicle_object_id = vehicle_object_id or dispatch_job.get("vehicle_id")
+        driver_object_id = driver_object_id or dispatch_job.get("driver_id")
     maintenance_document = None
     if maintenance_job_id:
         maintenance_document = maintenance_jobs_collection().find_one({"_id": maintenance_job_id, "record_scope": {"$ne": "personal"}})
@@ -310,6 +322,8 @@ def create_expense(payload: dict, current_user_id: str, current_role: str, idemp
         "funding_source_snapshot": {"id": str(funding_source["_id"]), "name": funding_source.get("name")},
         "funding_source_description": funding_source_description,
         "maintenance_job_id": maintenance_job_id,
+        "dispatch_job_id": dispatch_job_id,
+        "maintenance_reserve_amount": _validate_positive_amount(payload.get("maintenance_reserve_amount"), "maintenance_reserve_amount") if payload.get("maintenance_reserve_amount") not in (None, "") else None,
         "description": expense_title,
         "payment_method": payment_method,
         "reference_number": (payload.get("reference_number") or "").strip() or None,
@@ -434,6 +448,9 @@ def mark_expense_paid(expense_id: str, current_user_id: str, paid_by: str | None
     if not payer_id:
         raise ApiError("paid_by is required.", status_code=400)
     _get_user_document(payer_id)
+    if document.get("maintenance_reserve_amount") is not None:
+        from services.dispatch_finance_engine_service import post_reserve_spend_for_expense
+        post_reserve_spend_for_expense(document, actor_id=current_user_id)
     update_fields = {
         "status": "paid",
         "paid_by": payer_id,

@@ -11,6 +11,27 @@ export type DispatchFinancialStatus =
   | 'cancelled';
 export type DispatchFinancialType = 'external_paid' | 'internal_company' | 'partner_contract' | 'complimentary';
 export type DriverCompensationType = 'none' | 'fixed_tip' | 'fixed_allowance' | 'percentage_of_charge' | 'manual_amount';
+export type DispatchPricingType = 'standard' | 'subsidized' | 'complimentary';
+
+export interface DispatchFinanceSnapshot {
+  snapshot_version: number;
+  basis: 'estimate' | 'actual';
+  pricing_type: DispatchPricingType;
+  commercial_value: number;
+  customer_charge: number;
+  concession_value: number;
+  funding_source?: { id: string; name: string; description?: string | null } | null;
+  billable_distance_km: number;
+  operational_distance_km: number;
+  fuel: { litres: number; cost: number; price_per_litre: number; vehicle_efficiency?: { km_per_litre: number } };
+  driver_compensation: { mode: 'amount' | 'percentage'; value: number; suggested_amount: number; base_amount: number; extras_amount: number; approved_amount: number; effective_percentage: number; adjustments: Array<Record<string, unknown>> };
+  maintenance_reserve: { rate_percent: number; amount: number; funding_shortfall: number };
+  other_direct_costs: number;
+  vehicle_capital_profit_allocation: number;
+  expected_company_contribution: number;
+  warnings: string[];
+  estimated_vs_actual?: Record<string, { estimated: number; actual: number }>;
+}
 
 export type DispatchFinancialExpenseStatus = 'pending' | 'approved' | 'rejected' | 'reimbursed' | 'cancelled';
 export type DispatchFinancialIncidentStatus =
@@ -92,6 +113,14 @@ export interface DispatchFinancialRecord {
   created_at?: string | null;
   updated_at?: string | null;
   last_submission?: Record<string, unknown>;
+  pricing_type?: DispatchPricingType | null;
+  commercial_value?: number | null;
+  customer_charge?: number | null;
+  concession_value?: number | null;
+  funding_source_snapshot?: { id: string; name: string; description?: string | null } | null;
+  maintenance_reserve_amount?: number | null;
+  finance_snapshot?: DispatchFinanceSnapshot | null;
+  final_finance_snapshot?: DispatchFinanceSnapshot | null;
 }
 
 export interface DispatchFinancialExpense {
@@ -307,6 +336,27 @@ export async function verifyDispatchFinancial(jobId: string, payload?: { finance
     method: 'PATCH',
     body: JSON.stringify(payload || {}),
   });
+  return response.data;
+}
+
+export async function previewDispatchFinance(jobId: string, payload: Record<string, unknown>) {
+  const response = await apiRequest<Envelope<DispatchFinanceSnapshot>>(`/dispatch-financials/${jobId}/preview`, { method: 'POST', body: JSON.stringify(payload) });
+  return response.data;
+}
+
+export async function approveDispatchFinanceSnapshot(jobId: string, payload: Record<string, unknown>) {
+  const response = await apiRequest<Envelope<DispatchFinanceSnapshot>>(`/dispatch-financials/${jobId}/approve-snapshot`, { method: 'POST', headers: { 'Idempotency-Key': `dispatch-finance:${jobId}` }, body: JSON.stringify(payload) });
+  return response.data;
+}
+
+export async function finalizeDispatchFinanceSnapshot(jobId: string, payload: Record<string, unknown>) {
+  const response = await apiRequest<Envelope<DispatchFinanceSnapshot>>(`/dispatch-financials/${jobId}/finalize-snapshot`, { method: 'POST', body: JSON.stringify(payload) });
+  return response.data;
+}
+
+export async function fetchDispatchFinanceAnalytics(params: Record<string, string | undefined> = {}) {
+  const query = new URLSearchParams(); Object.entries(params).forEach(([key,value]) => { if (value) query.set(key,value); });
+  const response = await apiRequest<Envelope<{ start_date?: string | null; end_date: string; summary: Record<string, any>; records: Array<Record<string, any>> }>>(`/dispatch-financials/analytics?${query.toString()}`, { cacheTtlMs: 5000, dedupeKey:`dispatch-finance-analytics:${query.toString()}` });
   return response.data;
 }
 

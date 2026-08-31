@@ -78,6 +78,7 @@ const initialIncidentState = {
   incident_type: 'other',
   incident_date: new Date().toISOString().slice(0, 10),
   incident_location: '',
+  duration_minutes: '',
   amount: '',
   responsibility_type: 'under_investigation',
   company_share: '',
@@ -265,6 +266,7 @@ export default function MyDispatchFinancials() {
       const response = await submitDriverDispatchIncident(detail.job?.id || detail.record.dispatch_job_id, {
         ...incidentForm,
         amount,
+        duration_minutes: Number(incidentForm.duration_minutes || 0),
         company_share: companyShare,
         driver_share: driverShare,
       });

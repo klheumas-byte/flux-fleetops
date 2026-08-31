@@ -22,6 +22,8 @@ def serialize_expense(expense_document: dict) -> dict:
         "funding_source_snapshot": expense_document.get("funding_source_snapshot"),
         "funding_source_description": expense_document.get("funding_source_description"),
         "maintenance_job_id": _serialize_reference_id(expense_document.get("maintenance_job_id")),
+        "dispatch_job_id": _serialize_reference_id(expense_document.get("dispatch_job_id")),
+        "maintenance_reserve_amount": expense_document.get("maintenance_reserve_amount"),
         "description": expense_document.get("description") or expense_document.get("expense_title"),
         "payment_method": expense_document.get("payment_method"),
         "reference_number": expense_document.get("reference_number"),

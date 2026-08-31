@@ -488,6 +488,8 @@ class DispatchFinalizationTests(unittest.TestCase):
             "vehicle_reservation_id": ObjectId(),
             "driver_reservation_id": ObjectId(),
             "status": "reserved",
+            "scheduled_start_time": "2026-08-31T22:00:00+00:00",
+            "expected_return_time": "2026-09-01T01:00:00+00:00",
             "timeline": [],
         }
         movement = {"_id": ObjectId(), "vehicle_id": job["vehicle_id"]}

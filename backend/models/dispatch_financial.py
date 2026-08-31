@@ -55,6 +55,8 @@ def serialize_dispatch_financial_incident(document: dict) -> dict:
         "incident_type": document.get("incident_type"),
         "incident_date": document.get("incident_date"),
         "incident_location": document.get("incident_location"),
+        "duration_minutes": document.get("duration_minutes", 0),
+        "financial_impact": document.get("financial_impact", document.get("amount")),
         "amount": document.get("amount"),
         "responsibility_type": document.get("responsibility_type"),
         "company_share": document.get("company_share"),
@@ -126,6 +128,14 @@ def serialize_dispatch_financial_record(document: dict) -> dict:
         "created_at": _serialize_datetime(document.get("created_at")),
         "updated_at": _serialize_datetime(document.get("updated_at")),
         "last_submission": document.get("last_submission") or {},
+        "pricing_type": document.get("pricing_type"),
+        "commercial_value": document.get("commercial_value"),
+        "customer_charge": document.get("customer_charge"),
+        "concession_value": document.get("concession_value"),
+        "funding_source_snapshot": document.get("funding_source_snapshot"),
+        "maintenance_reserve_amount": document.get("maintenance_reserve_amount"),
+        "finance_snapshot": document.get("finance_snapshot"),
+        "final_finance_snapshot": document.get("final_finance_snapshot"),
     }
 
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   AlertTriangle,
   CalendarDays,
@@ -17,12 +17,21 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 
-import { ApiRequestError } from '../../lib/api';
+import { ApiRequestError, isRequestAborted } from '../../lib/api';
 import { getStoredSessionUser } from '../../lib/auth-session';
+import {
+  combineLocalDateAndTime,
+  formatDateTimeSafe,
+  toDateInputValue,
+  toDateTimeLocalInputValue,
+  toIsoDateTime,
+  toTimeInputValue,
+} from '../../lib/date-time';
 import { fetchDispatchRequestById, type DispatchRequestRecord } from '../../lib/dispatch-request-api';
 import {
   assignDispatchPlannerJob,
   cancelPlannerOperation,
+  correctDispatchPlannerJobSchedule,
   detectPlannerConflicts,
   fetchDispatchPlannerJob,
   fetchDispatchPlannerJobs,
@@ -80,37 +89,7 @@ function formatDateTime(value?: string | null) {
   if (!value) {
     return 'Not scheduled';
   }
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return value;
-  }
-  return parsed.toLocaleString();
-}
-
-function toDateValue(value?: string | null) {
-  if (!value) {
-    return '';
-  }
-  return value.slice(0, 10);
-}
-
-function toTimeValue(value?: string | null) {
-  if (!value) {
-    return '';
-  }
-  return value.slice(11, 16);
-}
-
-function toDateTimeLocalValue(value?: string | null) {
-  if (!value) {
-    return '';
-  }
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return value.slice(0, 16);
-  }
-  const local = new Date(parsed.getTime() - parsed.getTimezoneOffset() * 60000);
-  return local.toISOString().slice(0, 16);
+  return formatDateTimeSafe(value);
 }
 
 function buildPlannerForm(requestRecord?: Partial<PlannerRequestRecord & DispatchRequestRecord> | null): PlannerFormState {
@@ -121,10 +100,10 @@ function buildPlannerForm(requestRecord?: Partial<PlannerRequestRecord & Dispatc
     dispatcher_id: sessionUser?.id || '',
     pickup: requestRecord?.pickup_location || '',
     destination: requestRecord?.destination || '',
-    dispatch_date: requestRecord?.scheduled_start_time ? toDateValue(requestRecord.scheduled_start_time) : requestRecord?.preferred_pickup_date || '',
-    dispatch_time: requestRecord?.scheduled_start_time ? toTimeValue(requestRecord.scheduled_start_time) : requestRecord?.preferred_pickup_time || '',
-    expected_arrival_time: requestRecord?.expected_delivery_time ? toDateTimeLocalValue(requestRecord.expected_delivery_time) : '',
-    expected_return_time: requestRecord?.expected_return_time ? toDateTimeLocalValue(requestRecord.expected_return_time) : '',
+    dispatch_date: requestRecord?.scheduled_start_time ? toDateInputValue(requestRecord.scheduled_start_time) : toDateInputValue(requestRecord?.preferred_pickup_date),
+    dispatch_time: requestRecord?.scheduled_start_time ? toTimeInputValue(requestRecord.scheduled_start_time) : toTimeInputValue(requestRecord?.preferred_pickup_time),
+    expected_arrival_time: toDateTimeLocalInputValue(requestRecord?.expected_delivery_time),
+    expected_return_time: toDateTimeLocalInputValue(requestRecord?.expected_return_time),
     distance_estimate_km: '',
     goods_description: requestRecord?.load_description || '',
     quantity: '',
@@ -149,10 +128,10 @@ function buildPlannerFormFromJob(job: DispatchPlannerJobRecord): PlannerFormStat
     dispatcher_id: job.dispatcher_id || sessionUser?.id || '',
     pickup: job.pickup || '',
     destination: job.destination || '',
-    dispatch_date: job.dispatch_date || toDateValue(job.scheduled_start_time),
-    dispatch_time: job.dispatch_time || toTimeValue(job.scheduled_start_time),
-    expected_arrival_time: toDateTimeLocalValue(job.expected_arrival_time),
-    expected_return_time: toDateTimeLocalValue(job.expected_return_time),
+    dispatch_date: toDateInputValue(job.dispatch_date) || toDateInputValue(job.scheduled_start_time),
+    dispatch_time: toTimeInputValue(job.dispatch_time) || toTimeInputValue(job.scheduled_start_time),
+    expected_arrival_time: toDateTimeLocalInputValue(job.expected_arrival_time),
+    expected_return_time: toDateTimeLocalInputValue(job.expected_return_time),
     distance_estimate_km:
       job.distance_estimate_km === null || job.distance_estimate_km === undefined
         ? ''
@@ -205,8 +184,8 @@ function buildDraftPayload(form: PlannerFormState, requestDetail: DispatchReques
     destination: form.destination || undefined,
     dispatch_date: form.dispatch_date || undefined,
     dispatch_time: form.dispatch_time || undefined,
-    expected_arrival_time: form.expected_arrival_time ? new Date(form.expected_arrival_time).toISOString() : undefined,
-    expected_return_time: form.expected_return_time ? new Date(form.expected_return_time).toISOString() : undefined,
+    expected_arrival_time: toIsoDateTime(form.expected_arrival_time) || undefined,
+    expected_return_time: toIsoDateTime(form.expected_return_time) || undefined,
     distance_estimate_km: form.distance_estimate_km ? Number(form.distance_estimate_km) : undefined,
     goods_description: form.goods_description || undefined,
     quantity: form.quantity || undefined,
@@ -266,9 +245,17 @@ export default function DispatchPlanner() {
   const [isLoadingOptions, setIsLoadingOptions] = useState(true);
   const [isLoadingAvailability, setIsLoadingAvailability] = useState(true);
   const [isLoadingRequestDetail, setIsLoadingRequestDetail] = useState(false);
+  const [isCheckingConflicts, setIsCheckingConflicts] = useState(false);
+  const [conflictError, setConflictError] = useState('');
   const [isSavingDraft, setIsSavingDraft] = useState(false);
   const [isReserving, setIsReserving] = useState(false);
   const [isAssigning, setIsAssigning] = useState(false);
+  const [isReassigning, setIsReassigning] = useState(false);
+  const [isCorrectingSchedule, setIsCorrectingSchedule] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [loadingJobId, setLoadingJobId] = useState<string | null>(null);
+  const [loadingDetailJobId, setLoadingDetailJobId] = useState<string | null>(null);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [detailJob, setDetailJob] = useState<DispatchPlannerJobRecord | null>(null);
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
@@ -281,13 +268,30 @@ export default function DispatchPlanner() {
   const [requestPage, setRequestPage] = useState(1);
   const [jobPage, setJobPage] = useState(1);
   const debouncedSearchQuery = useDebouncedValue(searchQuery, 300);
+  const actionLocks = useRef(new Set<string>());
+  const conflictCheckSequence = useRef(0);
+  const requestDetailSequence = useRef(0);
+  const requestLoadSequence = useRef(0);
+  const jobLoadSequence = useRef(0);
+  const availabilityLoadSequence = useRef(0);
 
   const vehicleOptions = useMemo(() => buildSearchableVehicleOptions(options?.vehicles || []), [options?.vehicles]);
   const driverOptions = useMemo(() => buildSearchableUserOptions(options?.drivers || []), [options?.drivers]);
   const assistantOptions = useMemo(() => buildSearchableUserOptions(options?.assistants || []), [options?.assistants]);
   const dispatcherOptions = useMemo(() => buildSearchableUserOptions(options?.dispatchers || []), [options?.dispatchers]);
+  const selectedDateWarnings = useMemo(() => {
+    const warnings = [...(selectedRequest?.date_warnings || [])];
+    if (selectedRequest?.scheduled_start_time && (
+      !toDateInputValue(selectedRequest.scheduled_start_time) || !toTimeInputValue(selectedRequest.scheduled_start_time)
+    )) warnings.push('The stored schedule date or time is invalid. Set a valid schedule before confirming.');
+    if (selectedRequest?.expected_return_time && !toDateTimeLocalInputValue(selectedRequest.expected_return_time)) {
+      warnings.push('The stored expected return time is invalid. Set a valid return time before confirming.');
+    }
+    return [...new Set(warnings)];
+  }, [selectedRequest]);
 
-  const loadRequests = async () => {
+  const loadRequests = async (force = false) => {
+    const sequence = ++requestLoadSequence.current;
     setIsLoadingRequests(true);
     setPageError('');
     try {
@@ -297,32 +301,43 @@ export default function DispatchPlanner() {
         q: debouncedSearchQuery || undefined,
         planning_status: planningStatusFilter || undefined,
         operation_type: 'all',
+        force,
       });
+      if (sequence !== requestLoadSequence.current) return false;
       setRequests(response.requests || []);
       setRequestPagination(response.pagination || { page: 1, page_size: 10, total: 0, total_pages: 1 });
+      return true;
     } catch (error) {
+      if (sequence !== requestLoadSequence.current || isRequestAborted(error)) return false;
       setRequests([]);
       setPageError(getErrorMessage(error, 'Unable to load dispatch requests for planning right now.'));
+      return false;
     } finally {
-      setIsLoadingRequests(false);
+      if (sequence === requestLoadSequence.current) setIsLoadingRequests(false);
     }
   };
 
-  const loadJobs = async () => {
+  const loadJobs = async (force = false) => {
+    const sequence = ++jobLoadSequence.current;
     setIsLoadingJobs(true);
     try {
       const response = await fetchDispatchPlannerJobs({
         page: jobPage,
         page_size: 10,
         status: jobStatusFilter || undefined,
+        force,
       });
+      if (sequence !== jobLoadSequence.current) return false;
       setJobs(response.jobs || []);
       setJobsPagination(response.pagination || { page: 1, page_size: 10, total: 0, total_pages: 1 });
+      return true;
     } catch (error) {
+      if (sequence !== jobLoadSequence.current || isRequestAborted(error)) return false;
       setJobs([]);
       setPageError(getErrorMessage(error, 'Unable to load dispatch jobs right now.'));
+      return false;
     } finally {
-      setIsLoadingJobs(false);
+      if (sequence === jobLoadSequence.current) setIsLoadingJobs(false);
     }
   };
 
@@ -338,15 +353,20 @@ export default function DispatchPlanner() {
     }
   };
 
-  const loadAvailability = async () => {
+  const loadAvailability = async (force = false) => {
+    const sequence = ++availabilityLoadSequence.current;
     setIsLoadingAvailability(true);
     try {
-      const response = await fetchPlannerAvailability();
+      const response = await fetchPlannerAvailability(force);
+      if (sequence !== availabilityLoadSequence.current) return false;
       setAvailability(response);
+      return true;
     } catch (error) {
+      if (sequence !== availabilityLoadSequence.current || isRequestAborted(error)) return false;
       setPageError(getErrorMessage(error, 'Fleet availability is temporarily unavailable.'));
+      return false;
     } finally {
-      setIsLoadingAvailability(false);
+      if (sequence === availabilityLoadSequence.current) setIsLoadingAvailability(false);
     }
   };
 
@@ -364,11 +384,14 @@ export default function DispatchPlanner() {
   }, [jobPage, jobStatusFilter]);
 
   useEffect(() => {
+    const sequence = ++requestDetailSequence.current;
     if (!selectedRequest?.id) {
+      setIsLoadingRequestDetail(false);
       setSelectedRequestDetail(null);
       return;
     }
     if ((selectedRequest.planner_operation_type || 'dispatch') !== 'dispatch') {
+      setIsLoadingRequestDetail(false);
       setSelectedRequestDetail(null);
       setPlannerForm(buildPlannerForm(selectedRequest));
       setCurrentJob(null);
@@ -379,6 +402,7 @@ export default function DispatchPlanner() {
     setFormError('');
     void fetchDispatchRequestById(selectedRequest.id)
       .then((requestDetail) => {
+        if (sequence !== requestDetailSequence.current) return;
         setSelectedRequestDetail(requestDetail);
         if (!currentJob || currentJob.dispatch_request_id !== selectedRequest.id) {
           setPlannerForm(buildPlannerForm(requestDetail));
@@ -388,38 +412,59 @@ export default function DispatchPlanner() {
         }
       })
       .catch((error) => {
+        if (sequence !== requestDetailSequence.current) return;
         setSelectedRequestDetail(null);
         setFormError(getErrorMessage(error, 'Unable to load this dispatch request for planning.'));
       })
-      .finally(() => setIsLoadingRequestDetail(false));
+      .finally(() => {
+        if (sequence === requestDetailSequence.current) setIsLoadingRequestDetail(false);
+      });
   }, [selectedRequest?.id]);
 
   useEffect(() => {
-    const scheduledStart = plannerForm.dispatch_date && plannerForm.dispatch_time
-      ? new Date(`${plannerForm.dispatch_date}T${plannerForm.dispatch_time}:00`).toISOString()
-      : '';
+    const scheduledStart = combineLocalDateAndTime(plannerForm.dispatch_date, plannerForm.dispatch_time);
     if (!plannerForm.vehicle_id && !plannerForm.driver_id) {
+      conflictCheckSequence.current += 1;
+      setIsCheckingConflicts(false);
+      setConflictError('');
       setConflicts({ vehicle_conflicts: [], driver_conflicts: [], has_conflicts: false, vehicle_restrictions: [], restriction_acknowledgement_required: false });
       return;
     }
-    if (!scheduledStart || !plannerForm.expected_return_time) {
+    const expectedReturn = toIsoDateTime(plannerForm.expected_return_time);
+    if (!scheduledStart || !expectedReturn) {
+      conflictCheckSequence.current += 1;
+      setIsCheckingConflicts(false);
+      setConflictError('');
       return;
     }
+    const sequence = ++conflictCheckSequence.current;
+    setIsCheckingConflicts(true);
+    setConflictError('');
     const timeout = window.setTimeout(() => {
       void detectPlannerConflicts({
         vehicle_id: plannerForm.vehicle_id || undefined,
         driver_id: plannerForm.driver_id || undefined,
         scheduled_start_time: scheduledStart,
-        expected_return_time: new Date(plannerForm.expected_return_time).toISOString(),
+        expected_return_time: expectedReturn,
         exclude_job_id: currentJob?.id || undefined,
         exclude_movement_id: selectedRequest?.linked_vehicle_movement_id || undefined,
       })
-        .then((response) => setConflicts(response))
-        .catch(() => {
-          // Keep the form responsive if background conflict checks fail.
+        .then((response) => {
+          if (sequence === conflictCheckSequence.current) setConflicts(response);
+        })
+        .catch((error) => {
+          if (sequence === conflictCheckSequence.current) {
+            setConflictError(getErrorMessage(error, 'Unable to check resource availability. Try again before confirming.'));
+          }
+        })
+        .finally(() => {
+          if (sequence === conflictCheckSequence.current) setIsCheckingConflicts(false);
         });
     }, 250);
-    return () => window.clearTimeout(timeout);
+    return () => {
+      window.clearTimeout(timeout);
+      if (sequence === conflictCheckSequence.current) setIsCheckingConflicts(false);
+    };
   }, [
     plannerForm.vehicle_id,
     plannerForm.driver_id,
@@ -442,11 +487,14 @@ export default function DispatchPlanner() {
   };
 
   const handleLoadJobIntoPlanner = async (job: DispatchPlannerJobRecord) => {
+    if (actionLocks.current.has(`load-job:${job.id}`)) return;
+    setLoadingJobId(job.id);
     setSelectedJobId(job.id);
     setCurrentJob(job);
     setPlannerForm(buildPlannerFormFromJob(job));
     setIsDirty(false);
     setFormError('');
+    actionLocks.current.add(`load-job:${job.id}`);
     try {
       const requestDetail = await fetchDispatchRequestById(job.dispatch_request_id);
       setSelectedRequest({
@@ -459,7 +507,7 @@ export default function DispatchPlanner() {
         vehicle_type_needed: requestDetail.vehicle_type_needed,
         urgency: requestDetail.urgency,
         status: requestDetail.status,
-        planning_status: currentJob?.status || selectedRequest?.planning_status || null,
+        planning_status: job.status,
         scheduled_start_time: requestDetail.scheduled_start_time,
         pricing_status: requestDetail.pricing_status,
         load_description: requestDetail.load_description,
@@ -469,7 +517,12 @@ export default function DispatchPlanner() {
       });
       setSelectedRequestDetail(requestDetail);
     } catch (error) {
-      setFormError(getErrorMessage(error, 'Unable to load the linked dispatch request.'));
+      const message = getErrorMessage(error, 'Unable to load the linked dispatch request.');
+      setFormError(message);
+      toast.error(message, { id: `planner:load-job:${job.id}` });
+    } finally {
+      actionLocks.current.delete(`load-job:${job.id}`);
+      setLoadingJobId(null);
     }
   };
 
@@ -489,24 +542,36 @@ export default function DispatchPlanner() {
     setSelectedJobId(job.id);
     setPlannerForm(buildPlannerFormFromJob(job));
     setIsDirty(false);
-    await Promise.all([loadRequests(), loadJobs(), loadAvailability()]);
     return job;
   };
 
   const handleSaveDraft = async () => {
+    if (actionLocks.current.has('mutation') || actionLocks.current.has('save')) return;
+    actionLocks.current.add('mutation');
+    actionLocks.current.add('save');
+    toast.dismiss('planner:save');
     setIsSavingDraft(true);
     setFormError('');
     try {
       const job = await ensureDraft();
-      toast.success(`Draft ${job.dispatch_job_id} saved.`);
+      toast.success('Changes saved', { id: 'planner:save' });
+      await Promise.all([loadRequests(true), loadJobs(true), loadAvailability(true)]);
     } catch (error) {
-      setFormError(getErrorMessage(error, 'Unable to save this dispatch draft.'));
+      const message = getErrorMessage(error, 'Unable to save this dispatch draft.');
+      setFormError(message);
+      toast.error(message, { id: 'planner:save' });
     } finally {
+      actionLocks.current.delete('save');
+      actionLocks.current.delete('mutation');
       setIsSavingDraft(false);
     }
   };
 
   const handleReserve = async () => {
+    if (actionLocks.current.has('mutation') || actionLocks.current.has('reserve')) return;
+    actionLocks.current.add('mutation');
+    actionLocks.current.add('reserve');
+    toast.dismiss('planner:reserve');
     setIsReserving(true);
     setFormError('');
     try {
@@ -516,24 +581,39 @@ export default function DispatchPlanner() {
       setSelectedJobId(reservedJob.id);
       setPlannerForm(buildPlannerFormFromJob(reservedJob));
       setIsDirty(false);
-      toast.success(`Resources reserved for ${reservedJob.dispatch_job_id}.`);
-      await Promise.all([loadRequests(), loadJobs(), loadAvailability()]);
+      toast.success(`Resources reserved for ${reservedJob.dispatch_job_id}.`, { id: 'planner:reserve' });
+      await Promise.all([loadRequests(true), loadJobs(true), loadAvailability(true)]);
     } catch (error) {
-      setFormError(getErrorMessage(error, 'Unable to reserve these resources.'));
+      const message = getErrorMessage(error, 'Unable to reserve these resources.');
+      setFormError(message);
+      toast.error(message, { id: 'planner:reserve' });
     } finally {
+      actionLocks.current.delete('reserve');
+      actionLocks.current.delete('mutation');
       setIsReserving(false);
     }
   };
 
   const handleAssign = async () => {
+    if (actionLocks.current.has('mutation') || actionLocks.current.has('assign')) return;
+    actionLocks.current.add('mutation');
+    actionLocks.current.add('assign');
+    toast.dismiss('planner:assign');
     setIsAssigning(true);
     setFormError('');
     try {
+      if (selectedDateWarnings.length) throw new ApiRequestError(selectedDateWarnings[0], 400);
+      if (isCheckingConflicts) throw new ApiRequestError('Availability is still being checked. Please wait a moment.', 409);
+      if (conflictError) throw new ApiRequestError(conflictError, 409);
+      if (conflicts.has_conflicts) {
+        throw new ApiRequestError(
+          [...conflicts.vehicle_conflicts, ...conflicts.driver_conflicts][0] || 'Resolve resource conflicts before confirming.',
+          409,
+        );
+      }
       const operationType = selectedRequest?.planner_operation_type || 'dispatch';
       if (selectedRequest && operationType !== 'dispatch') {
-        const scheduledStart = plannerForm.dispatch_date && plannerForm.dispatch_time
-          ? new Date(`${plannerForm.dispatch_date}T${plannerForm.dispatch_time}:00`).toISOString()
-          : '';
+        const scheduledStart = combineLocalDateAndTime(plannerForm.dispatch_date, plannerForm.dispatch_time);
         if (!scheduledStart) {
           throw new ApiRequestError('A schedule date and time are required.', 400);
         }
@@ -541,20 +621,18 @@ export default function DispatchPlanner() {
           vehicle_id: plannerForm.vehicle_id,
           driver_id: plannerForm.driver_id,
           scheduled_start_time: scheduledStart,
-          expected_return_time: plannerForm.expected_return_time
-            ? new Date(plannerForm.expected_return_time).toISOString()
-            : undefined,
+          expected_return_time: toIsoDateTime(plannerForm.expected_return_time) || undefined,
         };
         if (selectedRequest.status === 'scheduled') {
           await reassignPlannerOperation(operationType, selectedRequest.id, operationPayload);
-          toast.success(`${selectedRequest.request_id} reassigned successfully.`);
+          toast.success(`${selectedRequest.request_id} reassigned successfully.`, { id: 'planner:assign' });
         } else {
           await planPlannerOperation(operationType, selectedRequest.id, operationPayload);
-          toast.success(`${selectedRequest.request_id} assigned to Operational Tasks.`);
+          toast.success('Dispatch scheduled', { id: 'planner:assign' });
         }
         setSelectedRequest(null);
         setIsDirty(false);
-        await Promise.all([loadRequests(), loadAvailability()]);
+        await Promise.all([loadRequests(true), loadAvailability(true)]);
         return;
       }
       const draftJob = isDirty || !currentJob ? await ensureDraft() : currentJob;
@@ -565,11 +643,15 @@ export default function DispatchPlanner() {
       setSelectedJobId(assignedJob.id);
       setPlannerForm(buildPlannerFormFromJob(assignedJob));
       setIsDirty(false);
-      toast.success(`Dispatch ${assignedJob.dispatch_job_id} assigned to driver dashboard.`);
-      await Promise.all([loadRequests(), loadJobs(), loadAvailability()]);
+      toast.success(`Assignment published to ${assignedJob.driver?.full_name || 'driver'}`, { id: 'planner:assign' });
+      await Promise.all([loadRequests(true), loadJobs(true), loadAvailability(true)]);
     } catch (error) {
-      setFormError(getErrorMessage(error, 'Unable to assign this dispatch.'));
+      const message = getErrorMessage(error, 'Unable to assign this dispatch.');
+      setFormError(message);
+      toast.error(message, { id: 'planner:assign' });
     } finally {
+      actionLocks.current.delete('assign');
+      actionLocks.current.delete('mutation');
       setIsAssigning(false);
     }
   };
@@ -578,7 +660,11 @@ export default function DispatchPlanner() {
     if (!currentJob?.id) {
       return;
     }
-    setIsSavingDraft(true);
+    if (actionLocks.current.has('mutation') || actionLocks.current.has('reassign')) return;
+    actionLocks.current.add('mutation');
+    actionLocks.current.add('reassign');
+    toast.dismiss('planner:reassign');
+    setIsReassigning(true);
     setFormError('');
     try {
       const payload = buildDraftPayload(plannerForm, selectedRequestDetail, currentJob.id);
@@ -587,12 +673,44 @@ export default function DispatchPlanner() {
       setSelectedJobId(job.id);
       setPlannerForm(buildPlannerFormFromJob(job));
       setIsDirty(false);
-      toast.success(`Dispatch ${job.dispatch_job_id} moved back to draft for reassignment.`);
-      await Promise.all([loadRequests(), loadJobs(), loadAvailability()]);
+      toast.success(`Dispatch ${job.dispatch_job_id} is ready for reassignment.`, { id: 'planner:reassign' });
+      await Promise.all([loadRequests(true), loadJobs(true), loadAvailability(true)]);
     } catch (error) {
-      setFormError(getErrorMessage(error, 'Unable to reassign this dispatch.'));
+      const message = getErrorMessage(error, 'Unable to reassign this dispatch.');
+      setFormError(message);
+      toast.error(message, { id: 'planner:reassign' });
     } finally {
-      setIsSavingDraft(false);
+      actionLocks.current.delete('reassign');
+      actionLocks.current.delete('mutation');
+      setIsReassigning(false);
+    }
+  };
+
+  const handleCorrectSchedule = async () => {
+    if (!currentJob?.id || actionLocks.current.has('mutation') || actionLocks.current.has('correct-schedule')) return;
+    actionLocks.current.add('mutation');
+    actionLocks.current.add('correct-schedule');
+    toast.dismiss('planner:correct-schedule');
+    setIsCorrectingSchedule(true);
+    setFormError('');
+    try {
+      if (selectedDateWarnings.length) throw new ApiRequestError(selectedDateWarnings[0], 400);
+      const payload = buildDraftPayload(plannerForm, selectedRequestDetail, currentJob.id);
+      const job = await correctDispatchPlannerJobSchedule(currentJob.id, payload);
+      setCurrentJob(job);
+      setSelectedJobId(job.id);
+      setPlannerForm(buildPlannerFormFromJob(job));
+      setIsDirty(false);
+      toast.success(`Schedule updated and assigned to ${job.driver?.full_name || 'driver'}.`, { id: 'planner:correct-schedule' });
+      await Promise.all([loadRequests(true), loadJobs(true), loadAvailability(true)]);
+    } catch (error) {
+      const message = getErrorMessage(error, 'Unable to correct this dispatch schedule.');
+      setFormError(message);
+      toast.error(message, { id: 'planner:correct-schedule' });
+    } finally {
+      actionLocks.current.delete('correct-schedule');
+      actionLocks.current.delete('mutation');
+      setIsCorrectingSchedule(false);
     }
   };
 
@@ -602,34 +720,83 @@ export default function DispatchPlanner() {
     if (operationType === 'dispatch') return;
     const reason = window.prompt(`Why is ${selectedRequest.request_id} being cancelled?`)?.trim();
     if (!reason) return;
-    setIsSavingDraft(true);
+    if (actionLocks.current.has('mutation') || actionLocks.current.has('cancel')) return;
+    actionLocks.current.add('mutation');
+    actionLocks.current.add('cancel');
+    toast.dismiss('planner:cancel');
+    setIsCancelling(true);
     setFormError('');
     try {
       await cancelPlannerOperation(operationType, selectedRequest.id, reason);
-      toast.success(`${selectedRequest.request_id} cancelled.`);
+      toast.success(`${selectedRequest.request_id} cancelled.`, { id: 'planner:cancel' });
       setSelectedRequest(null);
-      await Promise.all([loadRequests(), loadAvailability()]);
+      await Promise.all([loadRequests(true), loadAvailability(true)]);
     } catch (error) {
-      setFormError(getErrorMessage(error, 'Unable to cancel this operation.'));
+      const message = getErrorMessage(error, 'Unable to cancel this operation.');
+      setFormError(message);
+      toast.error(message, { id: 'planner:cancel' });
     } finally {
-      setIsSavingDraft(false);
+      actionLocks.current.delete('cancel');
+      actionLocks.current.delete('mutation');
+      setIsCancelling(false);
     }
   };
 
   const openJobDetail = async (jobId: string) => {
+    if (actionLocks.current.has(`detail:${jobId}`)) return;
+    actionLocks.current.add(`detail:${jobId}`);
+    setLoadingDetailJobId(jobId);
     setIsDetailOpen(true);
     setIsLoadingDetail(true);
     setDetailError('');
     try {
-      const job = await fetchDispatchPlannerJob(jobId);
+      const job = await fetchDispatchPlannerJob(jobId, true);
       setDetailJob(job);
     } catch (error) {
       setDetailJob(null);
       setDetailError(getErrorMessage(error, 'Unable to load dispatch job details.'));
     } finally {
+      actionLocks.current.delete(`detail:${jobId}`);
+      setLoadingDetailJobId(null);
       setIsLoadingDetail(false);
     }
   };
+
+  const handleRefresh = async () => {
+    if (actionLocks.current.has('refresh')) return;
+    actionLocks.current.add('refresh');
+    toast.dismiss('planner:refresh');
+    setIsRefreshing(true);
+    setPageError('');
+    try {
+      const results = await Promise.all([loadRequests(true), loadJobs(true), loadAvailability(true)]);
+      if (results.every(Boolean)) {
+        toast.success('Planner refreshed', { id: 'planner:refresh' });
+      } else {
+        toast.error('Some Planner data could not be refreshed. Review the message above and try again.', { id: 'planner:refresh' });
+      }
+    } finally {
+      actionLocks.current.delete('refresh');
+      setIsRefreshing(false);
+    }
+  };
+
+  const handleAvailabilityRefresh = async () => {
+    if (actionLocks.current.has('availability-refresh')) return;
+    actionLocks.current.add('availability-refresh');
+    toast.dismiss('planner:availability-refresh');
+    try {
+      const refreshed = await loadAvailability(true);
+      if (refreshed) toast.success('Availability refreshed', { id: 'planner:availability-refresh' });
+      else toast.error('Unable to refresh fleet availability.', { id: 'planner:availability-refresh' });
+    } finally {
+      actionLocks.current.delete('availability-refresh');
+    }
+  };
+
+  const isMutationPending = isSavingDraft || isReserving || isAssigning || isReassigning || isCorrectingSchedule || isCancelling;
+  const isAssignedPreStart = Boolean(currentJob && ['assigned', 'accepted', 'clarification_requested'].includes(currentJob.status));
+  const canCorrectSchedule = isAssignedPreStart && ['owner', 'admin'].includes(sessionUser?.role || '');
 
   return (
     <div className="space-y-6 pb-10">
@@ -645,15 +812,12 @@ export default function DispatchPlanner() {
           <div className="flex flex-wrap gap-3">
             <button
               type="button"
-              onClick={() => {
-                void loadRequests();
-                void loadJobs();
-                void loadAvailability();
-              }}
-              className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 shadow-sm transition hover:border-slate-300 hover:text-slate-900"
+              onClick={() => void handleRefresh()}
+              disabled={isRefreshing}
+              className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 shadow-sm transition hover:border-slate-300 hover:text-slate-900 disabled:opacity-60"
             >
-              <RefreshCcw className={`h-4 w-4 ${isLoadingAvailability || isLoadingJobs || isLoadingRequests ? 'animate-spin' : ''}`} />
-              Refresh Planner
+              <RefreshCcw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+              {isRefreshing ? 'Refreshing...' : 'Refresh Planner'}
             </button>
           </div>
         </div>
@@ -685,8 +849,11 @@ export default function DispatchPlanner() {
                     setRequestPage(1);
                   }}
                   placeholder="Search customer, route, request ID"
-                  className="w-full rounded-2xl border border-slate-200 py-2.5 pl-10 pr-4 text-sm outline-none transition focus:border-blue-300"
+                  className="w-full rounded-2xl border border-slate-200 py-2.5 pl-10 pr-10 text-sm outline-none transition focus:border-blue-300"
                 />
+                {(searchQuery !== debouncedSearchQuery || isLoadingRequests) && searchQuery ? (
+                  <Loader2 className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-blue-500" />
+                ) : null}
               </label>
               <select
                 value={planningStatusFilter}
@@ -694,6 +861,7 @@ export default function DispatchPlanner() {
                   setPlanningStatusFilter(event.target.value);
                   setRequestPage(1);
                 }}
+                disabled={isLoadingRequests}
                 className="rounded-2xl border border-slate-200 px-4 py-2.5 text-sm outline-none transition focus:border-blue-300"
               >
                 <option value="">All Planning States</option>
@@ -723,6 +891,7 @@ export default function DispatchPlanner() {
                       key={requestRecord.id}
                       type="button"
                       onClick={() => handleSelectRequest(requestRecord)}
+                      disabled={isLoadingRequestDetail && isActive}
                       className={`w-full rounded-2xl border px-4 py-4 text-left transition ${
                         isActive
                           ? 'border-blue-300 bg-blue-50 shadow-sm'
@@ -751,6 +920,13 @@ export default function DispatchPlanner() {
                           {requestRecord.scheduled_start_time ? formatDateTime(requestRecord.scheduled_start_time) : 'Schedule pending'}
                         </span>
                       </div>
+                      {isLoadingRequestDetail && isActive ? (
+                        <div className="mt-3 inline-flex items-center gap-2 text-xs font-medium text-blue-700">
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading request...
+                        </div>
+                      ) : (
+                        <div className="mt-3 text-xs font-semibold text-blue-700">Plan</div>
+                      )}
                     </button>
                   );
                 })}
@@ -812,6 +988,20 @@ export default function DispatchPlanner() {
                   {formError ? (
                     <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">{formError}</div>
                   ) : null}
+                  {selectedDateWarnings.length ? (
+                    <div className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900" role="alert">
+                      <div className="flex items-center gap-2 font-medium"><AlertTriangle className="h-4 w-4" /> Schedule data needs attention</div>
+                      {selectedDateWarnings.map((warning) => <div key={warning} className="mt-1">{warning}</div>)}
+                    </div>
+                  ) : null}
+                  {isCheckingConflicts ? (
+                    <div className="inline-flex items-center gap-2 rounded-xl bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700" role="status" aria-live="polite">
+                      <Loader2 className="h-4 w-4 animate-spin" /> Checking availability...
+                    </div>
+                  ) : null}
+                  {conflictError ? (
+                    <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">{conflictError}</div>
+                  ) : null}
                   {conflicts.has_conflicts ? (
                     <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
                       <div className="flex items-center gap-2 font-medium">
@@ -837,6 +1027,7 @@ export default function DispatchPlanner() {
                       <SearchableSelect
                         value={plannerForm.vehicle_id}
                         onChange={(value) => handleFormChange('vehicle_id', value)}
+                        disabled={isLoadingOptions || isMutationPending}
                         options={vehicleOptions}
                         placeholder="Select vehicle"
                         searchPlaceholder="Search vehicles..."
@@ -848,6 +1039,7 @@ export default function DispatchPlanner() {
                       <SearchableSelect
                         value={plannerForm.driver_id}
                         onChange={(value) => handleFormChange('driver_id', value)}
+                        disabled={isLoadingOptions || isMutationPending}
                         options={driverOptions}
                         placeholder="Select driver"
                         searchPlaceholder="Search drivers..."
@@ -859,6 +1051,7 @@ export default function DispatchPlanner() {
                       <SearchableSelect
                         value={plannerForm.assistant_id}
                         onChange={(value) => handleFormChange('assistant_id', value)}
+                        disabled={isLoadingOptions || isMutationPending}
                         options={assistantOptions}
                         placeholder="Select assistant"
                         searchPlaceholder="Search assistants..."
@@ -872,6 +1065,7 @@ export default function DispatchPlanner() {
                       <SearchableSelect
                         value={plannerForm.dispatcher_id}
                         onChange={(value) => handleFormChange('dispatcher_id', value)}
+                        disabled={isLoadingOptions || isMutationPending}
                         options={dispatcherOptions}
                         placeholder="Select dispatcher"
                         searchPlaceholder="Search dispatchers..."
@@ -918,60 +1112,76 @@ export default function DispatchPlanner() {
                   </div>
 
                   <div className="flex flex-wrap gap-3">
-                    {(selectedRequest?.planner_operation_type || 'dispatch') === 'dispatch' ? (
+                    {(selectedRequest?.planner_operation_type || 'dispatch') === 'dispatch' && !isAssignedPreStart ? (
                       <>
                         <button
                           type="button"
                           onClick={() => void handleSaveDraft()}
-                          disabled={isSavingDraft || !selectedRequest}
+                          disabled={isMutationPending || !selectedRequest}
                           className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-60"
                         >
                           {isSavingDraft ? <Loader2 className="h-4 w-4 animate-spin" /> : <ClipboardList className="h-4 w-4" />}
-                          Save Draft
+                          {isSavingDraft ? 'Saving...' : 'Save Changes'}
                         </button>
                         <button
                           type="button"
                           onClick={() => void handleReserve()}
-                          disabled={isReserving || !selectedRequest}
+                          disabled={isMutationPending || isCheckingConflicts || !selectedRequest}
                           className="inline-flex items-center gap-2 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-medium text-amber-800 disabled:opacity-60"
                         >
                           {isReserving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Clock3 className="h-4 w-4" />}
-                          Reserve Resources
+                          {isReserving ? 'Checking availability...' : 'Reserve Resources'}
                         </button>
                       </>
                     ) : null}
-                    <button
-                      type="button"
-                      onClick={() => void handleAssign()}
-                      disabled={isAssigning || !selectedRequest}
-                      className="inline-flex items-center gap-2 rounded-2xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-60"
-                    >
-                      {isAssigning ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
-                      {(selectedRequest?.planner_operation_type || 'dispatch') === 'dispatch'
-                        ? 'Assign Dispatch'
-                        : selectedRequest?.status === 'scheduled'
-                          ? 'Update Assignment'
-                          : 'Assign Operation'}
-                    </button>
+                    {!isAssignedPreStart ? (
+                      <button
+                        type="button"
+                        onClick={() => void handleAssign()}
+                        disabled={isMutationPending || isCheckingConflicts || Boolean(conflictError) || conflicts.has_conflicts || selectedDateWarnings.length > 0 || !selectedRequest}
+                        className="inline-flex items-center gap-2 rounded-2xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-60"
+                      >
+                        {isAssigning ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                        {isAssigning
+                          ? ((selectedRequest?.planner_operation_type || 'dispatch') === 'dispatch' ? 'Publishing...' : 'Assigning...')
+                          : (selectedRequest?.planner_operation_type || 'dispatch') === 'dispatch'
+                          ? 'Confirm Assignment'
+                          : selectedRequest?.status === 'scheduled'
+                            ? 'Update Assignment'
+                            : 'Assign Operation'}
+                      </button>
+                    ) : null}
+                    {canCorrectSchedule ? (
+                      <button
+                        type="button"
+                        onClick={() => void handleCorrectSchedule()}
+                        disabled={isMutationPending || isCheckingConflicts || Boolean(conflictError) || conflicts.has_conflicts || selectedDateWarnings.length > 0}
+                        className="inline-flex items-center gap-2 rounded-2xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-60"
+                      >
+                        {isCorrectingSchedule ? <Loader2 className="h-4 w-4 animate-spin" /> : <CalendarDays className="h-4 w-4" />}
+                        {isCorrectingSchedule ? 'Updating schedule...' : 'Edit Schedule'}
+                      </button>
+                    ) : null}
                     {currentJob && !['in_progress', 'completed', 'cancelled'].includes(currentJob.status) ? (
                       <button
                         type="button"
                         onClick={() => void handleReassign()}
-                        disabled={isSavingDraft}
+                        disabled={isMutationPending}
                         className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 disabled:opacity-60"
                       >
-                        <RefreshCcw className="h-4 w-4" />
-                        Reassign
+                        {isReassigning ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
+                        {isReassigning ? 'Returning to planning...' : isAssignedPreStart ? 'Return to Planning' : 'Reassign'}
                       </button>
                     ) : null}
                     {selectedRequest && (selectedRequest.planner_operation_type || 'dispatch') !== 'dispatch' ? (
                       <button
                         type="button"
                         onClick={() => void handleCancelOperation()}
-                        disabled={isSavingDraft}
+                        disabled={isMutationPending}
                         className="inline-flex items-center gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-2.5 text-sm font-medium text-rose-700 disabled:opacity-60"
                       >
-                        Cancel Operation
+                        {isCancelling ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                        {isCancelling ? 'Cancelling...' : 'Cancel Operation'}
                       </button>
                     ) : null}
                   </div>
@@ -992,6 +1202,7 @@ export default function DispatchPlanner() {
                   setJobStatusFilter(event.target.value);
                   setJobPage(1);
                 }}
+                disabled={isLoadingJobs}
                 className="rounded-2xl border border-slate-200 px-4 py-2.5 text-sm outline-none transition focus:border-blue-300"
               >
                 <option value="">All Job Statuses</option>
@@ -1023,7 +1234,9 @@ export default function DispatchPlanner() {
                       <tr key={job.id} className={selectedJobId === job.id ? 'bg-blue-50/50' : ''}>
                         <td className="px-4 py-3">
                           <div className="font-medium text-slate-900">{job.dispatch_job_id}</div>
-                          <div className="text-xs text-slate-500">{formatDateTime(job.scheduled_start_time)}</div>
+                          <div className="text-xs text-slate-500">Departure: {formatDateTime(job.scheduled_start_time)}</div>
+                          <div className="text-xs text-slate-500">Return: {formatDateTime(job.expected_return_time)}</div>
+                          {job.schedule_valid === false ? <div className="mt-1 text-xs font-medium text-amber-700">Schedule needs correction</div> : null}
                         </td>
                         <td className="px-4 py-3 text-slate-600">
                           <div>{job.pickup || 'Pickup pending'}</div>
@@ -1041,18 +1254,20 @@ export default function DispatchPlanner() {
                             <button
                               type="button"
                               onClick={() => void openJobDetail(job.id)}
+                              disabled={loadingDetailJobId === job.id}
                               className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-xs font-medium text-slate-700"
                             >
-                              <Eye className="h-3.5 w-3.5" />
-                              View
+                              {loadingDetailJobId === job.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Eye className="h-3.5 w-3.5" />}
+                              {loadingDetailJobId === job.id ? 'Loading...' : 'View'}
                             </button>
                             <button
                               type="button"
                               onClick={() => void handleLoadJobIntoPlanner(job)}
+                              disabled={loadingJobId === job.id}
                               className="inline-flex items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-medium text-blue-700"
                             >
-                              <RefreshCcw className="h-3.5 w-3.5" />
-                              Load
+                              {loadingJobId === job.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCcw className="h-3.5 w-3.5" />}
+                              {loadingJobId === job.id ? 'Loading...' : 'Load'}
                             </button>
                           </div>
                         </td>
@@ -1099,8 +1314,10 @@ export default function DispatchPlanner() {
               </div>
               <button
                 type="button"
-                onClick={() => void loadAvailability()}
-                className="rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700"
+                onClick={() => void handleAvailabilityRefresh()}
+                disabled={isLoadingAvailability}
+                aria-label={isLoadingAvailability ? 'Refreshing fleet availability' : 'Refresh fleet availability'}
+                className="rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 disabled:opacity-60"
               >
                 {isLoadingAvailability ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
               </button>

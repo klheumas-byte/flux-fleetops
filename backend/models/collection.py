@@ -15,6 +15,8 @@ def serialize_collection(collection_document: dict) -> dict:
         "assignment_id": _serialize_reference_id(collection_document.get("assignment_id")),
         "amount": collection_document.get("amount"),
         "submitted_amount": collection_document.get("submitted_amount"),
+        "dispatch_job_id": _serialize_reference_id(collection_document.get("dispatch_job_id")),
+        "dispatch_financial_id": _serialize_reference_id(collection_document.get("dispatch_financial_id")),
         "admin_received_amount": collection_document.get("admin_received_amount"),
         "collection_date": collection_document.get("collection_date"),
         "payment_method": collection_document.get("payment_method"),

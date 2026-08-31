@@ -33,6 +33,8 @@ COLLECTION_LIST_PROJECTION = {
     "assignment_id": 1,
     "amount": 1,
     "submitted_amount": 1,
+    "dispatch_job_id": 1,
+    "dispatch_financial_id": 1,
     "admin_received_amount": 1,
     "collection_date": 1,
     "payment_method": 1,
@@ -94,6 +96,8 @@ def ensure_collection_indexes():
             {"keys": [("driver_id", ASCENDING)]},
             {"keys": [("vehicle_id", ASCENDING)]},
             {"keys": [("assignment_id", ASCENDING)]},
+            {"keys": [("dispatch_job_id", ASCENDING)], "options": {"sparse": True}},
+            {"keys": [("collection_source_key", ASCENDING)], "options": {"unique": True, "sparse": True}},
             {"keys": [("created_at", DESCENDING)]},
             {"keys": [("updated_at", DESCENDING)]},
             {"keys": [("submitted_at", DESCENDING)]},
@@ -405,6 +409,8 @@ def _build_collection_document(
     approved_by_admin_id: ObjectId | None = None,
     admin_received_amount: float | None = None,
     admin_approval_note: str | None = None,
+    dispatch_job_id: ObjectId | None = None,
+    dispatch_financial_id: ObjectId | None = None,
 ) -> dict:
     timestamp = now_utc()
     cycle_window = get_weekly_cycle_window(collection_date)
@@ -415,6 +421,8 @@ def _build_collection_document(
         "driver_id": driver["_id"],
         "vehicle_id": vehicle["_id"],
         "assignment_id": assignment["_id"],
+        "dispatch_job_id": dispatch_job_id,
+        "dispatch_financial_id": dispatch_financial_id,
         "amount": amount,
         "submitted_amount": amount,
         "admin_received_amount": admin_received_amount,
@@ -464,6 +472,53 @@ def list_collections(
         collection_date=collection_date or "",
         search=(search or "").strip().lower(),
     )
+
+
+def create_dispatch_collection_submission(
+    job_document: dict, financial_record: dict, *, amount_collected: float,
+    amount_submitted: float, payment_method: str | None, payment_reference: str | None,
+    finance_notes: str | None, current_user_id: str,
+) -> dict:
+    """Post dispatch cash into the existing Collections/Submission source."""
+    key = f"dispatch:{job_document['_id']}:collection"
+    existing = collections_collection().find_one({"collection_source_key": key})
+    if existing:
+        if (
+            _round_currency_amount(existing.get("amount")) != _round_currency_amount(amount_collected)
+            or _round_currency_amount(existing.get("submitted_amount")) != _round_currency_amount(amount_submitted)
+        ):
+            raise ApiError("Dispatch collection was already submitted with different amounts.", status_code=409)
+        return _enrich_collection(existing)
+    assignment = None
+    for field in ("primary_assignment_id", "assignment_id"):
+        if isinstance(job_document.get(field), ObjectId):
+            assignment = assignments_collection().find_one({"_id": job_document[field]})
+            if assignment: break
+    if not assignment:
+        assignment = assignments_collection().find_one({
+            "driver_id": job_document.get("driver_id"), "vehicle_id": job_document.get("vehicle_id"),
+            "status": {"$in": ["active", "suspended"]},
+        })
+    timestamp = now_utc()
+    document = {
+        "driver_id": job_document.get("driver_id"), "vehicle_id": job_document.get("vehicle_id"),
+        "assignment_id": assignment.get("_id") if assignment else None,
+        "dispatch_job_id": job_document["_id"], "dispatch_financial_id": financial_record["_id"],
+        "collection_source_key": key, "amount": _round_currency_amount(amount_collected),
+        "submitted_amount": _round_currency_amount(amount_submitted), "admin_received_amount": None,
+        "collection_date": timestamp.date().isoformat(), "payment_method": payment_method,
+        "reference_number": payment_reference, "notes": finance_notes, "driver_note": finance_notes,
+        "status": "submitted", "submitted_by_driver_id": _to_object_id(current_user_id, "current_user_id"),
+        "submitted_at": timestamp, "created_at": timestamp, "updated_at": timestamp,
+        "is_late": False,
+    }
+    try:
+        document["_id"] = collections_collection().insert_one(document).inserted_id
+    except Exception:
+        existing = collections_collection().find_one({"collection_source_key": key})
+        if existing: return _enrich_collection(existing)
+        raise
+    return _enrich_collection(document)
     cached = get_ttl_cached(cache_key)
     if cached is not None:
         return cached
@@ -584,6 +639,17 @@ def create_collection(payload: dict, current_user_id: str) -> dict:
     if assignment.get("status") not in {"active", "suspended"}:
         raise ApiError("Collections can only be recorded for active or suspended assignments.", status_code=400)
 
+    dispatch_job_id = _to_object_id(payload.get("dispatch_job_id"), "dispatch_job_id", required=False)
+    dispatch_financial_id = None
+    if dispatch_job_id:
+        dispatch_job = get_collection("dispatch_jobs").find_one({"_id": dispatch_job_id})
+        if not dispatch_job:
+            raise ApiError("Dispatch job not found.", status_code=404)
+        if dispatch_job.get("driver_id") != driver.get("_id") or dispatch_job.get("vehicle_id") != vehicle.get("_id"):
+            raise ApiError("Dispatch job must belong to the selected driver and vehicle.", status_code=400)
+        financial = get_collection("dispatch_financial_records").find_one({"dispatch_job_id": dispatch_job_id})
+        dispatch_financial_id = financial.get("_id") if financial else None
+
     amount = _validate_positive_amount(payload.get("amount"), "amount")
     collection_date = (payload.get("collection_date") or "").strip()
     if not collection_date:
@@ -630,6 +696,8 @@ def create_collection(payload: dict, current_user_id: str) -> dict:
         approved_by_admin_id=approved_by_admin["_id"] if approved_by_admin else None,
         admin_received_amount=admin_received_amount,
         admin_approval_note=admin_approval_note,
+        dispatch_job_id=dispatch_job_id,
+        dispatch_financial_id=dispatch_financial_id,
     )
     result = collections_collection().insert_one(collection_document)
     collection_document["_id"] = result.inserted_id
@@ -657,6 +725,15 @@ def submit_driver_payment(payload: dict, current_user_id: str) -> dict:
     if payment_method not in ALLOWED_PAYMENT_METHODS:
         raise ApiError("payment_method must be one of: cash, momo, bank, other.", status_code=400)
 
+    dispatch_job_id = _to_object_id(payload.get("dispatch_job_id"), "dispatch_job_id", required=False)
+    dispatch_financial_id = None
+    if dispatch_job_id:
+        dispatch_job = get_collection("dispatch_jobs").find_one({"_id": dispatch_job_id, "driver_id": driver["_id"], "vehicle_id": vehicle["_id"]})
+        if not dispatch_job:
+            raise ApiError("Dispatch job not found for this driver and vehicle.", status_code=404)
+        financial = get_collection("dispatch_financial_records").find_one({"dispatch_job_id": dispatch_job_id})
+        dispatch_financial_id = financial.get("_id") if financial else None
+
     collection_document = _build_collection_document(
         driver=driver,
         vehicle=vehicle,
@@ -669,6 +746,8 @@ def submit_driver_payment(payload: dict, current_user_id: str) -> dict:
         status="pending",
         current_user_id=current_user_id,
         submitted_by_driver_id=driver["_id"],
+        dispatch_job_id=dispatch_job_id,
+        dispatch_financial_id=dispatch_financial_id,
     )
     result = collections_collection().insert_one(collection_document)
     collection_document["_id"] = result.inserted_id

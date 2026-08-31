@@ -46,6 +46,7 @@ import {
 } from '../../lib/driver-api';
 import { getDriverDispatchActionState, matchesDriverDispatchSection } from '../../lib/driver-dispatch-ui';
 import { apiRequestSafe } from '../../lib/api';
+import { formatDateTimeSafe } from '../../lib/date-time';
 import {
   createCustomer,
   fetchCustomerOptions,
@@ -629,7 +630,12 @@ export default function DriverDashboard({
       setDispatchReasonDrafts((current) => ({ ...current, [jobId]: '' }));
       await loadDispatchJobs();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Unable to update this dispatch right now.');
+      const backendMessage = error instanceof Error ? error.message : '';
+      toast.error(
+        /schedule|expected return|departure/i.test(backendMessage)
+          ? 'Schedule needs correction by Operations'
+          : backendMessage || 'Unable to update this dispatch right now.',
+      );
     } finally {
       setDispatchActionJobId('');
     }
@@ -932,14 +938,14 @@ export default function DriverDashboard({
                         {job.pickup || 'Pickup pending'} to {job.destination || 'Destination pending'}
                       </div>
                       <div className="mt-2 flex flex-wrap gap-2 text-xs text-gray-500">
-                        <span className="rounded-full bg-white px-2.5 py-1 ring-1 ring-gray-200">{formatDateTime(job.scheduled_start_time)}</span>
+                        <span className="rounded-full bg-white px-2.5 py-1 ring-1 ring-gray-200">{formatDateTimeSafe(job.scheduled_start_time)}</span>
                         <span className="rounded-full bg-white px-2.5 py-1 ring-1 ring-gray-200">{job.vehicle?.registration_number || 'Vehicle pending'}</span>
                         <span className="rounded-full bg-white px-2.5 py-1 ring-1 ring-gray-200">{job.status}</span>
                         <span className="rounded-full bg-white px-2.5 py-1 ring-1 ring-gray-200">{job.driver_response_status}</span>
                       </div>
                     </div>
                     <div className="rounded-lg bg-white px-3 py-2 text-xs text-gray-500 ring-1 ring-gray-200">
-                      Return by: {formatDateTime(job.expected_return_time)}
+                      Return by: {formatDateTimeSafe(job.expected_return_time)}
                     </div>
                   </div>
 
@@ -949,6 +955,13 @@ export default function DriverDashboard({
                     <InfoMini label="Stops" value={job.stops?.length ? `${job.stops.length} planned stop(s)` : 'No extra stops'} />
                     <InfoMini label="Dispatcher" value={job.dispatcher?.full_name || 'Operations'} />
                   </div>
+
+                  {job.schedule_valid === false ? (
+                    <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                      <div className="font-semibold">Schedule needs correction by Operations</div>
+                      <div className="mt-1 text-amber-800">{job.schedule_warning || 'Departure and expected return must be corrected before this dispatch can start.'}</div>
+                    </div>
+                  ) : null}
 
                   <div className="mt-4">
                     <textarea
@@ -1547,7 +1560,7 @@ function OperationsDashboardSection({
         {summary.upcoming_tasks.map((task) => <button key={task.task_key} type="button" onClick={() => onOpenTask(task)} className="flex w-full items-center justify-between gap-3 p-3 text-left hover:bg-gray-50">
           <div className="min-w-0">
             <p className="truncate text-sm font-medium text-gray-900">{task.reference} · {task.operation_label}</p>
-            <p className="mt-0.5 truncate text-xs text-gray-500">{formatDateTime(task.schedule)} · {task.origin || 'Origin pending'} → {task.destination || 'Destination pending'}</p>
+            <p className="mt-0.5 truncate text-xs text-gray-500">{formatDateTimeSafe(task.schedule)} · {task.origin || 'Origin pending'} → {task.destination || 'Destination pending'}</p>
           </div>
           <span className="shrink-0 text-xs font-medium text-blue-700">{task.current_action.label}</span>
         </button>)}

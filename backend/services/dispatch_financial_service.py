@@ -57,6 +57,12 @@ EXPENSE_TYPES = {
 }
 EXPENSE_STATUSES = {"pending", "approved", "rejected", "reimbursed", "cancelled"}
 FINANCIAL_INCIDENT_TYPES = {
+    "authority_police_stop",
+    "breakdown",
+    "accident",
+    "customer_delay",
+    "road_obstruction",
+    "driver_violation",
     "police_arrest",
     "traffic_fine",
     "wrong_turn_penalty",
@@ -88,7 +94,7 @@ FINANCIAL_INCIDENT_STATUSES = {
     "closed",
     "cancelled",
 }
-ADMIN_ROLES = {"owner", "admin"}
+ADMIN_ROLES = {"owner", "admin", "finance", "finance_officer"}
 ACTIVE_INCIDENT_BLOCKING_STATUSES = {"reported", "under_review", "approved", "company_paid", "driver_liable", "shared_payment"}
 FINANCIAL_READY_RETURN_STATUSES = {"returned", "inspection_completed", "dispatch_closed"}
 LIST_PROJECTION = {
@@ -520,6 +526,13 @@ def _sync_financial_record(document: dict, *, job_document: dict | None = None, 
     compensation_type = normalize_key(classification_source.get("driver_compensation_type")) or "none"
     compensation_value = float(classification_source.get("driver_compensation_value") or 0)
     compensation_amount = calculate_driver_compensation(compensation_type, compensation_value, approved_charge)
+    locked_snapshot = document.get("final_finance_snapshot") or document.get("finance_snapshot")
+    if locked_snapshot:
+        approved_charge = round(float(locked_snapshot.get("customer_charge") or 0), 2)
+        locked_compensation = locked_snapshot.get("driver_compensation") or {}
+        compensation_type = "percentage_of_charge" if locked_compensation.get("mode") == "percentage" else "manual_amount"
+        compensation_value = float(locked_compensation.get("value") or 0)
+        compensation_amount = round(float(locked_compensation.get("approved_amount") or 0), 2)
     recorded_amount_paid = round(float(classification_source.get("amount_paid") or 0), 2)
     expected_fuel_cost = round(float(request_document.get("fuel_estimate_cost") or document.get("expected_fuel_cost") or 0), 2)
     estimated_other_costs = round(float(request_document.get("other_expected_costs") or document.get("estimated_other_costs") or 0), 2)
@@ -572,6 +585,15 @@ def _sync_financial_record(document: dict, *, job_document: dict | None = None, 
     company_operational_cost = round(compensation_amount + approved_expenses + company_incident_costs, 2)
     recognized_actual_revenue = settled_amount if recognizes_revenue else 0.0
     actual_net_revenue = round(recognized_actual_revenue - company_operational_cost, 2)
+    if locked_snapshot:
+        expected_fuel_cost = round(float((locked_snapshot.get("fuel") or {}).get("cost") or 0), 2)
+        estimated_other_costs = round(float(locked_snapshot.get("other_direct_costs") or 0), 2)
+        maintenance_cost = float((locked_snapshot.get("maintenance_reserve") or {}).get("amount") or 0)
+        capital_cost = float(locked_snapshot.get("vehicle_capital_profit_allocation") or 0)
+        company_operational_cost = round(expected_fuel_cost + compensation_amount + maintenance_cost + estimated_other_costs + capital_cost + company_incident_costs, 2)
+        expected_net_revenue = round(float(locked_snapshot.get("expected_company_contribution") or 0), 2)
+        actual_fuel_cost = expected_fuel_cost if document.get("final_finance_snapshot") else actual_fuel_cost
+        actual_net_revenue = expected_net_revenue if document.get("final_finance_snapshot") else actual_net_revenue
     has_pending_review = any(item.get("status") == "pending" for item in expenses) or any(
         item.get("status") in {"reported", "under_review"} for item in incidents
     )
@@ -883,6 +905,13 @@ def submit_driver_dispatch_money(job_id: str, payload: dict, *, current_user_id:
         raise ApiError("Closed financial records cannot be modified.", status_code=400)
     amount_collected = _normalize_positive_amount((payload or {}).get("amount_collected_from_customer"), "amount_collected_from_customer", required=True)
     amount_submitted = _normalize_positive_amount((payload or {}).get("amount_submitted_by_driver"), "amount_submitted_by_driver", required=True)
+    from services.collection_service import create_dispatch_collection_submission
+    collection = create_dispatch_collection_submission(
+        job_document, record, amount_collected=amount_collected, amount_submitted=amount_submitted,
+        payment_method=_normalize_text((payload or {}).get("payment_method")),
+        payment_reference=_normalize_text((payload or {}).get("payment_reference")),
+        finance_notes=_normalize_text((payload or {}).get("finance_notes")), current_user_id=current_user_id,
+    )
     timestamp = now_utc()
     update_fields = {
         "amount_collected_from_customer": amount_collected,
@@ -895,6 +924,7 @@ def submit_driver_dispatch_money(job_id: str, payload: dict, *, current_user_id:
         "verified_by": None,
         "verified_at": None,
         "last_submission": {
+            "collection_id": collection.get("id"),
             "amount_collected_from_customer": amount_collected,
             "amount_submitted_by_driver": amount_submitted,
             "payment_method": _normalize_text((payload or {}).get("payment_method")),
@@ -919,7 +949,7 @@ def submit_driver_dispatch_expense(job_id: str, payload: dict, *, current_user_i
     if record.get("is_financially_closed"):
         raise ApiError("Closed financial records cannot be modified.", status_code=400)
     expense_type = _normalize_status((payload or {}).get("expense_type"), EXPENSE_TYPES, "expense_type")
-    amount = _normalize_positive_amount((payload or {}).get("amount"), "amount", required=True)
+    amount = _normalize_non_negative_amount((payload or {}).get("amount"), "amount", required=True)
     note = _normalize_text((payload or {}).get("note"))
     if not note:
         raise ApiError("note is required.", status_code=400)
@@ -978,7 +1008,7 @@ def submit_dispatch_financial_incident(job_id: str, payload: dict, *, current_us
     if record.get("is_financially_closed"):
         raise ApiError("Closed financial records cannot be modified.", status_code=400)
     responsibility_type = _normalize_status((payload or {}).get("responsibility_type"), RESPONSIBILITY_TYPES, "responsibility_type", default="under_investigation")
-    amount = _normalize_positive_amount((payload or {}).get("amount"), "amount", required=True)
+    amount = _normalize_non_negative_amount((payload or {}).get("amount"), "amount", required=True)
     company_share = _normalize_non_negative_amount((payload or {}).get("company_share"), "company_share", required=False) or 0.0
     driver_share = _normalize_non_negative_amount((payload or {}).get("driver_share"), "driver_share", required=False) or 0.0
     if responsibility_type == "shared_responsibility" and (company_share <= 0 or driver_share <= 0):
@@ -1010,6 +1040,8 @@ def submit_dispatch_financial_incident(job_id: str, payload: dict, *, current_us
         "incident_type": incident_type,
         "incident_date": _parse_date((payload or {}).get("incident_date"), "incident_date", required=True),
         "incident_location": incident_location,
+        "duration_minutes": _normalize_non_negative_amount((payload or {}).get("duration_minutes"), "duration_minutes", required=False) or 0,
+        "financial_impact": amount,
         "amount": amount,
         "responsibility_type": responsibility_type,
         "company_share": company_share,
@@ -1223,6 +1255,7 @@ def list_driver_dispatch_financials(*, current_user_id: str, current_role: str, 
 
 def get_dispatch_financial_reference_options(*, current_role: str) -> dict:
     _assert_admin_role(current_role)
+    from services.master_data_service import get_active_master_data_items
     return {
         "financial_statuses": sorted(FINANCIAL_STATUSES),
         "dispatch_financial_types": sorted(DISPATCH_FINANCIAL_TYPES),
@@ -1233,4 +1266,8 @@ def get_dispatch_financial_reference_options(*, current_role: str) -> dict:
         "incident_types": sorted(FINANCIAL_INCIDENT_TYPES),
         "responsibility_types": sorted(RESPONSIBILITY_TYPES),
         "incident_statuses": sorted(FINANCIAL_INCIDENT_STATUSES),
+        "drivers": [{"id": str(item["_id"]), "name": item.get("full_name") or "Unnamed driver"} for item in users_collection().find({"role": "driver", "status": {"$ne": "inactive"}}, {"full_name": 1}).sort("full_name", 1)],
+        "vehicles": [{"id": str(item["_id"]), "name": item.get("registration_number") or item.get("vehicle_number") or "Unnamed vehicle"} for item in vehicles_collection().find({}, {"registration_number": 1, "vehicle_number": 1}).sort("registration_number", 1)],
+        "branches": [{"id": str(item["_id"]), "name": item.get("name") or item.get("branch_name") or "Unnamed branch"} for item in get_collection("branches").find({}, {"name": 1, "branch_name": 1}).sort("name", 1)],
+        "funding_sources": [{"id": str(item["id"]), "name": item.get("name") or "Unnamed source"} for item in get_active_master_data_items("funding_sources")],
     }

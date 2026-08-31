@@ -18,6 +18,7 @@ from services.dashboard_service import ensure_dashboard_indexes
 from services.deposit_service import ensure_deposit_indexes
 from services.dispatch_request_service import ensure_dispatch_request_indexes
 from services.dispatch_financial_service import ensure_dispatch_financial_indexes
+from services.dispatch_finance_engine_service import ensure_dispatch_finance_engine_indexes
 from services.dispatch_opportunity_service import ensure_dispatch_opportunity_indexes
 from services.dispatch_return_service import ensure_dispatch_return_indexes
 from services.driver_private_finance_service import ensure_driver_private_finance_indexes
@@ -120,6 +121,7 @@ def create_app(config_name: str | None = None) -> Flask:
                     ("deposits", ensure_deposit_indexes),
                     ("dispatch_requests", ensure_dispatch_request_indexes),
                     ("dispatch_financials", ensure_dispatch_financial_indexes),
+                    ("dispatch_finance_engine", ensure_dispatch_finance_engine_indexes),
                     ("dispatch_opportunities", ensure_dispatch_opportunity_indexes),
                     ("dispatch_returns", ensure_dispatch_return_indexes),
                     ("driver_private_finance", ensure_driver_private_finance_indexes),

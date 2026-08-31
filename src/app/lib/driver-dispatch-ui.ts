@@ -18,15 +18,16 @@ export function getDriverDispatchActionState(job: DriverDispatchJob) {
   const status = normalizeDriverDispatchStatus(job);
   const workflowStatus = normalizeDriverDispatchWorkflowStatus(job);
   const responseStatus = normalizeDriverDispatchResponseStatus(job);
+  const scheduleReady = job.schedule_valid !== false;
 
   return {
     status,
     workflowStatus,
     responseStatus,
-    canAccept: status === 'assigned' && responseStatus === 'pending',
+    canAccept: status === 'assigned' && responseStatus === 'pending' && scheduleReady,
     canReject: status === 'assigned' && responseStatus === 'pending',
     canClarify: status === 'assigned' || status === 'accepted',
-    canStart: status === 'accepted',
+    canStart: status === 'accepted' && scheduleReady,
     canPause: status === 'in_progress' && !job.is_paused,
     canResume: status === 'in_progress' && Boolean(job.is_paused),
     canMarkGoodsLoaded: status === 'in_progress' && ['accepted', 'travelling_to_pickup'].includes(workflowStatus),

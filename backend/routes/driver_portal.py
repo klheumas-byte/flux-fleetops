@@ -34,6 +34,7 @@ from services.dispatch_fuel_service import (
     get_dispatch_fuel_accountability,
     record_dispatch_opening_fuel,
 )
+from services.dispatch_finance_engine_service import dispatch_finance_analytics
 from services.maintenance_service import (
     get_driver_maintenance_job_by_id,
     list_driver_maintenance_jobs,
@@ -60,6 +61,18 @@ from utils.responses import success_response
 
 
 driver_portal_bp = Blueprint("driver_portal", __name__)
+
+
+@driver_portal_bp.get("/dispatch-finance-analytics")
+@role_required("driver")
+@driver_mode_required("operations")
+def get_own_dispatch_finance_analytics_route():
+    return success_response(data=dispatch_finance_analytics(
+        current_user_id=get_jwt_identity(), current_role="driver",
+        start_date=request.args.get("start_date"), end_date=request.args.get("end_date"), preset=request.args.get("preset"),
+        driver_id=get_jwt_identity(), vehicle_id=request.args.get("vehicle_id"), pricing_type=request.args.get("pricing_type"),
+        funding_source_id=request.args.get("funding_source_id"), branch_id=request.args.get("branch_id"),
+    ))
 
 
 @driver_portal_bp.get("/private-finance")

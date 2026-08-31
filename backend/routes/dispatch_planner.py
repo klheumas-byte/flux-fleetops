@@ -5,6 +5,7 @@ from services.dispatch_planner_service import (
     accept_driver_dispatch_job,
     assign_dispatch_job,
     cancel_planned_operation,
+    correct_dispatch_job_schedule,
     detect_dispatch_conflicts,
     get_dispatch_job,
     get_fleet_availability,
@@ -158,6 +159,21 @@ def reassign_dispatch_job_route(job_id: str):
     return success_response(
         data={"job": job},
         message="Dispatch reassigned successfully.",
+    )
+
+
+@dispatch_planner_bp.patch("/jobs/<job_id>/schedule")
+@role_required("owner", "admin")
+def correct_dispatch_job_schedule_route(job_id: str):
+    job = correct_dispatch_job_schedule(
+        job_id,
+        request.get_json(silent=True) or {},
+        current_user_id=get_jwt_identity(),
+        current_role=get_jwt().get("role"),
+    )
+    return success_response(
+        data={"job": job},
+        message="Dispatch schedule corrected and reassigned successfully.",
     )
 
 

@@ -13,6 +13,7 @@ import {
   Users,
 } from 'lucide-react';
 import { ApiRequestError } from '../../lib/api';
+import { getActiveSessionRole, getStoredSessionUser } from '../../lib/auth-session';
 import {
   fetchDriverAnalytics,
   fetchDriverAnalyticsLeaderboard,
@@ -107,8 +108,7 @@ export default function DriverPerformance() {
   const [isLoading, setIsLoading] = useState(true);
   const [pageError, setPageError] = useState('');
 
-  const sessionUser = localStorage.getItem('flux_user');
-  const currentRole = sessionUser ? JSON.parse(sessionUser).role : null;
+  const currentRole = getActiveSessionRole(getStoredSessionUser());
 
   useEffect(() => {
     if (currentRole === 'driver') {

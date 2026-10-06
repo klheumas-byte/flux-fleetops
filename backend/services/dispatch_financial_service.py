@@ -545,7 +545,7 @@ def _sync_financial_record(document: dict, *, job_document: dict | None = None, 
     expenses = list(dispatch_financial_expenses_collection().find({"dispatch_financial_id": document["_id"]}))
     incidents = list(dispatch_financial_incidents_collection().find({"dispatch_financial_id": document["_id"]}))
     dispatch_fuel_logs = list(
-        fuel_logs_collection().find({"dispatch_job_id": job["_id"], "status": "approved"})
+        fuel_logs_collection().find({"dispatch_job_id": job["_id"], "status": {"$in": ["approved", "recorded"]}})
     )
     approved_dispatch_fuel_cost = sum(float(item.get("amount") or 0) for item in dispatch_fuel_logs)
     approved_legacy_fuel_expenses = round(

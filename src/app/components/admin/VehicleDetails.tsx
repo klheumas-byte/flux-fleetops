@@ -13,6 +13,7 @@ import {
   Wrench,
 } from 'lucide-react';
 import { apiRequest, apiRequestSafe, ApiRequestError, isRequestAborted } from '../../lib/api';
+import { getActiveSessionRole, getStoredSessionUser } from '../../lib/auth-session';
 import { FuelGaugeSelector } from '../shared/FuelGaugeSelector';
 import { usePageToastFeedback } from '../../lib/use-page-toast-feedback';
 
@@ -462,8 +463,7 @@ function resolveVehicleDetailsError(error: unknown) {
 }
 
 export default function VehicleDetails({ vehicleId, onBack, onMissingRecord }: VehicleDetailsProps) {
-  const storedUser = typeof window !== 'undefined' ? localStorage.getItem('flux_user') : null;
-  const currentUserRole = storedUser ? JSON.parse(storedUser).role : null;
+  const currentUserRole = getActiveSessionRole(getStoredSessionUser());
   const [activeTab, setActiveTab] = useState<DetailTab>('overview');
   const [vehicle, setVehicle] = useState<Vehicle | null>(null);
   const [maintenance, setMaintenance] = useState<PreventiveSchedule[]>([]);

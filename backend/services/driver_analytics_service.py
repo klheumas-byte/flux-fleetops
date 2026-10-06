@@ -322,7 +322,7 @@ def _serialize_driver_analytics(
     if vehicle_filter:
         fuel_logs = [item for item in fuel_logs if item.get("vehicle_id") == vehicle_filter]
     fuel_logs = [item for item in fuel_logs if _datetime_in_range(item.get("fuel_date"), start_dt, end_dt)]
-    approved_fuel_logs = [item for item in fuel_logs if item.get("status") == "approved"]
+    approved_fuel_logs = [item for item in fuel_logs if item.get("status") in {"approved", "recorded"}]
     fuel_spend = round(sum(float(item.get("amount") or 0) for item in approved_fuel_logs), 2)
     fuel_costs_per_km = [
         float(item.get("cost_per_km"))
@@ -567,7 +567,7 @@ def _global_average_cost_per_km(drivers: list[dict], filters: dict) -> float | N
     driver_ids = [item["_id"] for item in drivers]
     query: dict = {
         "driver_id": {"$in": driver_ids},
-        "status": "approved",
+        "status": {"$in": ["approved", "recorded"]},
     }
     if vehicle_filter:
         query["vehicle_id"] = vehicle_filter

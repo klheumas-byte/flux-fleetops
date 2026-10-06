@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from math import ceil
 from uuid import uuid4
@@ -18,6 +19,7 @@ from services.notification_service import create_notification, notify_roles, res
 from services.rbac_service import user_has_permission
 from services.vehicle_availability_service import resolve_many, resolve_vehicle_availability
 from utils.api_error import ApiError
+from utils.file_validation import validate_file_reference
 from utils.mongo_indexes import ensure_indexes_for_collection
 from utils.operational_request_types import (
     PERSONAL_USE_CATEGORY,
@@ -88,6 +90,10 @@ LIST_PROJECTION = {
     "destination_acceptance": 1,
     "no_purchase_reason": 1,
     "fuel_log_id": 1,
+    "fuel_instruction": 1,
+    "arrived_at": 1,
+    "verification_status": 1,
+    "flag_reason": 1,
     "acknowledged_at": 1,
     "opening_check_completed_at": 1,
     "started_at": 1,
@@ -248,10 +254,13 @@ def ensure_vehicle_operation_request_indexes():
         [
             {"keys": [("request_id", ASCENDING)], "options": {"unique": True}},
             {"keys": [("status", ASCENDING), ("created_at", DESCENDING)]},
+            {"keys": [("created_at", DESCENDING), ("_id", DESCENDING)]},
             {"keys": [("operation_type", ASCENDING), ("status", ASCENDING), ("planned_departure_at", ASCENDING)]},
             {"keys": [("driver_id", ASCENDING), ("status", ASCENDING), ("planned_departure_at", ASCENDING)], "options": {"sparse": True}},
+            {"keys": [("driver_id", ASCENDING), ("created_at", DESCENDING), ("_id", DESCENDING)], "options": {"sparse": True}},
             {"keys": [("vehicle_id", ASCENDING), ("status", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("linked_vehicle_movement_id", ASCENDING)], "options": {"sparse": True}},
+            {"keys": [("fuel_instruction.idempotency_key", ASCENDING)], "options": {"unique": True, "sparse": True}},
             {
                 "keys": [("related_source_key", ASCENDING)],
                 "options": {"sparse": True},
@@ -304,16 +313,23 @@ def _serialize_with_relations(documents: list[dict], *, include_evidence: bool =
         for value in (item.get("driver_id"), item.get("requested_by"), item.get("approved_by"))
         if isinstance(value, ObjectId)
     }
-    vehicles = {item["_id"]: item for item in vehicles_collection().find({"_id": {"$in": list(vehicle_ids)}}, {"registration_number": 1, "make": 1, "model": 1, "vehicle_type": 1})} if vehicle_ids else {}
-    users = {item["_id"]: item for item in users_collection().find({"_id": {"$in": list(user_ids)}}, {"full_name": 1, "role": 1})} if user_ids else {}
     movement_ids = {
         item.get("linked_vehicle_movement_id")
         for item in documents
         if isinstance(item.get("linked_vehicle_movement_id"), ObjectId)
     }
-    movements = {
-        item["_id"]: item
-        for item in movements_collection().find(
+    vehicle_collection = vehicles_collection()
+    user_collection = users_collection()
+    movement_collection = movements_collection()
+
+    def load_vehicles():
+        return list(vehicle_collection.find({"_id": {"$in": list(vehicle_ids)}}, {"registration_number": 1, "make": 1, "model": 1, "vehicle_type": 1})) if vehicle_ids else []
+
+    def load_users():
+        return list(user_collection.find({"_id": {"$in": list(user_ids)}}, {"full_name": 1, "role": 1})) if user_ids else []
+
+    def load_movements():
+        return list(movement_collection.find(
             {"_id": {"$in": list(movement_ids)}},
             {
                 "status": 1,
@@ -323,8 +339,15 @@ def _serialize_with_relations(documents: list[dict], *, include_evidence: bool =
                 "checked_out_by": 1,
                 "driver_id": 1,
             },
-        )
-    } if movement_ids else {}
+        )) if movement_ids else []
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        vehicle_future = executor.submit(load_vehicles)
+        user_future = executor.submit(load_users)
+        movement_future = executor.submit(load_movements)
+        vehicles = {item["_id"]: item for item in vehicle_future.result()}
+        users = {item["_id"]: item for item in user_future.result()}
+        movements = {item["_id"]: item for item in movement_future.result()}
     result = []
     for document in documents:
         movement = movements.get(document.get("linked_vehicle_movement_id"))
@@ -449,7 +472,7 @@ def _normalize_create(payload: dict) -> dict:
     }
 
 
-def create_operational_request(payload: dict, *, current_user_id: str, current_role: str) -> dict:
+def create_operational_request(payload: dict, *, current_user_id: str, current_role: str, initial_fields: dict | None = None) -> dict:
     normalized = _normalize_create(payload or {})
     personal_use = normalized["operation_type"] == "personal_use"
     if personal_use:
@@ -495,6 +518,8 @@ def create_operational_request(payload: dict, *, current_user_id: str, current_r
         "created_at": timestamp,
         "updated_at": timestamp,
     }
+    if initial_fields:
+        document.update(initial_fields)
     if personal_use:
         _assert_personal_use_window_available(document)
     if document.get("related_source_key") and requests_collection().find_one(
@@ -509,6 +534,93 @@ def create_operational_request(payload: dict, *, current_user_id: str, current_r
     if status == "pending_approval":
         _notify_approval_needed(document)
     return _serialize_with_relations([document], include_evidence=True)[0]
+
+
+def _positive_number(value, field: str, *, required: bool = False):
+    if value in (None, "") and not required:
+        return None
+    if isinstance(value, bool):
+        raise ApiError(f"{field} must be a positive number.", status_code=400)
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ApiError(f"{field} must be a positive number.", status_code=400) from exc
+    if number <= 0:
+        raise ApiError(f"{field} must be a positive number.", status_code=400)
+    return round(number, 2)
+
+
+def create_fuel_instruction(payload: dict, *, current_user_id: str, current_role: str) -> dict:
+    """Create an approved, assigned Fuel Instruction on the existing request/task spine."""
+    if current_role not in {"owner", "admin"}:
+        raise ApiError("Only an Owner or Admin can authorize fuel instructions.", status_code=403)
+    idempotency_key = _text(payload.get("idempotency_key"), required=True, field="idempotency_key")
+    existing = requests_collection().find_one({"fuel_instruction.idempotency_key": idempotency_key})
+    if existing:
+        return _serialize_with_relations([existing], include_evidence=True)[0]
+    actor_id = _object_id(current_user_id, "current_user_id")
+    vehicle_id = _object_id(payload.get("vehicle_id"), "vehicle_id")
+    driver_id = _object_id(payload.get("driver_id"), "driver_id")
+    vehicle, _ = _validate_vehicle_driver(vehicle_id, driver_id)
+    if vehicle.get("personal_owner_user_id") or vehicle.get("record_scope") == "personal":
+        raise ApiError("Fuel Instructions are limited to company operating vehicles.", status_code=400)
+    assignment = get_collection("assignments").find_one({"vehicle_id": vehicle_id, "status": "active"})
+    if assignment:
+        if assignment.get("driver_id") != driver_id:
+            raise ApiError("Selected driver does not match the vehicle's active assignment.", status_code=409)
+        from services.payment_cycle_service import agreement_from_assignment
+        agreement = agreement_from_assignment(assignment)
+        if agreement.get("status") == "active" and float(agreement.get("weekly_amount") or 0) > 0:
+            raise ApiError("Company-funded Fuel Instructions cannot be assigned to an active Weekly Remittance vehicle.", status_code=409)
+    from services.finance_account_service import get_finance_account_document
+    from models.finance_account import serialize_finance_account_snapshot
+    account = get_finance_account_document(payload.get("finance_account_id"))
+    if account.get("status") != "active" or account.get("account_type") not in {"cash", "momo", "bank"}:
+        raise ApiError("Select an active Cash, MoMo, or Bank treasury account.", status_code=400)
+    authorized_amount = _positive_number(payload.get("authorized_amount"), "authorized_amount")
+    authorized_litres = _positive_number(payload.get("authorized_litres"), "authorized_litres")
+    if authorized_amount is None and authorized_litres is None:
+        raise ApiError("Provide an authorized amount or authorized litres.", status_code=400)
+    station_id = _object_id(payload.get("fuel_station_id"), "fuel_station_id", required=False)
+    station = get_collection("fuel_stations").find_one({"_id": station_id, "status": "active"}) if station_id else None
+    if station_id and not station:
+        raise ApiError("Active fuel station not found.", status_code=404)
+    station_name = _text(payload.get("station_name")) or (station or {}).get("station_name")
+    departure = _datetime(payload.get("planned_departure_at"), "planned_departure_at") or now_utc()
+    expected_return = _datetime(payload.get("expected_return_at"), "expected_return_at") or departure + timedelta(hours=4)
+    registration = vehicle.get("registration_number") or "vehicle"
+    authorization_label = f"GHS {authorized_amount:,.2f}" if authorized_amount is not None else f"{authorized_litres:g} L"
+    title = f"Fuel Vehicle — {registration} — {authorization_label}" + (f" — {station_name}" if station_name else "")
+    timestamp = now_utc()
+    instruction = {
+        "classification": "operational_company_funded", "idempotency_key": idempotency_key,
+        "authorized_amount": authorized_amount, "authorized_litres": authorized_litres,
+        "finance_account_id": account["_id"], "finance_account_snapshot": serialize_finance_account_snapshot(account),
+        "fuel_station_id": station_id, "station_name": station_name,
+        "linked_job_type": _text(payload.get("linked_job_type")),
+        "linked_job_id": _object_id(payload.get("linked_job_id"), "linked_job_id", required=False),
+        "authorized_by": actor_id, "authorized_at": timestamp,
+        "actual_amount": None, "actual_litres": None, "expense_id": None,
+        "treasury_ledger_entry_id": None, "posting_status": "not_posted",
+    }
+    created = create_operational_request({
+        "operation_type": "fuel_station_visit", "title": title,
+        "purpose": _text(payload.get("purpose")) or "Company-funded fuel purchase",
+        "origin": _text(payload.get("origin")) or "Company custody",
+        "destination": station_name or "Authorized fuel station",
+        "journey_mode": "round_trip", "planned_departure_at": departure,
+        "expected_return_at": expected_return, "notes": _text(payload.get("notes")),
+        "related_source_type": _text(payload.get("linked_job_type")),
+        "related_source_id": payload.get("linked_job_id"), "submit_for_approval": True,
+    }, current_user_id=current_user_id, current_role=current_role, initial_fields={
+        "fuel_instruction": instruction, "verification_status": "assigned",
+    })
+    request_oid = _object_id(created["id"], "request_id")
+    approve_operational_request(str(request_oid), {}, current_user_id=current_user_id, current_role=current_role)
+    return schedule_operational_request(str(request_oid), {
+        "vehicle_id": str(vehicle_id), "driver_id": str(driver_id),
+        "planned_departure_at": departure, "expected_return_at": expected_return,
+    }, current_user_id=current_user_id, current_role=current_role)
 
 
 def list_operational_requests(*, current_user_id: str, current_role: str, page=1, page_size=25, status=None, operation_type=None) -> dict:
@@ -532,8 +644,16 @@ def list_operational_requests(*, current_user_id: str, current_role: str, page=1
         )
     page = max(int(page or 1), 1)
     page_size = min(max(int(page_size or 25), 1), 100)
-    total = requests_collection().count_documents(query)
-    documents = list(requests_collection().find(query, LIST_PROJECTION).sort([("created_at", DESCENDING), ("_id", DESCENDING)]).skip((page - 1) * page_size).limit(page_size))
+    collection = requests_collection()
+
+    def load_page():
+        return list(collection.find(query, LIST_PROJECTION).sort([("created_at", DESCENDING), ("_id", DESCENDING)]).skip((page - 1) * page_size).limit(page_size))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        total_future = executor.submit(collection.count_documents, query)
+        documents_future = executor.submit(load_page)
+        total = total_future.result()
+        documents = documents_future.result()
     return {"requests": _serialize_with_relations(documents), "pagination": {"page": page, "page_size": page_size, "total": total, "total_pages": max(1, ceil(total / page_size))}}
 
 
@@ -755,6 +875,9 @@ def _ensure_request_movement(document: dict, *, current_user_id: str) -> dict:
         source_record_id=document["_id"],
         source_reference=document.get("request_id"),
         existing_movement=existing,
+        replace_terminal=True,
+        recovery_actor_id=current_user_id,
+        recovery_reason="Operational Request is active and requires a movement.",
         movement_defaults={
             "vehicle_id": document["vehicle_id"],
             "driver_id": document.get("driver_id"),
@@ -1065,6 +1188,25 @@ def start_operational_request(request_id: str, payload: dict, *, current_user_id
     return _serialize_with_relations([document])[0]
 
 
+def arrive_operational_request(request_id: str, *, current_user_id: str, current_role: str) -> dict:
+    document = _get_request(request_id)
+    _assert_access(document, current_user_id=current_user_id, current_role=current_role)
+    if document.get("operation_type") != "fuel_station_visit" or not document.get("fuel_instruction"):
+        raise ApiError("Arrival is only available for Fuel Instructions.", status_code=400)
+    if document.get("arrived_at"):
+        return _serialize_with_relations([document])[0]
+    if document.get("status") != "movement_in_progress":
+        raise ApiError("Start the movement before recording arrival.", status_code=400)
+    timestamp = now_utc()
+    actor_id = _object_id(current_user_id, "current_user_id")
+    updates = {"arrived_at": timestamp, "arrived_by": actor_id, "updated_at": timestamp,
+               "version": int(document.get("version") or 1) + 1}
+    requests_collection().update_one({"_id": document["_id"], "arrived_at": None},
+                                     {"$set": updates, "$push": {"status_history": _status_event("arrived", actor_id, "Arrived at fuel station", timestamp)}})
+    document.update(updates)
+    return _serialize_with_relations([document])[0]
+
+
 def confirm_operational_task(request_id: str, payload: dict, *, current_user_id: str, current_role: str) -> dict:
     document = _get_request(request_id)
     _assert_access(document, current_user_id=current_user_id, current_role=current_role)
@@ -1078,21 +1220,90 @@ def confirm_operational_task(request_id: str, payload: dict, *, current_user_id:
         confirmation["receiver_name"] = _text(payload.get("receiver_name"), required=True, field="receiver_name")
         updates["receiver_confirmation"] = confirmation
     elif operation_type == "fuel_station_visit":
-        fuel_log_id = _object_id(payload.get("fuel_log_id"), "fuel_log_id", required=False)
-        no_purchase_reason = _text(payload.get("no_purchase_reason"))
-        if not fuel_log_id and not no_purchase_reason:
-            raise ApiError("Provide a linked fuel log or a no-purchase reason.", status_code=400)
-        if fuel_log_id:
-            fuel_log = get_collection("fuel_logs").find_one({"_id": fuel_log_id})
-            if not fuel_log or fuel_log.get("vehicle_id") != document.get("vehicle_id"):
-                raise ApiError("Fuel log does not belong to this vehicle.", status_code=409)
-            movement_id = document.get("linked_vehicle_movement_id")
-            if fuel_log.get("movement_id") not in {None, movement_id}:
-                raise ApiError("Fuel log is already linked to another movement.", status_code=409)
-            get_collection("fuel_logs").update_one({"_id": fuel_log_id}, {"$set": {"movement_id": movement_id, "updated_at": timestamp}})
-            updates["fuel_log_id"] = fuel_log_id
-        updates["no_purchase_reason"] = no_purchase_reason
-        updates["task_confirmation"] = confirmation
+        instruction = document.get("fuel_instruction")
+        if instruction:
+            if current_role != "driver":
+                raise ApiError("Only the assigned driver can submit Fuel Instruction proof.", status_code=403)
+            actual_amount = _positive_number(payload.get("actual_amount"), "actual_amount", required=True)
+            actual_litres = _positive_number(payload.get("actual_litres"), "actual_litres", required=True)
+            odometer = _positive_number(payload.get("odometer_reading"), "odometer_reading", required=True)
+            receipt = validate_file_reference(payload.get("receipt_image"), field_name="receipt_image", file_name="fuel-receipt.png")
+            if not receipt:
+                raise ApiError("receipt_image is required for a Fuel Instruction.", status_code=400)
+            discrepancy_notes = _text(payload.get("discrepancy_notes"))
+            amount_changed = instruction.get("authorized_amount") is not None and actual_amount != float(instruction["authorized_amount"])
+            litres_changed = instruction.get("authorized_litres") is not None and actual_litres != float(instruction["authorized_litres"])
+            if (amount_changed or litres_changed) and not discrepancy_notes:
+                raise ApiError("Explain the difference between authorized and actual fuel values.", status_code=400)
+            fuel_date = str(payload.get("fuel_date") or timestamp.date().isoformat())[:10]
+            station_id = _object_id(payload.get("actual_fuel_station_id"), "actual_fuel_station_id", required=False)
+            actual_station = get_collection("fuel_stations").find_one({"_id": station_id, "status": "active"}) if station_id else None
+            if station_id and not actual_station:
+                raise ApiError("Selected actual fuel station is inactive or unavailable.", status_code=404)
+            station_name = _text(payload.get("actual_station_name")) or (actual_station or {}).get("station_name")
+            if not station_name:
+                raise ApiError("Record the actual fuel station used.", status_code=400)
+            station_branch = _text(payload.get("station_branch"), required=True, field="station branch/location")
+            existing = get_collection("fuel_logs").find_one({"fuel_instruction_id": document["_id"]})
+            fuel_values = {
+                "vehicle_id": document["vehicle_id"], "driver_id": document["driver_id"],
+                "assignment_id": None, "dispatch_job_id": None,
+                "movement_id": document.get("linked_vehicle_movement_id"), "fuel_instruction_id": document["_id"],
+                "fuel_classification": "operational_fuel",
+                "fuel_station_id": station_id, "station_name": station_name,
+                "station_branch": station_branch, "station_location": station_branch,
+                "fuel_date": fuel_date, "fuel_type": _text(payload.get("fuel_type")) or "petrol",
+                "litres": actual_litres, "amount": actual_amount,
+                "price_per_litre": round(actual_amount / actual_litres, 2),
+                "payment_method": {"momo": "mobile_money", "bank": "company_card", "cash": "cash"}.get((instruction.get("finance_account_snapshot") or {}).get("account_type"), "other"),
+                "payment_responsibility": "company_paid", "fuel_recorded_at": timestamp,
+                "odometer_reading": odometer, "odometer_source": "manual", "fuel_level": None,
+                "receipt_image": receipt, "notes": _text(payload.get("notes")), "status": "submitted",
+                "submitted_by": _object_id(current_user_id, "current_user_id"), "approved_by": None,
+                "recorded_by": None, "recorded_at": None, "rejected_by": None, "rejection_reason": None,
+                "updated_at": timestamp,
+            }
+            if existing:
+                if document.get("verification_status") != "flagged":
+                    raise ApiError("Fuel proof has already been submitted.", status_code=409)
+                get_collection("fuel_logs").update_one({"_id": existing["_id"], "status": "submitted"}, {"$set": fuel_values})
+                fuel_log_id = existing["_id"]
+            else:
+                fuel_values["created_at"] = timestamp
+                fuel_log_id = get_collection("fuel_logs").insert_one(fuel_values).inserted_id
+            confirmation.update({"actual_amount": actual_amount, "actual_litres": actual_litres,
+                                 "odometer_reading": odometer, "receipt_image": receipt,
+                                 "discrepancy_notes": discrepancy_notes,
+                                 "actual_fuel_station_id": station_id, "actual_station_name": station_name,
+                                 "station_branch": station_branch})
+            updates.update({"fuel_log_id": fuel_log_id, "task_confirmation": confirmation,
+                            "verification_status": "submitted", "flag_reason": None,
+                            "fuel_instruction.actual_amount": actual_amount,
+                            "fuel_instruction.actual_litres": actual_litres,
+                            "fuel_instruction.odometer_reading": odometer,
+                            "fuel_instruction.actual_fuel_station_id": station_id,
+                            "fuel_instruction.actual_station_name": station_name,
+                            "fuel_instruction.actual_station_branch": station_branch,
+                            "fuel_instruction.receipt_image": receipt,
+                            "fuel_instruction.discrepancy_notes": confirmation["discrepancy_notes"],
+                            "fuel_instruction.submitted_at": timestamp,
+                            "fuel_instruction.submitted_by": _object_id(current_user_id, "current_user_id")})
+        else:
+            fuel_log_id = _object_id(payload.get("fuel_log_id"), "fuel_log_id", required=False)
+            no_purchase_reason = _text(payload.get("no_purchase_reason"))
+            if not fuel_log_id and not no_purchase_reason:
+                raise ApiError("Provide a linked fuel log or a no-purchase reason.", status_code=400)
+            if fuel_log_id:
+                fuel_log = get_collection("fuel_logs").find_one({"_id": fuel_log_id})
+                if not fuel_log or fuel_log.get("vehicle_id") != document.get("vehicle_id"):
+                    raise ApiError("Fuel log does not belong to this vehicle.", status_code=409)
+                movement_id = document.get("linked_vehicle_movement_id")
+                if fuel_log.get("movement_id") not in {None, movement_id}:
+                    raise ApiError("Fuel log is already linked to another movement.", status_code=409)
+                get_collection("fuel_logs").update_one({"_id": fuel_log_id}, {"$set": {"movement_id": movement_id, "updated_at": timestamp}})
+                updates["fuel_log_id"] = fuel_log_id
+            updates["no_purchase_reason"] = no_purchase_reason
+            updates["task_confirmation"] = confirmation
     elif operation_type == "compliance_inspection_visit":
         confirmation["outcome"] = _text(payload.get("outcome"), required=True, field="inspection outcome")
         confirmation["compliance_record_id"] = document.get("related_source_id")
@@ -1107,6 +1318,44 @@ def confirm_operational_task(request_id: str, payload: dict, *, current_user_id:
     requests_collection().update_one({"_id": document["_id"]}, {"$set": updates})
     document.update(updates)
     return _serialize_with_relations([document])[0]
+
+
+def complete_fuel_instruction_task(request_id: str, payload: dict, *, current_user_id: str, current_role: str) -> dict:
+    """Record driver proof and return the linked movement as one retry-safe action."""
+    document = _get_request(request_id)
+    _assert_access(document, current_user_id=current_user_id, current_role=current_role)
+    if current_role != "driver":
+        raise ApiError("Only the assigned driver can complete a Fuel Instruction.", status_code=403)
+    if document.get("operation_type") != "fuel_station_visit" or not document.get("fuel_instruction"):
+        raise ApiError("This task is not a Fuel Instruction.", status_code=400)
+    if document.get("status") == "awaiting_verification" and document.get("verification_status") != "flagged":
+        return _serialize_with_relations([document])[0]
+    if document.get("status") not in {"movement_in_progress", "awaiting_verification"}:
+        raise ApiError("Start the Fuel Instruction before completing it.", status_code=400)
+
+    # If proof was saved but returning the movement failed, a retry must resume
+    # from the return step instead of creating or rejecting a duplicate fuel log.
+    if not document.get("task_confirmation") or document.get("verification_status") == "flagged":
+        confirm_operational_task(
+            request_id,
+            payload,
+            current_user_id=current_user_id,
+            current_role=current_role,
+        )
+        document = _get_request(request_id)
+
+    if document.get("status") == "awaiting_verification":
+        return _serialize_with_relations([document])[0]
+    return return_operational_request(
+        request_id,
+        {
+            "closing_fuel_level": payload.get("closing_fuel_level"),
+            "closing_odometer": payload.get("odometer_reading"),
+            "notes": payload.get("notes"),
+        },
+        current_user_id=current_user_id,
+        current_role=current_role,
+    )
 
 
 def return_operational_request(request_id: str, payload: dict, *, current_user_id: str, current_role: str) -> dict:
@@ -1191,7 +1440,8 @@ def _assert_completion_evidence(document: dict):
         )
         if not fuel_log or fuel_log.get("movement_id") != document.get("linked_vehicle_movement_id"):
             raise ApiError("Linked fuel log does not belong to this movement.", status_code=409)
-        if fuel_log.get("status") not in {"approved", "rejected"}:
+        allowed_statuses = {"submitted"} if document.get("fuel_instruction") else {"approved", "recorded", "rejected"}
+        if fuel_log.get("status") not in allowed_statuses:
             raise ApiError("Fuel log review must finish before operational verification.", status_code=400)
     if operation_type in {"compliance_inspection_visit", "administrative_errand"} and not document.get("task_confirmation"):
         raise ApiError("Task or inspection confirmation is required before verification.", status_code=400)
@@ -1234,6 +1484,30 @@ def verify_operational_request(request_id: str, payload: dict, *, current_user_i
         return _serialize_with_relations([document])[0]
     if document.get("status") != "awaiting_verification":
         raise ApiError("This request is not awaiting verification.", status_code=400)
+    is_fuel_instruction = document.get("operation_type") == "fuel_station_visit" and bool(document.get("fuel_instruction"))
+    if is_fuel_instruction and current_role not in {"owner", "admin"}:
+        raise ApiError("Only an Owner or Admin can verify a Fuel Instruction.", status_code=403)
+    decision = str(payload.get("decision") or "verified").strip().lower()
+    if is_fuel_instruction and decision == "flagged":
+        reason = _text(payload.get("reason") or payload.get("notes"), required=True, field="flag reason")
+        timestamp = now_utc()
+        actor_id = _object_id(current_user_id, "current_user_id")
+        updates = {"verification_status": "flagged", "flag_reason": reason, "flagged_by": actor_id,
+                   "flagged_at": timestamp, "updated_at": timestamp,
+                   "version": int(document.get("version") or 1) + 1}
+        requests_collection().update_one({"_id": document["_id"], "status": "awaiting_verification"},
+            {"$set": updates, "$push": {"status_history": _status_event("flagged", actor_id, reason, timestamp)}})
+        document.update(updates)
+        create_notification(document["driver_id"], "Fuel Instruction proof flagged", reason,
+            category="fuel", module="my-operational-tasks", priority="high",
+            reference_type="vehicle_operation_request", reference_id=document["_id"],
+            action_type="correct_fuel_instruction", action_url="my-operational-tasks",
+            action_label="Correct proof", dedupe_key=f"fuel-instruction:{document['_id']}:flag:{int(timestamp.timestamp())}")
+        return _serialize_with_relations([document])[0]
+    if is_fuel_instruction and decision != "verified":
+        raise ApiError("decision must be verified or flagged.", status_code=400)
+    if is_fuel_instruction and document.get("verification_status") == "flagged":
+        raise ApiError("The assigned driver must correct the flagged Fuel Purchase before verification.", status_code=409)
     _assert_completion_evidence(document)
     movement = _get_linked_movement_for_verification(document)
     movement_status = movement.get("status")
@@ -1260,6 +1534,67 @@ def verify_operational_request(request_id: str, payload: dict, *, current_user_i
             "Linked vehicle movement must be returned before completion can be verified.",
             status_code=409,
         )
+    if is_fuel_instruction:
+        from services.expense_service import create_paid_fuel_instruction_expense
+        from services.finance_account_service import decrement_finance_account_balance, run_finance_transaction
+        actor_id = _object_id(current_user_id, "current_user_id")
+        fuel_log = get_collection("fuel_logs").find_one({"_id": document["fuel_log_id"]})
+        timestamp = now_utc()
+
+        def finalize(session):
+            kwargs = {"session": session} if session else {}
+            latest = requests_collection().find_one({"_id": document["_id"]}, **kwargs)
+            if latest.get("status") == "completed":
+                return latest
+            if latest.get("status") != "awaiting_verification" or (latest.get("fuel_instruction") or {}).get("posting_status") == "posted":
+                raise ApiError("Fuel Instruction posting state changed. Refresh and try again.", status_code=409)
+            expense = create_paid_fuel_instruction_expense(
+                fuel_log=fuel_log, request_document=latest, actor_id=actor_id,
+                actor_role=current_role, session=session,
+            )
+            ledger = decrement_finance_account_balance(
+                latest["fuel_instruction"]["finance_account_id"], fuel_log["amount"], actor_id=actor_id,
+                reference_type="fuel_instruction_expense", reference_id=latest["_id"],
+                effective_date=fuel_log.get("fuel_date"), session=session,
+            )
+            fuel_result = get_collection("fuel_logs").update_one(
+                {"_id": fuel_log["_id"], "status": "submitted"},
+                {"$set": {"status": "approved", "approved_by": actor_id, "approved_at": timestamp,
+                          "expense_id": expense["_id"], "updated_at": timestamp}}, **kwargs)
+            if fuel_result.matched_count != 1:
+                raise ApiError("Fuel record changed during verification.", status_code=409)
+            updates = {"status": "completed", "verification_status": "verified", "verified_by": actor_id,
+                       "verified_at": timestamp, "verification_notes": _text(payload.get("notes")),
+                       "fuel_instruction.expense_id": expense["_id"],
+                       "fuel_instruction.treasury_ledger_entry_id": ledger["_id"],
+                       "fuel_instruction.posting_status": "posted", "completed_at": timestamp,
+                       "updated_at": timestamp, "version": int(latest.get("version") or 1) + 1}
+            request_result = requests_collection().update_one(
+                {"_id": latest["_id"], "status": "awaiting_verification", "fuel_instruction.posting_status": {"$ne": "posted"}},
+                {"$set": updates, "$push": {"status_history": _status_event("completed", actor_id, "Fuel Instruction verified and posted", timestamp)}}, **kwargs)
+            if request_result.matched_count != 1:
+                raise ApiError("Fuel Instruction was verified concurrently.", status_code=409)
+            latest.update(updates)
+            return latest
+
+        completed = run_finance_transaction(finalize)
+        get_collection("vehicles").update_one(
+            {"_id": completed["vehicle_id"], "fuel_history.fuel_log_id": {"$ne": fuel_log["_id"]}},
+            {"$push": {"fuel_history": {"fuel_log_id": fuel_log["_id"], "fuel_date": fuel_log.get("fuel_date"),
+                                         "fuel_type": fuel_log.get("fuel_type"), "litres": fuel_log.get("litres"),
+                                         "amount": fuel_log.get("amount"), "price_per_litre": fuel_log.get("price_per_litre"),
+                                         "odometer_reading": fuel_log.get("odometer_reading"), "fuel_station_id": fuel_log.get("fuel_station_id"),
+                                         "station_name": fuel_log.get("station_name"), "station_branch": fuel_log.get("station_branch"),
+                                         "station_location": fuel_log.get("station_location")}},
+             "$set": {"updated_at": timestamp}},
+        )
+        resolve_action_notifications("vehicle_operation_request", document["_id"], resolution="completed", completed_by=current_user_id)
+        resolve_action_notifications("fuel_log", fuel_log["_id"], action_type="review_fuel_log", completed_by=current_user_id)
+        create_notification(document["driver_id"], "Fuel Instruction verified",
+            f"{document.get('request_id')} was verified and the fuel expense was recorded.",
+            category="fuel", module="my-operational-tasks", priority="medium",
+            reference_type="vehicle_operation_request", reference_id=document["_id"])
+        return _serialize_with_relations([_get_request(request_id)])[0]
     timestamp = now_utc()
     updates = {"status": "completed", "verified_by": _object_id(current_user_id, "current_user_id"), "verified_at": timestamp, "verification_notes": _text(payload.get("notes")), "updated_at": timestamp, "version": int(document.get("version") or 1) + 1}
     update_result = requests_collection().update_one(
@@ -1519,7 +1854,7 @@ def get_personal_use_analytics(
     }
 
 
-def list_operational_request_options(*, current_role: str, current_user_id: str | None = None, planned_departure_at=None, expected_return_at=None) -> dict:
+def list_operational_request_options(*, current_role: str, current_user_id: str | None = None, planned_departure_at=None, expected_return_at=None, include_availability: bool = True) -> dict:
     if current_role not in OPERATIONS_ROLES | {"driver"}:
         raise ApiError("You do not have permission to view operational request options.", status_code=403)
     departure = _datetime(planned_departure_at, "planned_departure_at")
@@ -1528,15 +1863,37 @@ def list_operational_request_options(*, current_role: str, current_user_id: str 
         raise ApiError("planned_departure_at and expected_return_at must be provided together.", status_code=400)
     if departure and expected_return <= departure:
         raise ApiError("expected_return_at must be after planned_departure_at.", status_code=400)
-    vehicles = list(vehicles_collection().find({"status": {"$nin": ["retired"]}, "personal_owner_user_id": None, "record_scope": {"$ne": "personal"}}, {"registration_number": 1, "make": 1, "model": 1, "vehicle_type": 1, "status": 1, "assigned_driver_id": 1}).sort("registration_number", ASCENDING))
+    vehicles = list(vehicles_collection().find({"status": {"$nin": ["retired"]}, "personal_owner_user_id": None, "record_scope": {"$ne": "personal"}}, {"registration_number": 1, "make": 1, "model": 1, "vehicle_type": 1, "status": 1, "assigned_driver_id": 1, "current_custodian_id": 1, "manual_availability_status": 1, "manual_availability_reason": 1, "manual_availability_note": 1}).sort("registration_number", ASCENDING))
     actor_id = _object_id(current_user_id, "current_user_id", required=False) if current_user_id else None
     if current_role == "driver" and actor_id:
         vehicles.sort(key=lambda item: (item.get("assigned_driver_id") != actor_id, item.get("registration_number") or ""))
-    availability_by_vehicle = resolve_many(
-        [item["_id"] for item in vehicles],
-        context={"start_time": departure, "end_time": expected_return} if departure else None,
-    )
+    if include_availability:
+        availability_by_vehicle = resolve_many(
+            [item["_id"] for item in vehicles],
+            context={"start_time": departure, "end_time": expected_return} if departure else None,
+            vehicle_documents=vehicles,
+        )
+    else:
+        availability_by_vehicle = {
+            str(item["_id"]): {
+                "is_available": item.get("status") in {None, "active", "available", "assigned"}
+                and item.get("manual_availability_status") != "temporarily_unavailable",
+                "operational_state": item.get("status") or "available",
+                "primary_reason": (
+                    str(item.get("manual_availability_reason") or "Temporarily unavailable").replace("_", " ").title()
+                    if item.get("manual_availability_status") == "temporarily_unavailable"
+                    else None
+                ),
+            }
+            for item in vehicles
+        }
     drivers = list(users_collection().find({"role": "driver", "status": "active", "driver_profile.approval_status": "approved"}, {"full_name": 1}).sort("full_name", ASCENDING))
+    accounts = []
+    stations = []
+    if current_role in {"owner", "admin"}:
+        accounts = list(get_collection("finance_accounts").find({"status": "active"}, {"account_name": 1, "account_type": 1, "provider_name": 1}).sort("account_name", ASCENDING))
+    if current_role in {"owner", "admin", "driver"}:
+        stations = list(get_collection("fuel_stations").find({"status": "active"}, {"station_name": 1, "brand_name": 1}).sort("station_name", ASCENDING))
     return {
         "operation_types": [PERSONAL_USE_TYPE] if current_role == "driver" else sorted(OPERATION_TYPES - {PERSONAL_USE_TYPE}),
         "statuses": sorted(REQUEST_STATUSES),
@@ -1554,4 +1911,6 @@ def list_operational_request_options(*, current_role: str, current_user_id: str 
             "requires_approval": True,
         } for item in vehicles],
         "drivers": [{"id": str(item["_id"]), "full_name": item.get("full_name")} for item in drivers],
+        "finance_accounts": [{"id": str(item["_id"]), "account_name": item.get("account_name"), "account_type": item.get("account_type"), "provider_name": item.get("provider_name")} for item in accounts],
+        "fuel_stations": [{"id": str(item["_id"]), "station_name": item.get("station_name"), "brand_name": item.get("brand_name")} for item in stations],
     }

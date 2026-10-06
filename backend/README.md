@@ -102,7 +102,15 @@ SECRET_KEY=<long-random-secret>
 JWT_SECRET_KEY=<long-random-jwt-secret>
 MONGO_URI=<production-mongodb-uri>
 CORS_ORIGINS=https://your-frontend-domain.com
+SMARTLIVING_API_BASE_URL=https://your-smartliving-api.example.com/api
+SMARTLIVING_API_KEY=<smartliving-api-key>
+SMARTLIVING_TEMPORARY_PASSWORD=<secure-first-login-password>
 ```
+
+SmartLiving settings are backend-only secrets. Configure them in the deployed
+backend service, not as `VITE_*` frontend variables, then restart/redeploy the
+backend. The base URL must be an absolute HTTP(S) URL and should not end with a
+slash.
 
 Do not use `flask --debug run` or `app.run(debug=True)` in production.
 

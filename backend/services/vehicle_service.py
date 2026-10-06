@@ -974,7 +974,7 @@ def _calculate_vehicle_economics(vehicle_document: dict) -> dict:
     else:
         recovery_status = "Profit Generating"
 
-    approved_fuel_logs = list(fuel_logs_collection().find({"vehicle_id": vehicle_id, "status": "approved"}))
+    approved_fuel_logs = list(fuel_logs_collection().find({"vehicle_id": vehicle_id, "status": {"$in": ["approved", "recorded"]}}))
     approved_expenses = list(expenses_collection().find({"vehicle_id": vehicle_id, "status": {"$in": ["approved", "paid"]}}))
     maintenance_documents = list(maintenance_jobs_collection().find({"vehicle_id": vehicle_id}))
     compliance_records = list(compliance_records_collection().find({"vehicle_id": vehicle_id}))

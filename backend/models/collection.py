@@ -7,6 +7,18 @@ def _serialize_reference_id(value):
     return value
 
 
+def _serialize_value(value):
+    if isinstance(value, ObjectId):
+        return str(value)
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    if isinstance(value, list):
+        return [_serialize_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _serialize_value(item) for key, item in value.items()}
+    return value
+
+
 def serialize_collection(collection_document: dict) -> dict:
     return {
         "id": str(collection_document.get("_id")),
@@ -25,12 +37,20 @@ def serialize_collection(collection_document: dict) -> dict:
         "driver_note": collection_document.get("driver_note"),
         "admin_approval_note": collection_document.get("admin_approval_note"),
         "status": collection_document.get("status"),
+        "payment_purpose": collection_document.get("payment_purpose"),
         "cycle_key": collection_document.get("cycle_key"),
         "week_start": collection_document.get("week_start"),
         "week_end": collection_document.get("week_end"),
         "payment_deadline": collection_document.get("payment_deadline"),
         "rejection_reason": collection_document.get("rejection_reason"),
+        "reversal_reason": collection_document.get("reversal_reason"),
+        "correction_reason": collection_document.get("correction_reason"),
         "is_late": bool(collection_document.get("is_late")),
+        "remittance_allocations": [
+            {"cycle_key": item.get("cycle_key"), "week_start": item.get("week_start"), "amount": item.get("amount")}
+            for item in (collection_document.get("remittance_allocations") or [])
+        ],
+        "remittance_unallocated_credit": collection_document.get("remittance_unallocated_credit"),
         "received_by_admin_id": _serialize_reference_id(
             collection_document.get("received_by_admin_id")
         ),
@@ -43,6 +63,14 @@ def serialize_collection(collection_document: dict) -> dict:
         "rejected_by_admin_id": _serialize_reference_id(
             collection_document.get("rejected_by_admin_id")
         ),
+        "reversed_by_admin_id": _serialize_reference_id(
+            collection_document.get("reversed_by_admin_id")
+        ),
+        "confirmation_actor": _serialize_value(collection_document.get("confirmation_actor")),
+        "reversal_actor": _serialize_value(collection_document.get("reversal_actor")),
+        "original_payment_snapshot": _serialize_value(collection_document.get("original_payment_snapshot")),
+        "status_history": _serialize_value(collection_document.get("status_history") or []),
+        "correction_history": _serialize_value(collection_document.get("correction_history") or []),
         "submitted_at": collection_document.get("submitted_at").isoformat()
         if collection_document.get("submitted_at")
         else None,
@@ -51,6 +79,9 @@ def serialize_collection(collection_document: dict) -> dict:
         else None,
         "rejected_at": collection_document.get("rejected_at").isoformat()
         if collection_document.get("rejected_at")
+        else None,
+        "reversed_at": collection_document.get("reversed_at").isoformat()
+        if collection_document.get("reversed_at")
         else None,
         "created_at": collection_document.get("created_at").isoformat()
         if collection_document.get("created_at")

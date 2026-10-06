@@ -17,6 +17,7 @@ import {
   DollarSign,
 } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
+import { getActiveSessionRole, getStoredSessionUser } from '../../lib/auth-session';
 
 type ReportCategory = 'revenue' | 'drivers' | 'vehicles' | 'trips' | 'fuel' | 'maintenance' | 'customers';
 
@@ -281,8 +282,7 @@ export default function Reports() {
   const [pageError, setPageError] = useState('');
   const [refreshKey, setRefreshKey] = useState(0);
 
-  const storedUser = localStorage.getItem('flux_user');
-  const currentRole = storedUser ? JSON.parse(storedUser).role : null;
+  const currentRole = getActiveSessionRole(getStoredSessionUser());
 
   useEffect(() => {
     if (currentRole === 'driver') {

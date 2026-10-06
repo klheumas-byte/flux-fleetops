@@ -30,6 +30,7 @@ import {
   Truck,
   Users,
   UsersRound,
+  Wallet,
   Wrench,
 } from 'lucide-react';
 import type { UserRole } from '../../App';
@@ -101,6 +102,7 @@ const SECTIONS: SidebarSection[] = [
       { id: 'assignments', label: 'Vehicle Assignments', icon: ClipboardList },
       { id: 'fleet-tracking', label: 'Fleet Tracking', icon: MapPin, badge: 'Live' },
       { id: 'vehicle-movements', label: 'Vehicle Movements', icon: Route },
+      { id: 'operations-control', label: 'Operations Control Center', icon: ShieldCheck },
       { id: 'dispatch-returns', label: 'Vehicle Return & Handover', icon: TimerReset },
     ],
   },
@@ -140,6 +142,7 @@ const SECTIONS: SidebarSection[] = [
     title: 'Finance',
     items: [
       { id: 'collections', label: 'Collections', icon: DollarSign },
+      { id: 'driver-remittances', label: 'Driver Remittances', icon: Wallet },
       { id: 'deposits', label: 'Deposits', icon: Landmark },
       { id: 'finance-accounts', label: 'Finance Accounts', icon: Building2 },
       { id: 'funding-ledger', label: 'Funding Ledger', icon: Landmark },
@@ -150,6 +153,7 @@ const SECTIONS: SidebarSection[] = [
     id: 'maintenance-safety',
     title: 'Maintenance & Safety',
     items: [
+      { id: 'report-fault', label: 'Report Vehicle Fault', icon: AlertTriangle },
       { id: 'fault-approvals', label: 'Fault Approvals', icon: ShieldAlert },
       { id: 'incidents', label: 'Accidents & Incidents', icon: AlertTriangle },
       { id: 'maintenance', label: 'Maintenance Jobs', icon: Wrench },
@@ -253,13 +257,15 @@ export default function Sidebar({
   const canViewDashboard = Boolean(filterAccessibleModules(userRole, [DASHBOARD_ITEM]).length);
   const canViewSmartLiving = canManageSmartLiving(userRole);
   const mobileGroups = useMemo(() => [
-    ...((canViewDashboard || canViewSmartLiving) ? [{
+    ...(canViewDashboard ? [{
       id: 'overview',
       title: 'Overview',
-      items: [
-        ...(canViewDashboard ? [DASHBOARD_ITEM] : []),
-        ...(canViewSmartLiving ? [SMARTLIVING_ITEM] : []),
-      ],
+      items: [DASHBOARD_ITEM],
+    }] : []),
+    ...(canViewSmartLiving ? [{
+      id: 'integrations',
+      title: 'Integrations',
+      items: [SMARTLIVING_ITEM],
     }] : []),
     ...visibleSections,
   ], [canViewDashboard, canViewSmartLiving, visibleSections]);

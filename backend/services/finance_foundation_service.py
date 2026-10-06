@@ -10,7 +10,11 @@ from models.finance_account import serialize_finance_account_snapshot
 from models.funding_contribution import serialize_funding_contribution
 from models.maintenance import serialize_maintenance_job
 from models.user import serialize_user
-from services.finance_account_service import get_finance_account_document, increment_finance_account_balance
+from services.finance_account_service import (
+    get_finance_account_document,
+    increment_finance_account_balance,
+    run_finance_transaction,
+)
 from services.master_data_service import resolve_master_data_item
 from utils.api_error import ApiError
 from utils.file_validation import validate_file_reference
@@ -113,12 +117,21 @@ def create_funding_contribution(payload, *, current_user_id, current_role, idemp
         "updated_at": timestamp,
         "audit_log": [{"action": "funding_contribution_recorded", "actor_id": actor_id, "actor_role": current_role, "at": timestamp}],
     }
+    document["_id"] = ObjectId()
+    def post(session):
+        kwargs = {"session": session} if session is not None else {}
+        funding_contributions_collection().insert_one(document, **kwargs)
+        increment_finance_account_balance(
+            account["_id"], document["amount"], actor_id=actor_id,
+            reference_type="funding_contribution", reference_id=document["_id"],
+            effective_date=document["contribution_date"], session=session,
+        )
     try:
-        result = funding_contributions_collection().insert_one(document)
+        run_finance_transaction(post)
     except DuplicateKeyError:
-        return serialize_funding_contribution(funding_contributions_collection().find_one({"idempotency_key": key}))
-    document["_id"] = result.inserted_id
-    increment_finance_account_balance(account["_id"], document["amount"], actor_id=actor_id, reference_type="funding_contribution", reference_id=document["_id"])
+        existing = funding_contributions_collection().find_one({"idempotency_key": key}) if key else None
+        if existing: return serialize_funding_contribution(existing)
+        raise
     return serialize_funding_contribution(document)
 
 

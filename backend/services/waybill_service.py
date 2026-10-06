@@ -292,7 +292,52 @@ def ensure_waybill_for_source(
     existing = target.find_one({"source_key": expected_source_key})
     if existing:
         if existing.get("movement_id") != movement_document["_id"]:
-            raise ApiError("Digital Waybill is linked to a different Vehicle Movement.", status_code=409)
+            replaces_movement_id = movement_document.get("replaces_movement_id")
+            if replaces_movement_id != existing.get("movement_id"):
+                raise ApiError("Digital Waybill is linked to a different Vehicle Movement.", status_code=409)
+            if existing.get("status") in {"completed", "cancelled", "voided"}:
+                raise ApiError("A completed Digital Waybill cannot be moved to a replacement journey.", status_code=409)
+            timestamp = now_utc()
+            relink_audit = _audit(
+                "movement_relinked_after_terminal_recovery",
+                current_user_id,
+                details={
+                    "previous_movement_id": str(existing.get("movement_id")),
+                    "replacement_movement_id": str(movement_document["_id"]),
+                    "reason": movement_document.get("replacement_reason"),
+                },
+                timestamp=timestamp,
+            )
+            relink_result = target.update_one(
+                {
+                    "_id": existing["_id"],
+                    "movement_id": replaces_movement_id,
+                    "source_key": expected_source_key,
+                    "status": {"$nin": ["completed", "cancelled", "voided"]},
+                },
+                {
+                    "$set": {
+                        "movement_id": movement_document["_id"],
+                        "vehicle_id": movement_document.get("vehicle_id") or source_document.get("vehicle_id"),
+                        "driver_id": movement_document.get("driver_id") or source_document.get("driver_id"),
+                        "updated_at": timestamp,
+                    },
+                    "$push": {"audit_log": relink_audit},
+                },
+            )
+            if relink_result.matched_count != 1:
+                winner = target.find_one({"_id": existing["_id"]})
+                if not winner or winner.get("movement_id") != movement_document["_id"]:
+                    raise ApiError("Digital Waybill changed while its replacement movement was being linked.", status_code=409)
+                return {"waybill": winner, "created": False, "relinked": False}
+            existing.update({
+                "movement_id": movement_document["_id"],
+                "vehicle_id": movement_document.get("vehicle_id") or source_document.get("vehicle_id"),
+                "driver_id": movement_document.get("driver_id") or source_document.get("driver_id"),
+                "updated_at": timestamp,
+            })
+            existing.setdefault("audit_log", []).append(relink_audit)
+            return {"waybill": existing, "created": False, "relinked": True}
         return {"waybill": existing, "created": False}
 
     raw_items, source_details = _source_defaults(normalized_type, source_document)

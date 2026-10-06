@@ -60,6 +60,7 @@ class FinanceFoundationAndTargetHistoryTests(unittest.TestCase):
         self.assertEqual(first["id"], second["id"])
         self.assertEqual(self.db.funding_contributions.count_documents({}), 1)
         self.assertEqual(self.db.finance_accounts.find_one({"_id": self.account_id})["current_balance"], 10000)
+        self.assertEqual(self.db.finance_ledger_entries.count_documents({"account_id": self.account_id, "source_type": "funding_contribution"}), 1)
         self.assertEqual(self.db.collections.count_documents({}), 0)
 
     def test_battery_expense_requires_source_links_maintenance_and_separates_payer(self):
@@ -72,6 +73,8 @@ class FinanceFoundationAndTargetHistoryTests(unittest.TestCase):
         self.assertEqual(own_approval.exception.status_code, 403)
         expense_service.approve_expense(expense["id"], str(self.owner_id))
         expense_service.mark_expense_paid(expense["id"], str(self.owner_id))
+        self.assertEqual(self.db.finance_accounts.find_one({"_id": self.account_id})["current_balance"], 8500)
+        self.assertEqual(self.db.finance_ledger_entries.count_documents({"account_id": self.account_id, "direction": "debit", "source_type": "expense"}), 1)
         position = finance_foundation_service.funding_position(start_date="2026-08-01", end_date="2026-08-31")
         self.assertEqual(position["money_in"], 10000)
         self.assertEqual(position["expenses_out"], 1500)
@@ -101,7 +104,8 @@ class FinanceFoundationAndTargetHistoryTests(unittest.TestCase):
             finance_foundation_service.reconciliation_report(current_user_id=str(ObjectId()), current_role="driver", driver_id=str(self.driver_id), start_date="2026-08-24", end_date="2026-08-29")
 
     def test_future_target_preserves_historical_target_and_is_owner_only(self):
-        updated = user_service.schedule_driver_target(driver_id=str(self.driver_id), payload={"target_amount": 1400, "target_frequency": "weekly", "effective_from": "2026-09-07", "reason": "September target"}, current_user_id=str(self.owner_id), current_role="owner")
+        with patch.object(user_service, "now_utc", return_value=datetime(2026, 8, 29, tzinfo=timezone.utc)):
+            updated = user_service.schedule_driver_target(driver_id=str(self.driver_id), payload={"target_amount": 1400, "target_frequency": "weekly", "effective_from": "2026-09-07", "reason": "September target"}, current_user_id=str(self.owner_id), current_role="owner")
         history = updated["driver_profile"]["target_history"]
         self.assertEqual(len(history), 2)
         stored = self.db.users.find_one({"_id": self.driver_id})

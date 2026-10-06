@@ -130,11 +130,11 @@ def build_dispatch_fuel_summary(
     movement = movement or {}
     vehicle = vehicle or {}
     fuel_logs = fuel_logs or []
-    approved_logs = [item for item in fuel_logs if item.get("status") == "approved"]
+    approved_logs = [item for item in fuel_logs if item.get("status") in {"approved", "recorded"}]
     pending_logs = [
         item
         for item in fuel_logs
-        if item.get("status") not in {"approved", "rejected"}
+        if item.get("status") not in {"approved", "recorded", "rejected"}
     ]
     opening_level = movement.get("opening_fuel_level")
     closing_level = movement.get("closing_fuel_level")
@@ -324,8 +324,12 @@ def record_dispatch_opening_fuel(
     )
 
 
-def assert_dispatch_opening_confirmed(job: dict):
-    movement = _find_movement(job)
+def assert_dispatch_opening_confirmed(job: dict, *, current_user_id: str | None = None):
+    movement = (
+        _ensure_predeparture_movement(job, current_user_id=current_user_id)
+        if current_user_id
+        else _find_movement(job)
+    )
     if (
         not movement
         or movement.get("opening_fuel_recorded_at") is None

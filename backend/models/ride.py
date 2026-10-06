@@ -7,7 +7,7 @@ def _serialize_reference_id(value):
     return value
 
 
-def serialize_ride(ride_document: dict) -> dict:
+def serialize_ride(ride_document: dict, *, include_earnings: bool = False) -> dict:
     trip_id = ride_document.get("trip_id") or ride_document.get("ride_id")
     trip_source_id = ride_document.get("trip_source_id")
     trip_purpose_id = ride_document.get("trip_purpose_id")
@@ -41,7 +41,6 @@ def serialize_ride(ride_document: dict) -> dict:
         if ride_document.get("updated_at")
         else None,
         "source_booking_id": _serialize_reference_id(ride_document.get("source_booking_id")),
-        "actual_fare": ride_document.get("actual_fare"),
         "counts_toward_company_collections": ride_document.get("trip_purpose") != "Personal Ride",
         "counts_toward_utilization": True,
         "audit_events": [
@@ -63,6 +62,10 @@ def serialize_ride(ride_document: dict) -> dict:
     payload["destination"] = payload["destination_area"]
     payload["scheduled_time"] = None
     payload["estimated_fare"] = None
-    payload["amount_charged"] = payload["actual_fare"]
-    payload["payment_method"] = None
+    if include_earnings:
+        payload["actual_fare"] = ride_document.get("actual_fare")
+        payload["amount_charged"] = ride_document.get("actual_fare")
+        payload["payment_method"] = ride_document.get("payment_method")
+        payload["platform_fee"] = ride_document.get("platform_fee")
+        payload["net_earnings"] = ride_document.get("net_earnings")
     return payload

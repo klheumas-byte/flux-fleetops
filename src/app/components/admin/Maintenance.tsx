@@ -15,7 +15,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
-import { getStoredSessionUser } from '../../lib/auth-session';
+import { getActiveSessionRole, getStoredSessionUser } from '../../lib/auth-session';
 import MaintenanceOverridesPanel from './MaintenanceOverridesPanel';
 import KpiGrid from '../shared/KpiGrid';
 
@@ -408,7 +408,7 @@ function stageClassName(stage: MaintenanceStage | string | null | undefined) {
 
 export default function Maintenance() {
   const currentUser = getStoredSessionUser();
-  const currentRole = currentUser?.role || null;
+  const currentRole = getActiveSessionRole(currentUser);
   const isOwner = currentRole === 'owner';
 
   const [jobs, setJobs] = useState<MaintenanceJob[]>([]);
@@ -451,6 +451,7 @@ export default function Maintenance() {
     parts_changed: '',
     vendor_name: '',
     vendor_contact: '',
+    roadworthy_confirmed: false,
   });
 
   const getSettledData = <T,>(result: PromiseSettledResult<T>, fallback: T): T =>
@@ -862,6 +863,10 @@ export default function Maintenance() {
       completion_date: job.completion_date || '',
       vendor_name: job.vendor_name || '',
       vendor_contact: job.vendor_contact || '',
+      completion_odometer: '',
+      work_performed: '',
+      parts_changed: '',
+      roadworthy_confirmed: false,
     });
   };
 
@@ -890,6 +895,7 @@ export default function Maintenance() {
           parts_changed: statusForm.parts_changed || null,
           vendor_name: statusForm.vendor_name,
           vendor_contact: statusForm.vendor_contact,
+          roadworthy_confirmed: statusForm.roadworthy_confirmed,
         }),
       });
       setJobs((current) => current.map((job) => job.id === response.data.job.id ? response.data.job : job));
@@ -1592,6 +1598,7 @@ export default function Maintenance() {
                 <>
                   <TextAreaField label="Work Performed" value={statusForm.work_performed} onChange={(value) => setStatusForm((current) => ({ ...current, work_performed: value }))} minHeight="min-h-[96px]" />
                   <TextAreaField label="Parts Changed" value={statusForm.parts_changed} onChange={(value) => setStatusForm((current) => ({ ...current, parts_changed: value }))} minHeight="min-h-[80px]" />
+                  <label className="flex items-start gap-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900"><input type="checkbox" checked={statusForm.roadworthy_confirmed} onChange={(event) => setStatusForm((current) => ({ ...current, roadworthy_confirmed: event.target.checked }))} className="mt-0.5" />I confirm repair/inspection is complete and the vehicle is roadworthy. Required for critical or unsafe fault-linked jobs.</label>
                 </>
               ) : null}
               <TextAreaField label="Notes" value={statusForm.notes} onChange={(value) => setStatusForm((current) => ({ ...current, notes: value }))} minHeight="min-h-[120px]" />

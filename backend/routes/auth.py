@@ -6,6 +6,7 @@ from pymongo.errors import PyMongoError
 from services.auth_service import (
     authenticate_user,
     build_auth_payload,
+    create_session_token,
     create_user,
     get_user_by_id,
     revoke_token,
@@ -76,7 +77,7 @@ def me():
             str(get_jwt().get("role") or "").strip().lower() or "unknown",
         )
         user = get_user_by_id(get_jwt_identity())
-        return success_response(data={"user": user})
+        return success_response(data={"user": user, "access_token": create_session_token(user)})
     except ApiError:
         raise
     except PyMongoError as error:

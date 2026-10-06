@@ -18,7 +18,7 @@ import {
 import { toast } from 'sonner';
 
 import { ApiRequestError, isRequestAborted } from '../../lib/api';
-import { getStoredSessionUser } from '../../lib/auth-session';
+import { getActiveSessionRole, getStoredSessionUser } from '../../lib/auth-session';
 import {
   combineLocalDateAndTime,
   formatDateTimeSafe,
@@ -796,7 +796,7 @@ export default function DispatchPlanner() {
 
   const isMutationPending = isSavingDraft || isReserving || isAssigning || isReassigning || isCorrectingSchedule || isCancelling;
   const isAssignedPreStart = Boolean(currentJob && ['assigned', 'accepted', 'clarification_requested'].includes(currentJob.status));
-  const canCorrectSchedule = isAssignedPreStart && ['owner', 'admin'].includes(sessionUser?.role || '');
+  const canCorrectSchedule = isAssignedPreStart && ['owner', 'admin'].includes(getActiveSessionRole(sessionUser) || '');
 
   return (
     <div className="space-y-6 pb-10">

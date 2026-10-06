@@ -29,7 +29,10 @@ export type VehicleMovementStatus =
   | 'in_progress'
   | 'returned'
   | 'closed'
-  | 'cancelled';
+  | 'cancelled'
+  | 'force_closed'
+  | 'superseded'
+  | 'voided';
 
 export interface UserSummary {
   id: string;
@@ -63,6 +66,32 @@ export interface AssignmentSummary {
   status?: string | null;
   driver?: UserSummary | null;
   vehicle?: VehicleSummary | null;
+}
+
+export interface FinanceAccountSummary {
+  id: string;
+  account_name: string;
+  account_type: 'cash' | 'momo' | 'bank';
+  provider_name?: string | null;
+  account_number?: string | null;
+  status?: 'active' | 'inactive';
+}
+
+export interface FuelAdvanceSummary {
+  status: 'pending_approval' | 'issued' | 'return_outstanding' | 'settled';
+  issued_amount: number;
+  spent_amount: number;
+  returned_amount: number;
+  outstanding_amount: number;
+  finance_account_id: string;
+  finance_account_snapshot?: FinanceAccountSummary | null;
+  issued_to_user_id?: string | null;
+  issued_by?: string | null;
+  issued_at?: string | null;
+  fuel_log_id?: string | null;
+  expense_id?: string | null;
+  settled_by?: string | null;
+  settled_at?: string | null;
 }
 
 export interface VehicleMovementRecord {
@@ -109,6 +138,7 @@ export interface VehicleMovementRecord {
   dispatch_job_id?: string | null;
   reservation_id?: string | null;
   movement_type: VehicleMovementType;
+  fuel_advance?: FuelAdvanceSummary | null;
   movement_category?: string | null;
   status: VehicleMovementStatus;
   requested_departure_time?: string | null;
@@ -150,6 +180,17 @@ export interface VehicleMovementRecord {
   delivered_by?: string | null;
   notes?: string | null;
   cancellation_reason?: string | null;
+  force_close_reason?: string | null;
+  force_closed_at?: string | null;
+  force_closed_by?: string | null;
+  physical_vehicle_confirmed?: boolean;
+  canonical_source_key?: string | null;
+  replaces_movement_id?: string | null;
+  superseded_by_movement_id?: string | null;
+  superseded_at?: string | null;
+  supersession_reason?: string | null;
+  replacement_created_at?: string | null;
+  replacement_reason?: string | null;
   approved_by?: string | null;
   approved_at?: string | null;
   checked_out_by?: string | null;
@@ -205,6 +246,7 @@ export interface VehicleMovementOptionsResponse {
   drivers: UserSummary[];
   vehicles: VehicleSummary[];
   assignments: AssignmentSummary[];
+  finance_accounts?: FinanceAccountSummary[];
   branches?: Array<{ id: string; name: string; code?: string | null }>;
 }
 
@@ -321,6 +363,19 @@ export async function closeVehicleMovement(movementId: string) {
 
 export async function cancelVehicleMovement(movementId: string, payload: Record<string, unknown>) {
   return patchVehicleMovementAction(movementId, 'cancel', payload);
+}
+
+export async function forceCloseVehicleMovement(movementId: string, payload: { reason: string; physical_vehicle_confirmed: boolean }) {
+  return patchVehicleMovementAction(movementId, 'force-close', payload);
+}
+
+export async function returnFuelPurchaseAdvance(movementId: string, payload: { amount: number; finance_account_id?: string; reference_number?: string }) {
+  const response = await apiRequest<VehicleMovementEnvelope>(`/vehicle-movements/${movementId}/fuel-advance/return`, {
+    method: 'PATCH',
+    headers: { 'Idempotency-Key': crypto.randomUUID() },
+    body: JSON.stringify(payload),
+  });
+  return response.data.movement;
 }
 
 export async function confirmVehicleMovementDelivery(movementId: string, payload: {

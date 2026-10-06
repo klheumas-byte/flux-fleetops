@@ -38,6 +38,16 @@ def set_ttl_cached(cache_key: str, value, *, ttl_seconds: int = 15):
     return value
 
 
+def invalidate_ttl_cache(*prefixes: str) -> None:
+    normalized = tuple(str(prefix) for prefix in prefixes if prefix)
+    if not normalized:
+        return
+    with _ttl_cache_lock:
+        for key in list(_ttl_cache):
+            if key.startswith(normalized):
+                _ttl_cache.pop(key, None)
+
+
 def log_db_duration(label: str, started_at: float) -> float:
     duration_ms = round((perf_counter() - started_at) * 1000, 2)
     current_app.logger.info("[Flux DB] %s duration_ms=%s", label, duration_ms)

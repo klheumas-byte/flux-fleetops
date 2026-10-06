@@ -29,6 +29,7 @@ export interface BookingSummaryOption {
   pickup_time: string;
   pickup_at?: string | null;
   status: string;
+  expected_fare?: number | null;
 }
 
 export interface MasterDataItem {
@@ -88,6 +89,67 @@ export interface TripRecord {
   actual_fare?: number | null;
   amount_charged?: number | null;
   payment_method?: string | null;
+  platform_fee?: number | null;
+  net_earnings?: number | null;
+}
+
+export interface TripEarningsBreakdown {
+  label: string;
+  trip_count: number;
+  gross_charged: number;
+  platform_fees: number;
+  net_earnings: number;
+}
+
+export interface TripEarningsPeriod {
+  trip_count: number;
+  gross_charged: number;
+  platform_fees: number;
+  net_earnings: number;
+  payment_method_breakdown: TripEarningsBreakdown[];
+  source_breakdown: TripEarningsBreakdown[];
+}
+
+export interface DriverEarningsResponse {
+  summary: {
+    trip_count: number;
+    gross_earnings: number;
+    platform_fees: number;
+    net_earnings: number;
+    cash: number;
+    momo: number;
+  };
+  trend: Array<{
+    date: string;
+    trip_count: number;
+    gross_earnings: number;
+    platform_fees: number;
+    net_earnings: number;
+  }>;
+  transactions: Array<{
+    id: string;
+    trip_id: string | null;
+    trip_date: string;
+    start_time: string | null;
+    end_time: string | null;
+    source: string | null;
+    payment_method: string | null;
+    gross_earnings: number;
+    platform_fee: number;
+    net_earnings: number;
+    pickup_area: string | null;
+    destination_area: string | null;
+  }>;
+  filters: { sources: string[]; payment_methods: string[] };
+  range: { period: string; start_date: string; end_date: string };
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    total_pages: number;
+    has_next: boolean;
+    has_prev: boolean;
+  };
 }
 
 export interface TripSummary {
@@ -124,6 +186,11 @@ export interface TripSummary {
   company_trip_count: number;
   customer_linked_trip_count: number;
   generated_at: string;
+  earnings?: {
+    today: TripEarningsPeriod;
+    week: TripEarningsPeriod;
+    month: TripEarningsPeriod;
+  };
 }
 
 export type RideRecord = TripRecord;
@@ -207,6 +274,27 @@ export async function fetchRideSummary() {
     requestLabel: 'rides-summary',
   });
   return response.data.summary;
+}
+
+export async function fetchDriverEarnings(params: {
+  period?: 'today' | 'week' | 'month' | 'custom';
+  start_date?: string;
+  end_date?: string;
+  source?: string;
+  payment_method?: 'Cash' | 'MoMo';
+  page?: number;
+  limit?: number;
+} = {}) {
+  const searchParams = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== '') searchParams.set(key, String(value));
+  });
+  const query = searchParams.toString();
+  const response = await apiRequest<{ data: DriverEarningsResponse }>(`/driver/earnings${query ? `?${query}` : ''}`, {
+    componentName: 'MyEarnings',
+    requestLabel: 'driver-trip-earnings',
+  });
+  return response.data;
 }
 
 export async function fetchMasterData(activeOnly = false) {

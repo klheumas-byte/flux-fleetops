@@ -3,10 +3,13 @@ from flask_jwt_extended import get_jwt, get_jwt_identity
 
 from services.vehicle_operation_request_service import (
     acknowledge_operational_request,
+    arrive_operational_request,
     approve_operational_request,
     cancel_operational_request,
+    complete_fuel_instruction_task,
     confirm_operational_task,
     create_operational_request,
+    create_fuel_instruction,
     get_operational_request,
     get_personal_use_analytics,
     list_operational_request_options,
@@ -47,6 +50,7 @@ def options_route():
         current_user_id=user_id,
         planned_departure_at=request.args.get("planned_departure_at"),
         expected_return_at=request.args.get("expected_return_at"),
+        include_availability=request.args.get("include_availability", "true").strip().lower() not in {"0", "false", "no"},
     ))
 
 
@@ -71,6 +75,13 @@ def personal_use_analytics_route():
 def create_route():
     user_id, role = _identity()
     return success_response(data={"request": create_operational_request(request.get_json(silent=True) or {}, current_user_id=user_id, current_role=role)}, message="Operational request created.", status_code=201)
+
+
+@operational_requests_bp.post("/fuel-instructions")
+@role_required("owner", "admin")
+def create_fuel_instruction_route():
+    user_id, role = _identity()
+    return success_response(data={"request": create_fuel_instruction(request.get_json(silent=True) or {}, current_user_id=user_id, current_role=role)}, message="Fuel Instruction assigned.", status_code=201)
 
 
 @operational_requests_bp.get("/<request_id>")
@@ -131,9 +142,19 @@ def opening_route(request_id): return _action(request_id, open_operational_movem
 def start_route(request_id): return _action(request_id, start_operational_request, payload=True)
 
 
+@operational_requests_bp.patch("/<request_id>/arrive")
+@role_required("owner", "admin", "driver")
+def arrive_route(request_id): return _action(request_id, arrive_operational_request)
+
+
 @operational_requests_bp.patch("/<request_id>/confirm-task")
 @role_required("owner", "admin", "operations_administrator", "operations_manager", "driver")
 def confirm_route(request_id): return _action(request_id, confirm_operational_task, payload=True)
+
+
+@operational_requests_bp.patch("/<request_id>/complete-fuel-purchase")
+@role_required("driver")
+def complete_fuel_purchase_route(request_id): return _action(request_id, complete_fuel_instruction_task, payload=True)
 
 
 @operational_requests_bp.patch("/<request_id>/return")

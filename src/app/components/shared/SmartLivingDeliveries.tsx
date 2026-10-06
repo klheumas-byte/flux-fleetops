@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { apiRequest } from "../../lib/api";
-import { getStoredSessionUser } from "../../lib/auth-session";
+import { getActiveSessionRole, getStoredSessionUser } from "../../lib/auth-session";
 import { useDataSync } from "../../lib/data-sync";
 import {
   Dialog,
@@ -244,9 +244,8 @@ export default function SmartLivingDeliveries() {
       user?.permissions?.includes("*") ||
       user?.permissions?.includes(permission),
     );
-  const isDriverWorkspace =
-    String(user?.selected_workspace || user?.role || "").toLowerCase() ===
-    "driver";
+  const activeWorkspace = getActiveSessionRole(user);
+  const isDriverWorkspace = activeWorkspace === "driver";
   const canManage = !isDriverWorkspace && has("delivery_scheduler.manage");
   const canViewScheduler =
     !isDriverWorkspace && has("delivery_scheduler.view");
@@ -277,7 +276,7 @@ export default function SmartLivingDeliveries() {
   const assignedOnly =
     isDriverWorkspace ||
     (has("delivery_schedule.view_assigned") && !canViewScheduler);
-  const isFieldAgent = Boolean(user?.role_ids?.includes("field_agent") || user?.role === "field_agent");
+  const isFieldAgent = activeWorkspace === "field_agent";
 
   const [tab, setTab] = useState<SchedulerTab>(
     canManage ? "queue" : canLoading && !assignedOnly ? "loading" : "runs",

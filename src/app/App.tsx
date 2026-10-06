@@ -2,10 +2,11 @@ import { Suspense, lazy, startTransition, useEffect, useState } from 'react';
 import { Toaster, toast } from 'sonner';
 import Login from './components/Login';
 import { API_BASE_URL } from './lib/api';
-import { ApiRequestError, resetAuthExpirySignal } from './lib/api';
+import { ApiRequestError, resetApiSessionState, resetAuthExpirySignal } from './lib/api';
 import {
   clearStoredSession,
   fetchAuthenticatedUser,
+  getActiveSessionRole,
   getWorkspaceLandingPage,
   getStoredSessionUser,
   setStoredSessionUser,
@@ -31,6 +32,7 @@ const Dashboard = lazy(() => import('./components/admin/Dashboard'));
 const FleetTracking = lazy(() => import('./components/admin/FleetTracking'));
 const Vehicles = lazy(() => import('./components/admin/Vehicles'));
 const VehicleMovements = lazy(() => import('./components/admin/VehicleMovements'));
+const OperationsControlCenter = lazy(() => import('./components/admin/OperationsControlCenter'));
 const OperationalRequests = lazy(() => import('./components/shared/OperationalRequests'));
 const StockTransfers = lazy(() => import('./components/shared/StockTransfers'));
 const SupplierPickup = lazy(() => import('./components/shared/SupplierPickup'));
@@ -51,6 +53,7 @@ const FinanceAccounts = lazy(() => import('./components/admin/FinanceAccounts'))
 const FundingLedger = lazy(() => import('./components/admin/FundingLedger'));
 const Revenue = lazy(() => import('./components/admin/Revenue'));
 const AdminAccountability = lazy(() => import('./components/admin/AdminAccountability'));
+const DriverRemittances = lazy(() => import('./components/admin/DriverRemittances'));
 const Customers = lazy(() => import('./components/admin/Customers'));
 const FuelManagement = lazy(() => import('./components/admin/Fuel'));
 const FaultApprovals = lazy(() => import('./components/admin/FaultApprovals'));
@@ -136,6 +139,7 @@ export default function App() {
   };
 
   const clearAuthState = () => {
+    resetApiSessionState();
     clearStoredSession();
     setIsLoggedIn(false);
     setUserRole(null);
@@ -184,7 +188,7 @@ export default function App() {
           return;
         }
 
-        const activeWorkspace = (verifiedUser.selected_workspace || verifiedUser.role) as UserRole;
+        const activeWorkspace = getActiveSessionRole(verifiedUser) as UserRole;
         setCurrentUser(verifiedUser);
         setUserRole(activeWorkspace);
         setIsLoggedIn(true);
@@ -246,7 +250,8 @@ export default function App() {
   const handleLogin = (user: AuthUser) => {
     setStoredSessionUser(user);
     resetAuthExpirySignal();
-    const normalizedRole = String(user.selected_workspace || user.role || '').trim().toLowerCase() as UserRole;
+    resetApiSessionState();
+    const normalizedRole = getActiveSessionRole(user) as UserRole;
     setCurrentUser(user);
     setUserRole(normalizedRole);
     setIsLoggedIn(true);
@@ -487,6 +492,7 @@ export default function App() {
           {currentPage === 'vehicles' && renderProtectedPage('vehicles', <Vehicles onOpenVehicleDetails={handleOpenVehicleDetails} />)}
           {currentPage === 'fleet-owners' && renderProtectedPage('fleet-owners', <FleetOwners />)}
           {currentPage === 'vehicle-movements' && renderProtectedPage('vehicle-movements', <VehicleMovements />)}
+          {currentPage === 'operations-control' && renderProtectedPage('operations-control', <OperationsControlCenter onNavigate={navigateToPage} />)}
           {currentPage === 'operational-requests' && renderProtectedPage('operational-requests', <OperationalRequests />)}
           {currentPage === 'stock-transfers' && renderProtectedPage('stock-transfers', <StockTransfers />)}
           {currentPage === 'supplier-pickup' && renderProtectedPage('supplier-pickup', <SupplierPickup />)}
@@ -506,6 +512,7 @@ export default function App() {
           {currentPage === 'driver-approval' && renderProtectedPage('driver-approval', <DriverApproval />)}
           {currentPage === 'assignments' && renderProtectedPage('assignments', <Assignments />)}
           {currentPage === 'collections' && renderProtectedPage('collections', <Collections />)}
+          {currentPage === 'driver-remittances' && renderProtectedPage('driver-remittances', <DriverRemittances onNavigate={navigateToPage} />)}
           {currentPage === 'deposits' && renderProtectedPage('deposits', <Deposits />)}
           {currentPage === 'expenses' && renderProtectedPage('expenses', <Expenses />)}
           {currentPage === 'finance-accounts' && renderProtectedPage('finance-accounts', <FinanceAccounts />)}
@@ -517,6 +524,7 @@ export default function App() {
           {currentPage === 'fuel' && renderProtectedPage('fuel', <FuelManagement />)}
           {currentPage === 'incidents' && renderProtectedPage('incidents', <IncidentsModule role={userRole} />)}
           {currentPage === 'fault-approvals' && renderProtectedPage('fault-approvals', <FaultApprovals />)}
+          {currentPage === 'report-fault' && renderProtectedPage('report-fault', <ReportFault currentUser={currentUser} activeAssignment={null} />)}
           {currentPage === 'maintenance' && renderProtectedPage('maintenance', <Maintenance />)}
           {currentPage === 'preventive-maintenance' && renderProtectedPage('preventive-maintenance', <PreventiveMaintenance onNavigate={navigateToPage} />)}
           {currentPage === 'driver-performance' && renderProtectedPage('driver-performance', <DriverPerformance />)}
@@ -568,7 +576,7 @@ export default function App() {
                 onRefresh={refreshDriverPortalData}
               />)
             )}
-            {currentPage === 'my-earnings' && currentUser.driver_profile?.private_finance_enabled === true && renderProtectedPage('my-earnings', <MyEarnings />)}
+            {currentPage === 'my-earnings' && renderProtectedPage('my-earnings', <MyEarnings />)}
             {currentPage === 'my-dispatch-financials' && renderProtectedPage('my-dispatch-financials', <MyDispatchFinancials />)}
             {currentPage === 'my-dispatch-opportunities' && renderProtectedPage('my-dispatch-opportunities', <DispatchOpportunities />)}
             {currentPage === 'my-dispatches' && renderProtectedPage('my-dispatches', <MyDispatches />)}

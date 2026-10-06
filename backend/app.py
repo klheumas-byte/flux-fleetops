@@ -35,6 +35,7 @@ from services.maintenance_override_service import ensure_maintenance_override_in
 from services.master_data_service import ensure_master_data_indexes
 from services.notification_service import ensure_notification_indexes, reconcile_legacy_actionable_notifications
 from services.personal_vehicle_service import ensure_personal_vehicle_indexes
+from services.payment_cycle_service import ensure_remittance_indexes
 from services.stock_transfer_service import ensure_stock_transfer_indexes
 from services.driver_scope_service import ensure_driver_scope_indexes
 from services.smart_living_delivery_service import ensure_indexes as ensure_smart_living_delivery_indexes, reconcile_tomorrow_delivery_notifications
@@ -138,6 +139,7 @@ def create_app(config_name: str | None = None) -> Flask:
                     ("master_data", ensure_master_data_indexes),
                     ("notifications", ensure_notification_indexes),
                     ("personal_vehicles", ensure_personal_vehicle_indexes),
+                    ("weekly_remittance", ensure_remittance_indexes),
                     ("stock_transfers", ensure_stock_transfer_indexes),
                     ("driver_scope", ensure_driver_scope_indexes),
                     ("smart_living_deliveries", ensure_smart_living_delivery_indexes),

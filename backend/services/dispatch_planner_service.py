@@ -2329,7 +2329,7 @@ def update_driver_dispatch_job_workflow(job_id: str, payload: dict, *, current_u
         validate_dispatch_schedule(job_document, departure_reference=timestamp, require_expected_return=True)
         from services.dispatch_fuel_service import assert_dispatch_opening_confirmed
 
-        movement = assert_dispatch_opening_confirmed(job_document)
+        movement = assert_dispatch_opening_confirmed(job_document, current_user_id=current_user_id)
         from services.vehicle_movement_service import start_vehicle_movement
         start_vehicle_movement(
             str(movement["_id"]), {"departure_time": timestamp},

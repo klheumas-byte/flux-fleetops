@@ -12,7 +12,8 @@ export type DataResource =
   | 'agents'
   | 'managers'
   | 'dispatch_opportunities'
-  | 'notifications';
+  | 'notifications'
+  | 'finance';
 
 export type DataSyncEvent = {
   resources: DataResource[];

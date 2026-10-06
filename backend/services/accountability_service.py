@@ -3,7 +3,7 @@ from time import perf_counter
 
 from extensions import get_collection
 from models.user import serialize_user
-from services.payment_cycle_service import get_current_cycle_for_assignment
+from services.payment_cycle_service import build_weekly_ledger, get_current_cycle_for_assignment
 from utils.performance import log_db_duration
 
 
@@ -37,7 +37,7 @@ def list_admin_accountability() -> list[dict]:
     admins_started_at = perf_counter()
     admins = list(
         users_collection()
-        .find({"role": {"$in": ["owner", "admin"]}})
+        .find({"$or": [{"role": {"$in": ["owner", "admin"]}}, {"role_ids": {"$in": ["owner", "admin"]}}]})
         .sort("full_name", ASCENDING)
     )
     log_db_duration("admins.accountability.admins_find", admins_started_at)
@@ -110,19 +110,21 @@ def get_owner_weekly_payment_overview() -> dict:
     drivers_below_target = []
 
     for assignment in assignments:
+        ledger = build_weekly_ledger(assignment)
+        position = ledger["position"]
         cycle = get_current_cycle_for_assignment(assignment)
-        total_expected += float(cycle.get("weekly_target") or 0)
-        total_approved += float(cycle.get("approved_total") or 0)
-        total_outstanding += float(cycle.get("outstanding_balance") or 0)
-        if cycle.get("status") == "overdue":
-            arrears += float(cycle.get("outstanding_balance") or 0)
-        if float(cycle.get("approved_total") or 0) < float(cycle.get("weekly_target") or 0):
+        total_expected += float(position.get("adjusted_expected") or 0)
+        total_approved += float(position.get("confirmed_receipts") or 0) + float(position.get("applicable_credit") or 0)
+        total_outstanding += float(position.get("outstanding") or 0)
+        arrears += float(position.get("arrears") or 0)
+        if float(position.get("outstanding") or 0) > 0:
             driver = users_collection().find_one({"_id": assignment.get("driver_id")})
             drivers_below_target.append(
                 {
                     "driver": serialize_user(driver) if driver else None,
                     "assignment_id": str(assignment["_id"]),
                     "cycle": cycle,
+                    "position": position,
                 }
             )
 

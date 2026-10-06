@@ -200,6 +200,8 @@ export default function DriverDashboard({
     end_time: nowTimeValue(),
     odometer_end: '',
     amount_charged: '',
+    payment_method: 'Cash',
+    platform_fee: '0',
     notes: '',
   });
   const [quickAddCustomerForm, setQuickAddCustomerForm] = useState({
@@ -392,6 +394,8 @@ export default function DriverDashboard({
         ...current,
         end_time: nowTimeValue(),
         amount_charged: '',
+        payment_method: 'Cash',
+        platform_fee: '0',
       }));
       if (ridesResult.status === 'rejected') {
         toast.error('Trip history is temporarily unavailable, but you can still start a new trip.');
@@ -561,6 +565,8 @@ export default function DriverDashboard({
         end_time: endTripForm.end_time,
         odometer_end: endTripForm.odometer_end ? Number(endTripForm.odometer_end) : undefined,
         actual_fare: endTripForm.amount_charged ? Number(endTripForm.amount_charged) : undefined,
+        payment_method: endTripForm.amount_charged ? endTripForm.payment_method : undefined,
+        platform_fee: endTripForm.amount_charged ? Number(endTripForm.platform_fee || 0) : undefined,
         notes: endTripForm.notes || undefined,
       });
       setActiveRide(trip.status === 'Completed' ? null : trip);
@@ -815,8 +821,8 @@ export default function DriverDashboard({
   };
 
   return (
-    <div className="space-y-6 p-4 sm:p-6">
-      <div className="rounded-lg bg-gradient-to-r from-blue-600 to-purple-600 p-6 text-white">
+    <div className="space-y-4 p-4 sm:space-y-6 sm:p-6">
+      <div className="rounded-lg bg-gradient-to-r from-blue-600 to-purple-600 p-4 text-white sm:p-6">
         <h1 className="mb-2 text-2xl font-semibold">
           Welcome back, {currentUser?.full_name || 'Driver'}!
         </h1>
@@ -833,7 +839,7 @@ export default function DriverDashboard({
             <span className="text-sm font-medium capitalize">{currentUser?.status || 'unknown'}</span>
           </div>
           <div className="rounded-lg bg-white/20 px-3 py-1.5 backdrop-blur-sm">
-            <span className="text-sm font-medium capitalize">Role: {currentUser?.role || 'driver'}</span>
+            <span className="text-sm font-medium capitalize">Role: {currentUser?.selected_workspace || currentUser?.role || 'driver'}</span>
           </div>
           <div className="rounded-lg bg-white/20 px-3 py-1.5 backdrop-blur-sm">
             <span className="text-sm font-medium">
@@ -843,39 +849,39 @@ export default function DriverDashboard({
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 min-[480px]:grid-cols-3 md:grid-cols-4 md:gap-4">
-        <div className="min-w-0 rounded-lg border border-gray-200 bg-white p-3 sm:p-4">
+      <div className="grid grid-cols-3 gap-2 sm:gap-3 md:grid-cols-4 md:gap-4">
+        <div className="min-w-0 rounded-lg border border-gray-200 bg-white p-2.5 sm:p-4">
           <div className="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-blue-100 sm:h-10 sm:w-10">
-            <Target className="h-6 w-6 text-blue-600" />
+            <Target className="h-5 w-5 text-blue-600 sm:h-6 sm:w-6" />
           </div>
-          <div className="mb-1 truncate text-lg font-semibold text-gray-900 sm:text-2xl">{formatCurrency(stats.weeklyTarget)}</div>
-          <div className="text-xs text-gray-600 sm:text-sm">Weekly Target</div>
+          <div className="mb-1 break-words text-sm font-semibold leading-tight text-gray-900 [overflow-wrap:anywhere] min-[380px]:text-base sm:text-2xl">{formatCurrency(stats.weeklyTarget)}</div>
+          <div className="line-clamp-2 text-[11px] leading-tight text-gray-600 sm:text-sm">Weekly Target</div>
           <div className="mt-1 hidden text-xs text-gray-500 sm:block">From your active assignment</div>
         </div>
 
-        <div className="min-w-0 rounded-lg border border-gray-200 bg-white p-3 sm:p-4">
+        <div className="min-w-0 rounded-lg border border-gray-200 bg-white p-2.5 sm:p-4">
           <div className="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-green-100 sm:h-10 sm:w-10">
-            <Wallet className="h-6 w-6 text-green-600" />
+            <Wallet className="h-5 w-5 text-green-600 sm:h-6 sm:w-6" />
           </div>
-          <div className="mb-1 truncate text-lg font-semibold text-green-600 sm:text-2xl">{formatCurrency(stats.amountPaid)}</div>
-          <div className="text-xs text-gray-600 sm:text-sm">Approved Total</div>
+          <div className="mb-1 break-words text-sm font-semibold leading-tight text-green-600 [overflow-wrap:anywhere] min-[380px]:text-base sm:text-2xl">{formatCurrency(stats.amountPaid)}</div>
+          <div className="line-clamp-2 text-[11px] leading-tight text-gray-600 sm:text-sm">Approved Total</div>
           <div className="mt-1 hidden text-xs text-gray-500 sm:block">{dashboardSummary?.total_collections_this_week || 0} collections this week</div>
         </div>
 
-        <div className="min-w-0 rounded-lg border border-gray-200 bg-white p-3 sm:p-4">
+        <div className="min-w-0 rounded-lg border border-gray-200 bg-white p-2.5 sm:p-4">
           <div className="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-red-100 sm:h-10 sm:w-10">
-            <AlertCircle className="h-6 w-6 text-red-600" />
+            <AlertCircle className="h-5 w-5 text-red-600 sm:h-6 sm:w-6" />
           </div>
-          <div className="mb-1 truncate text-lg font-semibold text-red-600 sm:text-2xl">{formatCurrency(stats.outstandingBalance)}</div>
-          <div className="text-xs text-gray-600 sm:text-sm">Outstanding</div>
+          <div className="mb-1 break-words text-sm font-semibold leading-tight text-red-600 [overflow-wrap:anywhere] min-[380px]:text-base sm:text-2xl">{formatCurrency(stats.outstandingBalance)}</div>
+          <div className="line-clamp-2 text-[11px] leading-tight text-gray-600 sm:text-sm">Outstanding</div>
           <div className="mt-1 hidden text-xs text-gray-500 sm:block">Weekly target minus payments</div>
         </div>
 
-        <div className="min-w-0 rounded-lg border border-gray-200 bg-white p-3 sm:p-4">
+        <div className="col-span-3 min-w-0 rounded-lg border border-gray-200 bg-white p-2.5 md:col-span-1 sm:p-4">
           <div className="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-purple-100 sm:h-10 sm:w-10">
-            <CarFront className="h-6 w-6 text-purple-600" />
+            <CarFront className="h-5 w-5 text-purple-600 sm:h-6 sm:w-6" />
           </div>
-          <div className="mb-1 truncate text-lg font-semibold text-gray-900 sm:text-2xl">{formatCurrency(stats.todaysCollections)}</div>
+          <div className="mb-1 break-words text-sm font-semibold leading-tight text-gray-900 [overflow-wrap:anywhere] min-[380px]:text-base sm:text-2xl">{formatCurrency(stats.todaysCollections)}</div>
           <div className="text-xs text-gray-600 sm:text-sm">Today</div>
           <div className="mt-1 hidden text-xs text-gray-500 sm:block">Collections recorded today</div>
         </div>
@@ -1059,7 +1065,7 @@ export default function DriverDashboard({
           </div>
         )}
 
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid grid-cols-3 gap-2 sm:gap-3 md:grid-cols-2 md:gap-4 xl:grid-cols-4">
           {[
             { label: 'Scheduled Today', value: bookingSummary?.scheduled_today ?? 0, icon: Calendar, tint: 'bg-blue-100 text-blue-600' },
             { label: 'Upcoming Bookings', value: bookingSummary?.upcoming_bookings ?? 0, icon: Navigation, tint: 'bg-emerald-100 text-emerald-600' },
@@ -1068,12 +1074,12 @@ export default function DriverDashboard({
           ].map((card) => {
             const Icon = card.icon;
             return (
-              <div key={card.label} className="rounded-lg border border-gray-200 bg-white p-5">
-                <div className={`mb-4 flex h-11 w-11 items-center justify-center rounded-xl ${card.tint}`}>
-                  <Icon className="h-5 w-5" />
+              <div key={card.label} className="min-w-0 rounded-lg border border-gray-200 bg-white p-2.5 sm:p-4 md:p-5">
+                <div className={`mb-2 flex h-8 w-8 items-center justify-center rounded-lg sm:mb-4 sm:h-11 sm:w-11 sm:rounded-xl ${card.tint}`}>
+                  <Icon className="h-4 w-4 sm:h-5 sm:w-5" />
                 </div>
-                <div className="text-3xl font-semibold text-[#0F172A]">{card.value}</div>
-                <div className="mt-1 text-sm text-gray-500">{card.label}</div>
+                <div className="text-lg font-semibold leading-none text-[#0F172A] sm:text-2xl md:text-3xl">{card.value}</div>
+                <div className="mt-1 line-clamp-2 text-[11px] leading-tight text-gray-500 sm:text-sm">{card.label}</div>
               </div>
             );
           })}
@@ -1404,7 +1410,15 @@ export default function DriverDashboard({
               <input type="number" value={endTripForm.odometer_end} onChange={(event) => setEndTripForm((current) => ({ ...current, odometer_end: event.target.value }))} placeholder="Optional" className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm" />
             </FieldBlock>
             <FieldBlock label="Amount Charged">
-              <input type="number" value={endTripForm.amount_charged} onChange={(event) => setEndTripForm((current) => ({ ...current, amount_charged: event.target.value }))} placeholder="Optional" className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm" />
+              <input type="number" min="0" value={endTripForm.amount_charged} onChange={(event) => setEndTripForm((current) => ({ ...current, amount_charged: event.target.value }))} placeholder="Optional" className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm" />
+            </FieldBlock>
+            <FieldBlock label="Payment Method">
+              <select value={endTripForm.payment_method} onChange={(event) => setEndTripForm((current) => ({ ...current, payment_method: event.target.value }))} className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm">
+                {['Cash', 'MoMo'].map((method) => <option key={method}>{method}</option>)}
+              </select>
+            </FieldBlock>
+            <FieldBlock label="Platform / Provider Fee">
+              <input type="number" min="0" max={endTripForm.amount_charged || undefined} value={endTripForm.platform_fee} onChange={(event) => setEndTripForm((current) => ({ ...current, platform_fee: event.target.value }))} className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm" />
             </FieldBlock>
             <FieldBlock label="Completion Notes">
               <textarea value={endTripForm.notes} onChange={(event) => setEndTripForm((current) => ({ ...current, notes: event.target.value }))} placeholder="Add any drop-off, issue, or handover notes." className="min-h-[96px] w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm" />
@@ -1516,7 +1530,7 @@ function OperationsDashboardSection({
     { label: 'Pending Acceptance', value: summary?.counts.pending_acceptance || 0, onClick: () => onOpenFilter('pending') },
     { label: 'Completed Today', value: summary?.counts.completed_today || 0 },
   ];
-  return <section className="rounded-lg border border-gray-200 bg-white p-6" aria-labelledby="operations-dashboard-title">
+  return <section className="rounded-lg border border-gray-200 bg-white p-4 sm:p-6" aria-labelledby="operations-dashboard-title">
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div>
         <h2 id="operations-dashboard-title" className="text-lg font-semibold text-gray-900">Operations</h2>
@@ -1529,16 +1543,16 @@ function OperationsDashboardSection({
 
     {error && <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
 
-    <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+    <div className="mt-4 grid grid-cols-3 gap-2 sm:mt-5 sm:gap-3 lg:grid-cols-5">
       {cards.map((card) => <button
         key={card.label}
         type="button"
         disabled={!card.onClick}
         onClick={card.onClick}
-        className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-left disabled:cursor-default"
+        className="min-h-16 min-w-0 rounded-lg border border-gray-200 bg-gray-50 p-2.5 text-left disabled:cursor-default sm:p-4"
       >
-        <span className="text-2xl font-semibold text-gray-900">{loading && !summary ? '—' : card.value}</span>
-        <span className="mt-1 block text-xs font-medium text-gray-500">{card.label}</span>
+        <span className="text-lg font-semibold leading-none text-gray-900 sm:text-2xl">{loading && !summary ? '—' : card.value}</span>
+        <span className="mt-1 line-clamp-2 block text-[11px] font-medium leading-tight text-gray-500 sm:text-xs">{card.label}</span>
       </button>)}
     </div>
 

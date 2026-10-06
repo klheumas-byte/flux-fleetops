@@ -7,6 +7,21 @@ def _serialize_reference_id(value):
     return value
 
 
+def _serialize_history(items):
+    serialized = []
+    for item in items or []:
+        row = {}
+        for key, value in item.items():
+            if isinstance(value, ObjectId):
+                row[key] = str(value)
+            elif hasattr(value, "isoformat"):
+                row[key] = value.isoformat()
+            else:
+                row[key] = value
+        serialized.append(row)
+    return serialized
+
+
 def serialize_assignment(assignment_document: dict) -> dict:
     end_date = assignment_document.get("end_date")
     assigned_by = _serialize_reference_id(
@@ -23,6 +38,15 @@ def serialize_assignment(assignment_document: dict) -> dict:
         "target_amount": assignment_document.get("target_amount"),
         "target_frequency": assignment_document.get("target_frequency") or "weekly",
         "operating_mode": assignment_document.get("operating_mode") or "hybrid",
+        "remittance_weekly_amount": assignment_document.get("remittance_weekly_amount"),
+        "remittance_start_date": assignment_document.get("remittance_start_date"),
+        "remittance_end_date": assignment_document.get("remittance_end_date"),
+        "remittance_week_pattern": assignment_document.get("remittance_week_pattern") or "mon_sat",
+        "remittance_payment_deadline": assignment_document.get("remittance_payment_deadline") or "week_end",
+        "remittance_status": assignment_document.get("remittance_status"),
+        "remittance_rate_history": _serialize_history(assignment_document.get("remittance_rate_history")),
+        "remittance_status_history": _serialize_history(assignment_document.get("remittance_status_history")),
+        "remittance_agreement_history": _serialize_history(assignment_document.get("remittance_agreement_history")),
         "start_date": assignment_document.get("start_date"),
         "start_time": assignment_document.get("start_time").isoformat()
         if hasattr(assignment_document.get("start_time"), "isoformat")

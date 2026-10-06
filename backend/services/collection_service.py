@@ -15,14 +15,16 @@ from models.vehicle import serialize_vehicle
 from services.payment_cycle_service import (
     APPROVED_PAYMENT_STATUSES,
     PENDING_PAYMENT_STATUSES,
+    auto_allocate_confirmed_payment,
     collection_cycle_window,
     get_current_cycle_for_assignment,
     get_weekly_cycle_window,
+    normalize_payment_allocations,
 )
 from services.wallet_service import create_wallet_entry
 from utils.api_error import ApiError
 from utils.mongo_indexes import ensure_indexes_for_collection
-from utils.performance import build_cache_key, get_ttl_cached, log_db_duration, set_ttl_cached
+from utils.performance import build_cache_key, get_ttl_cached, invalidate_ttl_cache, log_db_duration, set_ttl_cached
 
 
 ALLOWED_COLLECTION_STATUSES = {"pending", "submitted", "received", "approved", "rejected", "reversed"}
@@ -48,9 +50,26 @@ COLLECTION_LIST_PROJECTION = {
     "week_end": 1,
     "payment_deadline": 1,
     "rejection_reason": 1,
+    "reversal_reason": 1,
+    "correction_reason": 1,
     "is_late": 1,
+    "payment_purpose": 1,
+    "reversed_at": 1,
+    "status_history": 1,
+    "remittance_allocations": 1,
+    "remittance_unallocated_credit": 1,
     "received_by_admin_id": 1,
     "approved_by_admin_id": 1,
+    "submitted_by_driver_id": 1,
+    "rejected_by_admin_id": 1,
+    "reversed_by_admin_id": 1,
+    "confirmation_actor": 1,
+    "reversal_actor": 1,
+    "original_payment_snapshot": 1,
+    "correction_history": 1,
+    "submitted_at": 1,
+    "approved_at": 1,
+    "rejected_at": 1,
     "created_at": 1,
     "updated_at": 1,
 }
@@ -62,6 +81,14 @@ ASSIGNMENT_SUMMARY_PROJECTION = {
     "status": 1,
     "weekly_target": 1,
     "daily_target": 1,
+    "remittance_weekly_amount": 1,
+    "remittance_start_date": 1,
+    "remittance_end_date": 1,
+    "remittance_week_pattern": 1,
+    "remittance_payment_deadline": 1,
+    "remittance_status": 1,
+    "remittance_rate_history": 1,
+    "remittance_status_history": 1,
     "start_date": 1,
     "end_date": 1,
     "created_at": 1,
@@ -75,6 +102,13 @@ def now_utc():
 
 def collections_collection():
     return get_collection("collections")
+
+
+def _invalidate_payment_caches(driver_id=None):
+    prefixes = ["collections:"]
+    if driver_id:
+        prefixes.append(f"driver_wallet|driver_user_id={driver_id}")
+    invalidate_ttl_cache(*prefixes)
 
 
 def users_collection():
@@ -98,6 +132,7 @@ def ensure_collection_indexes():
             {"keys": [("assignment_id", ASCENDING)]},
             {"keys": [("dispatch_job_id", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("collection_source_key", ASCENDING)], "options": {"unique": True, "sparse": True}},
+            {"keys": [("payment_submission_key", ASCENDING)], "options": {"unique": True, "sparse": True}},
             {"keys": [("created_at", DESCENDING)]},
             {"keys": [("updated_at", DESCENDING)]},
             {"keys": [("submitted_at", DESCENDING)]},
@@ -163,6 +198,30 @@ def _get_admin_document(admin_id):
     return admin
 
 
+def _actor_snapshot(user: dict) -> dict:
+    return {
+        "id": str(user.get("_id")),
+        "full_name": user.get("full_name"),
+        "role": user.get("role"),
+        "email": user.get("email"),
+    }
+
+
+def _ensure_reversal_wallet_entry(collection_document: dict, current_user_id: str):
+    return create_wallet_entry(
+        driver_id=collection_document["driver_id"],
+        vehicle_id=collection_document.get("vehicle_id"),
+        assignment_id=collection_document.get("assignment_id"),
+        entry_type="reversal",
+        description=f"Payment reversal: {collection_document.get('reversal_reason') or 'approved correction'}",
+        debit=float(collection_document.get("amount") or 0),
+        credit=0,
+        reference_id=collection_document["_id"],
+        created_by=current_user_id,
+        event_key=f"collection-reversal:{collection_document['_id']}",
+    )
+
+
 def _get_driver_document(driver_id):
     driver_object_id = _to_object_id(driver_id, "driver_id")
     driver = users_collection().find_one({"_id": driver_object_id, "role": "driver"})
@@ -202,8 +261,11 @@ def _load_collection_related_maps(collection_documents: list[dict]) -> dict[str,
         for document in collection_documents
         for value in (
             document.get("driver_id"),
+            document.get("submitted_by_driver_id"),
             document.get("received_by_admin_id"),
             document.get("approved_by_admin_id"),
+            document.get("rejected_by_admin_id"),
+            document.get("reversed_by_admin_id"),
         )
         if isinstance(value, ObjectId)
     }
@@ -282,12 +344,24 @@ def _enrich_collection(
         {"_id": collection_document.get("approved_by_admin_id")},
         USER_SUMMARY_PROJECTION,
     )
+    submitted_by = (user_lookup or {}).get(collection_document.get("submitted_by_driver_id")) or users_collection().find_one(
+        {"_id": collection_document.get("submitted_by_driver_id")}, USER_SUMMARY_PROJECTION,
+    )
+    rejected_by = (user_lookup or {}).get(collection_document.get("rejected_by_admin_id")) or users_collection().find_one(
+        {"_id": collection_document.get("rejected_by_admin_id")}, USER_SUMMARY_PROJECTION,
+    )
+    reversed_by = (user_lookup or {}).get(collection_document.get("reversed_by_admin_id")) or users_collection().find_one(
+        {"_id": collection_document.get("reversed_by_admin_id")}, USER_SUMMARY_PROJECTION,
+    )
 
     collection["driver"] = serialize_user(driver) if driver else None
     collection["vehicle"] = serialize_vehicle(vehicle) if vehicle else None
     collection["assignment"] = serialize_assignment(assignment) if assignment else None
     collection["received_by_admin"] = serialize_user(received_by) if received_by else None
     collection["approved_by_admin"] = serialize_user(approved_by) if approved_by else None
+    collection["submitted_by_user"] = serialize_user(submitted_by) if submitted_by else None
+    collection["rejected_by_user"] = serialize_user(rejected_by) if rejected_by else None
+    collection["reversed_by_user"] = serialize_user(reversed_by) if reversed_by else None
     cycle_window = collection_cycle_window(collection_document)
     collection["cycle_key"] = collection_document.get("cycle_key") or cycle_window["cycle_key"]
     collection["week_start"] = collection_document.get("week_start") or cycle_window["week_start"]
@@ -307,6 +381,7 @@ def _enrich_collection(
     )
     collection["driver_note"] = collection_document.get("driver_note") or collection_document.get("notes")
     collection["admin_approval_note"] = collection_document.get("admin_approval_note")
+    collection["reversal_reason"] = collection_document.get("reversal_reason") or collection_document.get("correction_reason")
     return collection
 
 
@@ -362,6 +437,7 @@ def _cached_collection_options_payload() -> dict:
     assignment_options = []
     for assignment in assignments:
         option = serialize_assignment(assignment)
+        option["current_remittance_cycle"] = get_current_cycle_for_assignment(assignment)
         driver = driver_lookup.get(assignment.get("driver_id"))
         vehicle = vehicle_lookup.get(assignment.get("vehicle_id"))
         option["driver"] = serialize_user(driver) if driver else None
@@ -411,13 +487,19 @@ def _build_collection_document(
     admin_approval_note: str | None = None,
     dispatch_job_id: ObjectId | None = None,
     dispatch_financial_id: ObjectId | None = None,
+    remittance_allocations: list[dict] | None = None,
 ) -> dict:
     timestamp = now_utc()
-    cycle_window = get_weekly_cycle_window(collection_date)
+    payment_purpose = "dispatch" if dispatch_job_id or dispatch_financial_id else "weekly_remittance"
+    cycle_window = get_weekly_cycle_window(
+        collection_date,
+        week_pattern=assignment.get("remittance_week_pattern") or "mon_sat",
+        payment_deadline=assignment.get("remittance_payment_deadline") or "week_end",
+    )
     collection_dt = _parse_collection_date(collection_date) or timestamp
     is_late = collection_dt.astimezone(timezone.utc) > cycle_window["payment_deadline_dt"]
 
-    return {
+    document = {
         "driver_id": driver["_id"],
         "vehicle_id": vehicle["_id"],
         "assignment_id": assignment["_id"],
@@ -433,6 +515,8 @@ def _build_collection_document(
         "driver_note": notes,
         "admin_approval_note": admin_approval_note,
         "status": status,
+        "payment_purpose": payment_purpose,
+        "status_history": [{"status": status, "at": timestamp, "by": ObjectId(current_user_id)}],
         "cycle_key": cycle_window["cycle_key"],
         "week_start": cycle_window["week_start"],
         "week_end": cycle_window["week_end"],
@@ -449,6 +533,12 @@ def _build_collection_document(
         "created_at": timestamp,
         "updated_at": timestamp,
     }
+    if remittance_allocations is not None:
+        document["remittance_allocations"] = remittance_allocations
+        document["remittance_unallocated_credit"] = round(
+            amount - sum(float(item.get("amount") or 0) for item in remittance_allocations), 2
+        )
+    return document
 
 
 def list_collections(
@@ -504,11 +594,11 @@ def create_dispatch_collection_submission(
         "driver_id": job_document.get("driver_id"), "vehicle_id": job_document.get("vehicle_id"),
         "assignment_id": assignment.get("_id") if assignment else None,
         "dispatch_job_id": job_document["_id"], "dispatch_financial_id": financial_record["_id"],
-        "collection_source_key": key, "amount": _round_currency_amount(amount_collected),
+        "collection_source_key": key, "payment_purpose": "dispatch", "amount": _round_currency_amount(amount_collected),
         "submitted_amount": _round_currency_amount(amount_submitted), "admin_received_amount": None,
         "collection_date": timestamp.date().isoformat(), "payment_method": payment_method,
         "reference_number": payment_reference, "notes": finance_notes, "driver_note": finance_notes,
-        "status": "submitted", "submitted_by_driver_id": _to_object_id(current_user_id, "current_user_id"),
+        "status": "submitted", "status_history": [{"status": "submitted", "at": timestamp, "by": _to_object_id(current_user_id, "current_user_id")}], "submitted_by_driver_id": _to_object_id(current_user_id, "current_user_id"),
         "submitted_at": timestamp, "created_at": timestamp, "updated_at": timestamp,
         "is_late": False,
     }
@@ -670,7 +760,8 @@ def create_collection(payload: dict, current_user_id: str) -> dict:
     admin_received_amount = None
     admin_approval_note = (payload.get("admin_approval_note") or "").strip() or None
     if status == "approved":
-        approved_by_admin = _get_admin_document(payload.get("approved_by_admin_id") or current_user_id)
+        # Confirmation identity always comes from the authenticated request actor.
+        approved_by_admin = _get_admin_document(current_user_id)
         received_by_admin = received_by_admin or approved_by_admin
         admin_received_amount = _round_currency_amount(amount)
         if payload.get("admin_received_amount") is not None:
@@ -679,6 +770,14 @@ def create_collection(payload: dict, current_user_id: str) -> dict:
             )
             if admin_received_amount != _round_currency_amount(amount):
                 raise ApiError("Received amount must match submitted amount.", status_code=400)
+        admin_approval_note = admin_approval_note or "Payment amount verified and confirmed."
+
+    raw_submission_key = str(payload.get("idempotency_key") or "").strip() or None
+    submission_key = f"admin:{current_user_id}:{raw_submission_key}" if raw_submission_key else None
+    if submission_key:
+        existing = collections_collection().find_one({"payment_submission_key": submission_key})
+        if existing:
+            return _enrich_collection(existing)
 
     collection_document = _build_collection_document(
         driver=driver,
@@ -698,17 +797,35 @@ def create_collection(payload: dict, current_user_id: str) -> dict:
         admin_approval_note=admin_approval_note,
         dispatch_job_id=dispatch_job_id,
         dispatch_financial_id=dispatch_financial_id,
+        remittance_allocations=normalize_payment_allocations(assignment, payload.get("remittance_allocations"), amount)
+        if "remittance_allocations" in payload and not dispatch_job_id else None,
     )
-    result = collections_collection().insert_one(collection_document)
-    collection_document["_id"] = result.inserted_id
+    if submission_key:
+        collection_document["payment_submission_key"] = submission_key
+    try:
+        result = collections_collection().insert_one(collection_document)
+        collection_document["_id"] = result.inserted_id
+    except Exception:
+        existing = collections_collection().find_one({"payment_submission_key": submission_key}) if submission_key else None
+        if existing:
+            return _enrich_collection(existing)
+        raise
 
     if status == "approved":
+        collection_document["confirmation_actor"] = _actor_snapshot(approved_by_admin)
+        collections_collection().update_one(
+            {"_id": collection_document["_id"]},
+            {"$set": {"confirmation_actor": collection_document["confirmation_actor"]}},
+        )
         _create_wallet_credit_for_collection(collection_document, current_user_id=current_user_id)
+        auto_allocate_confirmed_payment(collection_document, current_user_id=current_user_id)
+
+    _invalidate_payment_caches(collection_document.get("driver_id"))
 
     return _enrich_collection(collection_document)
 
 
-def submit_driver_payment(payload: dict, current_user_id: str) -> dict:
+def submit_driver_payment(payload: dict, current_user_id: str, idempotency_key: str | None = None) -> dict:
     driver = _get_driver_document(current_user_id)
     assignment = assignments_collection().find_one(
         {"driver_id": driver["_id"], "status": {"$in": ["active", "suspended"]}}
@@ -734,6 +851,13 @@ def submit_driver_payment(payload: dict, current_user_id: str) -> dict:
         financial = get_collection("dispatch_financial_records").find_one({"dispatch_job_id": dispatch_job_id})
         dispatch_financial_id = financial.get("_id") if financial else None
 
+    raw_submission_key = str(idempotency_key or payload.get("idempotency_key") or "").strip() or None
+    submission_key = f"driver:{current_user_id}:{raw_submission_key}" if raw_submission_key else None
+    if submission_key:
+        existing = collections_collection().find_one({"payment_submission_key": submission_key})
+        if existing:
+            return _enrich_collection(existing)
+
     collection_document = _build_collection_document(
         driver=driver,
         vehicle=vehicle,
@@ -748,9 +872,20 @@ def submit_driver_payment(payload: dict, current_user_id: str) -> dict:
         submitted_by_driver_id=driver["_id"],
         dispatch_job_id=dispatch_job_id,
         dispatch_financial_id=dispatch_financial_id,
+        remittance_allocations=normalize_payment_allocations(assignment, payload.get("remittance_allocations"), amount)
+        if "remittance_allocations" in payload and not dispatch_job_id else None,
     )
-    result = collections_collection().insert_one(collection_document)
-    collection_document["_id"] = result.inserted_id
+    if submission_key:
+        collection_document["payment_submission_key"] = submission_key
+    try:
+        result = collections_collection().insert_one(collection_document)
+        collection_document["_id"] = result.inserted_id
+    except Exception:
+        existing = collections_collection().find_one({"payment_submission_key": submission_key}) if submission_key else None
+        if existing:
+            return _enrich_collection(existing)
+        raise
+    _invalidate_payment_caches(collection_document.get("driver_id"))
     return _enrich_collection(collection_document)
 
 
@@ -778,6 +913,10 @@ def update_collection_status(
 
     current_status = collection_document.get("status")
     if current_status == "reversed":
+        if next_status == "reversed":
+            _ensure_reversal_wallet_entry(collection_document, current_user_id)
+            _invalidate_payment_caches(collection_document.get("driver_id"))
+            return _enrich_collection(collection_document)
         raise ApiError("Reversed collections cannot be updated.", status_code=400)
     if current_status == "approved" and next_status in {"pending", "submitted", "received", "rejected"}:
         raise ApiError("Approved collections cannot be moved back to a pending or rejected state.", status_code=400)
@@ -807,11 +946,10 @@ def update_collection_status(
         update_fields["rejected_by_admin_id"] = None
         update_fields["rejected_at"] = None
         update_fields["admin_received_amount"] = normalized_received_amount
-        update_fields["admin_approval_note"] = (admin_approval_note or "").strip() or None
+        update_fields["admin_approval_note"] = (admin_approval_note or "").strip() or "Payment amount verified and confirmed."
+        update_fields["confirmation_actor"] = _actor_snapshot(approved_by_admin)
         if not collection_document.get("received_by_admin_id"):
             update_fields["received_by_admin_id"] = approved_by_admin["_id"]
-        if current_status not in APPROVED_PAYMENT_STATUSES:
-            _create_wallet_credit_for_collection(collection_document, current_user_id=current_user_id)
 
     if next_status == "rejected":
         reason = (rejection_reason or "").strip()
@@ -823,24 +961,60 @@ def update_collection_status(
         update_fields["rejected_at"] = timestamp
 
     if next_status == "reversed":
-        create_wallet_entry(
-            driver_id=collection_document["driver_id"],
-            vehicle_id=collection_document.get("vehicle_id"),
-            assignment_id=collection_document.get("assignment_id"),
-            entry_type="reversal",
-            description="Collection reversal",
-            debit=float(collection_document.get("amount") or 0),
-            credit=0,
-            reference_id=collection_document["_id"],
-            created_by=current_user_id,
-        )
-        update_fields["rejection_reason"] = (rejection_reason or "").strip() or None
+        if current_status != "approved":
+            raise ApiError("Only a confirmed payment can be reversed.", status_code=409)
+        reason = (rejection_reason or "").strip()
+        if not reason:
+            raise ApiError("reversal_reason is required when reversing a confirmed payment.", status_code=400)
+        reversed_by_admin = _get_admin_document(current_user_id)
+        update_fields["reversal_reason"] = reason
+        update_fields["correction_reason"] = reason
+        update_fields["reversed_by_admin_id"] = reversed_by_admin["_id"]
+        update_fields["reversal_actor"] = _actor_snapshot(reversed_by_admin)
+        update_fields["reversed_at"] = timestamp
 
-    collections_collection().update_one(
-        {"_id": collection_object_id},
-        {"$set": update_fields},
+    status_event = {"status": next_status, "at": timestamp, "by": ObjectId(current_user_id)}
+    update_document = {"$set": update_fields, "$push": {"status_history": status_event}}
+    if next_status == "reversed":
+        snapshot = {
+            "payment_amount": _round_currency_amount(collection_document.get("amount") or 0),
+            "received_amount": collection_document.get("admin_received_amount"),
+            "payment_date": collection_document.get("collection_date"),
+            "approved_at": collection_document.get("approved_at"),
+            "approved_by_admin_id": collection_document.get("approved_by_admin_id"),
+            "confirmation_actor": collection_document.get("confirmation_actor"),
+            "allocations": [dict(row) for row in (collection_document.get("remittance_allocations") or [])],
+            "unallocated_credit": collection_document.get("remittance_unallocated_credit"),
+        }
+        update_fields["original_payment_snapshot"] = snapshot
+        update_document["$push"]["correction_history"] = {
+            "action": "payment_reversed",
+            "at": timestamp,
+            "by": ObjectId(current_user_id),
+            "actor": update_fields["reversal_actor"],
+            "reason": update_fields["reversal_reason"],
+            "original_amount": snapshot["payment_amount"],
+            "revised_amount": 0.0,
+            "affected_weeks": [row.get("cycle_key") for row in snapshot["allocations"]],
+        }
+
+    update_result = collections_collection().update_one(
+        {"_id": collection_object_id, "status": current_status},
+        update_document,
     )
+    if not update_result.modified_count:
+        fresh = collections_collection().find_one({"_id": collection_object_id})
+        if fresh and fresh.get("status") == next_status:
+            return _enrich_collection(fresh)
+        raise ApiError("Collection changed while this request was being processed. Please refresh and try again.", status_code=409)
     collection_document.update(update_fields)
+    if next_status == "approved":
+        if current_status not in APPROVED_PAYMENT_STATUSES:
+            _create_wallet_credit_for_collection(collection_document, current_user_id=current_user_id)
+        auto_allocate_confirmed_payment(collection_document, current_user_id=current_user_id)
+    if next_status == "reversed":
+        _ensure_reversal_wallet_entry(collection_document, current_user_id)
+    _invalidate_payment_caches(collection_document.get("driver_id"))
     return _enrich_collection(collection_document)
 
 
@@ -1008,11 +1182,11 @@ def get_driver_dashboard_summary(driver_user_id: str) -> dict:
     summary_payload = collection_summary[0] if collection_summary else {}
     totals = (summary_payload.get("totals") or [{}])[0]
     latest_collection_documents = summary_payload.get("latest") or []
-    submitted_total = round(float(totals.get("submitted_total") or 0), 2)
-    amount_paid_this_week = round(float(totals.get("approved_total") or 0), 2)
-    weekly_target = float(active_assignment.get("weekly_target") or 0)
+    submitted_total = round(float(current_cycle.get("submitted_total") or 0), 2)
+    amount_paid_this_week = round(float(current_cycle.get("confirmed_allocated_payments") or current_cycle.get("approved_total") or 0), 2)
+    weekly_target = round(float(current_cycle.get("final_due") if current_cycle.get("final_due") is not None else current_cycle.get("weekly_target") or 0), 2)
     daily_target = float(active_assignment.get("daily_target") or 0)
-    outstanding_balance = round(max(weekly_target - amount_paid_this_week, 0), 2)
+    outstanding_balance = round(float(current_cycle.get("outstanding") if current_cycle.get("outstanding") is not None else max(weekly_target - amount_paid_this_week, 0)), 2)
     achievement_percentage = round(
         (amount_paid_this_week / weekly_target * 100) if weekly_target > 0 else 0,
         2,

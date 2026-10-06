@@ -11,7 +11,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
-import { getStoredSessionUser } from '../../lib/auth-session';
+import { getActiveSessionRole, getStoredSessionUser } from '../../lib/auth-session';
 import { useDebouncedValue } from '../../lib/use-debounced-value';
 
 type CollectionStatus = 'pending' | 'submitted' | 'received' | 'approved' | 'rejected' | 'reversed';
@@ -32,6 +32,12 @@ interface AssignmentOption {
   daily_target: number;
   start_date: string;
   status: string;
+  current_remittance_cycle?: {
+    original_amount: number;
+    approved_adjustment: number;
+    final_due: number;
+    outstanding: number;
+  } | null;
   driver: UserSummary | null;
   vehicle: {
     id: string;
@@ -45,6 +51,7 @@ interface CollectionRecord {
   driver_id: string;
   vehicle_id: string;
   assignment_id: string;
+  dispatch_job_id?: string | null;
   amount: number;
   submitted_amount?: number | null;
   admin_received_amount?: number | null;
@@ -55,12 +62,15 @@ interface CollectionRecord {
   driver_note?: string | null;
   admin_approval_note?: string | null;
   status: CollectionStatus;
+  payment_purpose?: 'weekly_remittance' | 'weekly_target' | 'dispatch' | null;
   cycle_key?: string;
   week_start?: string;
   week_end?: string;
   payment_deadline?: string;
   rejection_reason?: string | null;
   is_late?: boolean;
+  remittance_allocations?: Array<{ cycle_key: string; week_start: string; amount: number }>;
+  remittance_unallocated_credit?: number | null;
   received_by_admin_id: string;
   approved_by_admin_id: string | null;
   driver: UserSummary | null;
@@ -72,6 +82,16 @@ interface CollectionRecord {
   assignment: AssignmentOption | null;
   received_by_admin: UserSummary | null;
   approved_by_admin: UserSummary | null;
+  submitted_by_user?: UserSummary | null;
+  rejected_by_user?: UserSummary | null;
+  submitted_at?: string | null;
+  approved_at?: string | null;
+  rejected_at?: string | null;
+  reversed_at?: string | null;
+  reversal_reason?: string | null;
+  reversal_actor?: UserSummary | null;
+  reversed_by_user?: UserSummary | null;
+  original_payment_snapshot?: { payment_amount?: number; approved_at?: string | null; allocations?: Array<{ cycle_key: string; week_start: string; amount: number }> } | null;
 }
 
 interface CollectionsResponse {
@@ -126,6 +146,11 @@ interface WeeklyDriverStatusRecord {
     week_end: string;
     payment_deadline: string;
     weekly_target: number;
+    original_amount?: number;
+    approved_adjustment?: number;
+    final_due?: number;
+    confirmed_allocated_payments?: number;
+    pending_total?: number;
     submitted_total: number;
     approved_total: number;
     outstanding_balance: number;
@@ -203,8 +228,9 @@ function getSubmittedAmount(collection: CollectionRecord) {
 
 function getStatusLabel(status: CollectionStatus) {
   if (status === 'pending' || status === 'submitted' || status === 'received') {
-    return 'Pending';
+    return 'Pending Confirmation';
   }
+  if (status === 'approved') return 'Confirmed';
   return status.charAt(0).toUpperCase() + status.slice(1);
 }
 
@@ -243,6 +269,7 @@ export default function Collections() {
   const [pageNotice, setPageNotice] = useState('');
   const [formError, setFormError] = useState('');
   const [formState, setFormState] = useState<CollectionFormState>(initialFormState);
+  const [manualPaymentKey, setManualPaymentKey] = useState(() => crypto.randomUUID());
   const [currentPage, setCurrentPage] = useState(1);
   const [pagination, setPagination] = useState({ page: 1, page_size: 25, total_records: 0, total_pages: 1 });
   const debouncedSearchQuery = useDebouncedValue(searchQuery, 300);
@@ -256,7 +283,7 @@ export default function Collections() {
   });
 
   const sessionUser = getStoredSessionUser();
-  const currentRole = sessionUser?.role || null;
+  const currentRole = getActiveSessionRole(sessionUser);
   const currentUserId = sessionUser?.id || '';
 
   const getSettledData = <T,>(result: PromiseSettledResult<T>, fallback: T): T =>
@@ -380,6 +407,7 @@ export default function Collections() {
       collection_date: new Date().toISOString().slice(0, 10),
       received_by_admin_id: currentUserId,
     });
+    setManualPaymentKey(crypto.randomUUID());
   };
 
   const closeApprovalModal = () => {
@@ -423,6 +451,7 @@ export default function Collections() {
     try {
       await apiRequest<CollectionMutationResponse>('/collections', {
         method: 'POST',
+        headers: { 'Idempotency-Key': manualPaymentKey },
         body: JSON.stringify({
           driver_id: selectedAssignment.driver_id,
           vehicle_id: selectedAssignment.vehicle_id,
@@ -434,7 +463,6 @@ export default function Collections() {
           reference_number: formState.reference_number,
           notes: formState.notes,
           received_by_admin_id: formState.received_by_admin_id || currentUserId,
-          approved_by_admin_id: formState.received_by_admin_id || currentUserId,
           admin_received_amount: Number(formState.amount),
           admin_approval_note: formState.notes,
         }),
@@ -456,7 +484,7 @@ export default function Collections() {
   const handleStatusUpdate = async (
     collectionId: string,
     status: CollectionStatus,
-    options?: { admin_received_amount?: number; admin_approval_note?: string; rejection_reason?: string },
+    options?: { admin_received_amount?: number; admin_approval_note?: string; rejection_reason?: string; reversal_reason?: string },
   ) => {
     setPageError('');
     try {
@@ -479,6 +507,7 @@ export default function Collections() {
           body: JSON.stringify({
             status,
             rejection_reason: options?.rejection_reason,
+            reversal_reason: options?.reversal_reason,
             admin_received_amount: options?.admin_received_amount,
             admin_approval_note: options?.admin_approval_note,
           }),
@@ -504,6 +533,32 @@ export default function Collections() {
       admin_approval_note: '',
     });
     setActionError('');
+  };
+
+  const reverseConfirmedPayment = async (collection: CollectionRecord) => {
+    const reason = window.prompt('Required correction reason for reversing this confirmed payment');
+    if (!reason?.trim()) return;
+    await handleStatusUpdate(collection.id, 'reversed', { reversal_reason: reason.trim() });
+  };
+
+  const editPaymentAllocations = async (collection: CollectionRecord) => {
+    try {
+      const response = await apiRequest<{ data: { weeks: Array<{ cycle_key: string; outstanding: number }> } }>(`/collections/remittance/position?assignment_id=${collection.assignment_id}&limit=52`);
+      const suggested = (collection.remittance_allocations || []).map((item) => `${item.cycle_key}=${item.amount}`).join(', ');
+      const available = response.data.weeks.map((week) => `${week.cycle_key} (${formatCurrency(week.outstanding)} due)`).join('\n');
+      const entered = window.prompt(`Allocate this confirmed receipt using WEEK=AMOUNT pairs separated by commas.\n\nAvailable weeks:\n${available}`, suggested);
+      if (entered === null) return;
+      const allocations = entered.split(',').filter((value) => value.trim()).map((value) => {
+        const [cycle_key, amount] = value.trim().split('=');
+        return { cycle_key: cycle_key?.trim(), amount: Number(amount) };
+      });
+      if (allocations.some((item) => !item.cycle_key || !Number.isFinite(item.amount) || item.amount <= 0)) {
+        setPageError('Use allocation entries such as 2026-W30=400, 2026-W31=400.');
+        return;
+      }
+      await apiRequest(`/collections/remittance/payments/${collection.id}/allocations`, { method: 'PUT', body: JSON.stringify({ allocations }) });
+      await loadCollections();
+    } catch (error) { setPageError(error instanceof ApiRequestError ? error.message : 'Unable to update payment allocations.'); }
   };
 
   const openRejectionModal = (collection: CollectionRecord) => {
@@ -805,7 +860,7 @@ export default function Collections() {
               <tr>
                 <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-700">Driver</th>
                 <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-700">Vehicle</th>
-                <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-700">Weekly Target</th>
+                <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-700">Revised Due</th>
                 <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-700">Submitted</th>
                 <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-700">Approved</th>
                 <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-700">Outstanding</th>
@@ -826,7 +881,7 @@ export default function Collections() {
                     </div>
                     <div className="text-xs capitalize text-gray-500">{record.vehicle?.vehicle_type || 'n/a'}</div>
                   </td>
-                  <td className="px-6 py-4 text-gray-700">{formatCurrency(record.cycle.weekly_target)}</td>
+                  <td className="px-6 py-4 text-gray-700"><div>{formatCurrency(record.cycle.final_due ?? record.cycle.weekly_target)}</div>{Number(record.cycle.approved_adjustment || 0) > 0 && <div className="text-xs text-gray-500">Original {formatCurrency(record.cycle.original_amount ?? record.cycle.weekly_target)}</div>}</td>
                   <td className="px-6 py-4 text-blue-700">{formatCurrency(record.cycle.submitted_total)}</td>
                   <td className="px-6 py-4 text-green-700">{formatCurrency(record.cycle.approved_total)}</td>
                   <td className="px-6 py-4 text-red-700">{formatCurrency(record.cycle.outstanding_balance)}</td>
@@ -872,12 +927,12 @@ export default function Collections() {
                 <tr>
                   <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-700">Driver</th>
                   <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-700">Vehicle</th>
-                  <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-700">Amount</th>
+                  <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-700">Payment / Allocation</th>
                   <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-700">Method</th>
                   <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-700">Date</th>
                   <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-700">Status</th>
                   <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-700">Deadline</th>
-                  <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-700">Received By</th>
+                  <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-700">Confirmation Audit</th>
                   <th className="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-700">Actions</th>
                 </tr>
               </thead>
@@ -894,9 +949,9 @@ export default function Collections() {
                       </div>
                       <div className="text-xs text-gray-500">{collection.reference_number || 'No reference'}</div>
                     </td>
-                    <td className="px-6 py-4 font-semibold text-[#0F172A]">{formatCurrency(collection.amount)}</td>
+                    <td className="px-6 py-4 font-semibold text-[#0F172A]"><div>Payment amount: {formatCurrency(collection.amount)}</div>{collection.remittance_allocations?.length ? <div className="mt-1 text-xs font-normal text-gray-500">Allocated: {formatCurrency(collection.remittance_allocations.reduce((sum, item) => sum + Number(item.amount || 0), 0))} · Weeks: {collection.remittance_allocations.map((item) => `${item.cycle_key} (${formatCurrency(item.amount)})`).join(', ')}</div> : <div className="mt-1 text-xs font-normal text-gray-500">Allocated: {formatCurrency(0)}</div>}{Number(collection.remittance_unallocated_credit || 0) > 0 ? <div className="text-xs font-normal text-green-700">Unallocated credit: {formatCurrency(Number(collection.remittance_unallocated_credit))}</div> : null}</td>
                     <td className="px-6 py-4 capitalize text-gray-700">{collection.payment_method}</td>
-                    <td className="px-6 py-4 text-gray-700">{collection.collection_date}</td>
+                    <td className="px-6 py-4 text-gray-700"><div>Payment: {collection.collection_date}</div><div className="mt-1 text-xs text-gray-500">Submitted: {collection.submitted_at ? new Date(collection.submitted_at).toLocaleString() : 'Legacy time unavailable'}</div></td>
                     <td className="px-6 py-4">
                       <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${statusClassName(collection.status)}`}>
                         {getStatusLabel(collection.status)}
@@ -907,12 +962,14 @@ export default function Collections() {
                       {collection.rejection_reason && (
                         <div className="mt-1 text-xs text-red-600">{collection.rejection_reason}</div>
                       )}
+                      {collection.reversal_reason && <div className="mt-1 text-xs text-red-700">Correction: {collection.reversal_reason}</div>}
+                      {['pending', 'submitted', 'received'].includes(collection.status) && <div className="mt-1 text-xs text-amber-700">Awaiting Admin confirmation</div>}
                     </td>
                     <td className="px-6 py-4 text-gray-700">
                       {collection.payment_deadline || 'N/A'}
                     </td>
                     <td className="px-6 py-4 text-gray-700">
-                      {collection.received_by_admin?.full_name || 'Unknown Admin'}
+                      {collection.status === 'approved' ? <><div>{collection.approved_by_admin?.full_name || 'Legacy confirmer unavailable'}</div><div className="text-xs capitalize text-gray-500">{collection.approved_by_admin?.role || 'account unavailable'} · {collection.approved_at ? new Date(collection.approved_at).toLocaleString() : 'Legacy time unavailable'}</div><div className="mt-1 text-xs text-gray-500">Reason: {collection.admin_approval_note || 'Legacy reason unavailable'}</div></> : collection.status === 'rejected' ? <><div>{collection.rejected_by_user?.full_name || 'Rejected'}</div><div className="text-xs text-gray-500">{collection.rejected_at ? new Date(collection.rejected_at).toLocaleString() : 'Legacy time unavailable'}</div></> : collection.status === 'reversed' ? <><div>Reversed by {collection.reversed_by_user?.full_name || collection.reversal_actor?.full_name || 'Legacy corrector unavailable'}</div><div className="text-xs capitalize text-gray-500">{collection.reversed_by_user?.role || collection.reversal_actor?.role || 'account unavailable'} · {collection.reversed_at ? new Date(collection.reversed_at).toLocaleString() : 'Legacy time unavailable'}</div><div className="mt-1 text-xs text-red-700">Reason: {collection.reversal_reason || 'Legacy reason unavailable'}</div>{collection.original_payment_snapshot?.allocations?.length ? <div className="mt-1 text-xs text-gray-500">Affected weeks: {collection.original_payment_snapshot.allocations.map((item) => item.cycle_key).join(', ')}</div> : null}</> : <div className="text-amber-700">Pending Confirmation</div>}
                     </td>
                     <td className="px-6 py-4">
                       <div className="flex items-center gap-2">
@@ -942,9 +999,18 @@ export default function Collections() {
                             <XCircle className="h-4 w-4" />
                           </button>
                         )}
+                        {collection.status === 'approved' && collection.payment_purpose !== 'dispatch' && !collection.dispatch_job_id && (
+                          <button
+                            onClick={() => void editPaymentAllocations(collection)}
+                            className="rounded p-1.5 text-blue-600 transition-all hover:bg-blue-50"
+                            title="Edit weekly allocation"
+                          >
+                            <DollarSign className="h-4 w-4" />
+                          </button>
+                        )}
                         {collection.status === 'approved' && (
                           <button
-                            onClick={() => void handleStatusUpdate(collection.id, 'reversed')}
+                            onClick={() => void reverseConfirmedPayment(collection)}
                             className="rounded p-1.5 text-red-600 transition-all hover:bg-red-50"
                             title="Reverse collection"
                           >
@@ -1226,8 +1292,8 @@ export default function Collections() {
 
                 {selectedAssignment && (
                   <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-700">
-                    Vehicle: {selectedAssignment.vehicle?.registration_number || 'Unknown'} | Weekly
-                    target: {formatCurrency(selectedAssignment.weekly_target)}
+                    Vehicle: {selectedAssignment.vehicle?.registration_number || 'Unknown'} | Current obligation:{' '}
+                    {formatCurrency(selectedAssignment.current_remittance_cycle?.final_due ?? selectedAssignment.weekly_target)}
                   </div>
                 )}
 

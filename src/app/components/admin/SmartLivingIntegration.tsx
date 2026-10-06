@@ -2055,6 +2055,11 @@ function ConnectionPanel({
               Controlled manual preview and selected import only. Automatic sync
               remains disabled.
             </p>
+            {!status?.configured && status?.configuration_missing?.length ? (
+              <p className="mt-2 text-sm font-medium text-amber-900">
+                Missing on the deployed backend: {status.configuration_missing.join(', ')}. Add the variables in the hosting environment and restart the backend.
+              </p>
+            ) : null}
             {status?.last_checked && (
               <p className="mt-1 text-xs text-slate-500">
                 Last checked {new Date(status.last_checked).toLocaleString()}

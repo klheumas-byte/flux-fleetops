@@ -48,6 +48,7 @@ function resourcesForMutation(path: string): DataResource[] {
     resources.add('agents');
     resources.add('managers');
   }
+  if (/collections|payments|remittance|wallet|finance/.test(path)) resources.add('finance');
   return [...resources];
 }
 
@@ -57,6 +58,7 @@ function invalidateResourceCache(resources: DataResource[]) {
     drivers: ['driver', 'assignment'], users: ['user'], deliveries: ['delivery', 'smart-living'],
     delivery_runs: ['run', 'scheduler'], returns: ['return', 'reconcile'], branches: ['branch'],
     agents: ['agent'], managers: ['manager'], dispatch_opportunities: ['dispatch-opportunit'], notifications: ['notification'],
+    finance: ['collection', 'payment', 'remittance', 'wallet', 'finance'],
   };
   for (const [key] of responseCache) {
     if (resources.some((resource) => terms[resource].some((term) => key.toLowerCase().includes(term)))) responseCache.delete(key);
@@ -83,6 +85,13 @@ export function isRequestAborted(error: unknown) {
 
 export function resetAuthExpirySignal() {
   authExpiryEventDispatched = false;
+}
+
+export function resetApiSessionState() {
+  responseCache.clear();
+  requestControllers.forEach((controller) => controller.abort('session-changed'));
+  requestControllers.clear();
+  activeCancelGroups.clear();
 }
 
 function addControllerToGroup(groupKey: string | undefined, requestKey: string) {
@@ -202,7 +211,8 @@ export async function apiRequest<T>(
   });
 
   const requestUrl = `${API_BASE_URL}${path}`;
-  const requestKey = options.dedupeKey || `${method}:${requestUrl}`;
+  const sessionKey = token || 'anonymous';
+  const requestKey = `${sessionKey}:${options.dedupeKey || `${method}:${requestUrl}`}`;
   const cacheTtlMs = options.cacheTtlMs ?? 0;
   const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
   const isAuthSessionRequest = path === '/auth/me';

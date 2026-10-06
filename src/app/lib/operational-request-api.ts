@@ -40,6 +40,10 @@ export interface OperationRequest {
   destination_acceptance?: Record<string, unknown> | null;
   no_purchase_reason?: string | null;
   fuel_log_id?: string | null;
+  fuel_instruction?: { authorized_amount?: number | null; authorized_litres?: number | null; actual_amount?: number | null; actual_litres?: number | null; odometer_reading?: number | null; receipt_image?: string | null; discrepancy_notes?: string | null; posting_status?: string; finance_account_id?: string; finance_account_snapshot?: { account_name?: string; account_type?: string }; station_name?: string | null; actual_fuel_station_id?: string | null; actual_station_name?: string | null; actual_station_branch?: string | null; expense_id?: string | null } | null;
+  arrived_at?: string | null;
+  verification_status?: 'assigned' | 'submitted' | 'flagged' | 'verified' | null;
+  flag_reason?: string | null;
   vehicle?: { id: string; registration_number: string; make?: string | null; model?: string | null; vehicle_type?: string | null } | null;
   driver?: { id: string; full_name: string } | null;
   created_at?: string | null;
@@ -61,6 +65,8 @@ export interface OperationOptions {
   statuses: OperationStatus[];
   vehicles: Array<{ id: string; registration_number: string; make?: string | null; model?: string | null; is_available?: boolean; operational_state?: string; primary_reason?: string | null; availability_label?: string; requires_approval?: boolean; is_target_vehicle?: boolean }>;
   drivers: Array<{ id: string; full_name: string }>;
+  finance_accounts: Array<{ id: string; account_name: string; account_type: string; provider_name?: string | null }>;
+  fuel_stations: Array<{ id: string; station_name: string; brand_name?: string | null }>;
 }
 
 export interface PersonalUseDriverSummary {
@@ -88,10 +94,11 @@ export interface OperationListResponse {
   pagination: { page: number; page_size: number; total: number; total_pages: number };
 }
 
-export async function fetchOperationRequests(filters: { status?: string; operation_type?: string } = {}) {
+export async function fetchOperationRequests(filters: { status?: string; operation_type?: string; page_size?: number } = {}) {
   const params = new URLSearchParams();
   if (filters.status) params.set('status', filters.status);
   if (filters.operation_type) params.set('operation_type', filters.operation_type);
+  if (filters.page_size) params.set('page_size', String(filters.page_size));
   const result = await apiRequest<OperationListResponse>(`/operational-requests${params.size ? `?${params}` : ''}`, {
     componentName: 'OperationalRequests', requestLabel: 'list', dedupeKey: `operational-requests:${params}`,
   });
@@ -107,10 +114,11 @@ export async function fetchOperationRequest(id: string) {
   return result.data.request;
 }
 
-export async function fetchOperationOptions(filters: { planned_departure_at?: string; expected_return_at?: string } = {}) {
+export async function fetchOperationOptions(filters: { planned_departure_at?: string; expected_return_at?: string; include_availability?: boolean } = {}) {
   const params = new URLSearchParams();
   if (filters.planned_departure_at) params.set('planned_departure_at', filters.planned_departure_at);
   if (filters.expected_return_at) params.set('expected_return_at', filters.expected_return_at);
+  if (filters.include_availability === false) params.set('include_availability', 'false');
   const result = await apiRequest<OperationOptions>(`/operational-requests/options${params.size ? `?${params}` : ''}`, {
     componentName: 'OperationalRequests', requestLabel: 'options', dedupeKey: `operational-requests:options:${params}`, cacheTtlMs: 15_000,
   });
@@ -128,6 +136,11 @@ export async function fetchPersonalUseAnalytics(filters: { driver_id?: string; v
 
 export async function createOperationRequest(payload: Record<string, unknown>) {
   const result = await apiRequest<{ request: OperationRequest }>('/operational-requests', { method: 'POST', body: JSON.stringify(payload), componentName: 'OperationalRequests', requestLabel: 'create' });
+  return result.data.request;
+}
+
+export async function createFuelInstruction(payload: Record<string, unknown>) {
+  const result = await apiRequest<{ request: OperationRequest }>('/operational-requests/fuel-instructions', { method: 'POST', body: JSON.stringify(payload), componentName: 'OperationalRequests', requestLabel: 'create-fuel-instruction' });
   return result.data.request;
 }
 

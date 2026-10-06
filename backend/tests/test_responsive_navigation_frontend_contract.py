@@ -80,3 +80,20 @@ def test_kpi_grid_has_phone_tablet_and_desktop_densities():
     assert "grid-cols-2" in kpi_grid
     assert "min-[480px]:grid-cols-3" in kpi_grid
     assert "md:grid-cols-4" in kpi_grid
+
+
+def test_driver_dashboard_and_wallet_use_compact_phone_stat_grids():
+    dashboard = source("src/app/components/driver/DriverDashboard.tsx")
+    wallet = source("src/app/components/driver/MyWallet.tsx")
+
+    assert 'grid grid-cols-3 gap-2 sm:gap-3 md:grid-cols-4' in dashboard
+    assert 'mt-4 grid grid-cols-3 gap-2' in dashboard
+    assert 'grid grid-cols-3 gap-2 sm:gap-3 md:grid-cols-2' in dashboard
+    assert '[overflow-wrap:anywhere]' in dashboard
+
+    for label in ("Current Due", "Arrears", "Available Credit"):
+        assert label in wallet
+    assert 'grid grid-cols-3 gap-2 sm:gap-4' in wallet
+    assert 'summary.arrears > 0' in wallet
+    assert 'summary.credit > 0' in wallet
+    assert '[overflow-wrap:anywhere]' in wallet

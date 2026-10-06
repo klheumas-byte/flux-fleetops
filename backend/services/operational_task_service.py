@@ -51,6 +51,9 @@ REQUEST_PROJECTION = {
     "receiver_confirmation": 1,
     "task_confirmation": 1,
     "destination_acceptance": 1,
+    "fuel_instruction": 1,
+    "arrived_at": 1,
+    "verification_status": 1,
     "updated_at": 1,
 }
 
@@ -136,16 +139,20 @@ def _transfer_action(document: dict) -> dict:
 def _request_action(document: dict) -> dict:
     status = document.get("status")
     if status == "scheduled" and not document.get("acknowledged_at"):
-        return {"key": "acknowledge", "label": "Acknowledge"}
+        return {"key": "acknowledge", "label": "Accept" if document.get("fuel_instruction") else "Acknowledge"}
     if status == "scheduled" and not document.get("opening_check_completed_at"):
         return {"key": "opening_check", "label": "Opening Check"}
     if status == "scheduled":
         return {"key": "start", "label": "Start Movement"}
     if status == "movement_in_progress":
+        if document.get("fuel_instruction") and not document.get("arrived_at"):
+            return {"key": "arrive", "label": "Mark Arrived (optional)"}
         evidence_fields = ("receiver_confirmation", "task_confirmation", "destination_acceptance")
         if not any(document.get(field) for field in evidence_fields):
             return {"key": "confirm_task", "label": "Confirm Task"}
         return {"key": "return", "label": "Return Vehicle"}
+    if document.get("verification_status") == "flagged":
+        return {"key": "confirm_task", "label": "Correct Fuel Proof"}
     return {"key": "awaiting_verification", "label": "Await Verification"}
 
 

@@ -16,6 +16,7 @@ from models.assignment import serialize_assignment
 from models.user import serialize_user
 from models.vehicle import serialize_vehicle
 from models.vehicle_movement import serialize_vehicle_movement
+from models.finance_account import serialize_finance_account_snapshot
 from utils.api_error import ApiError
 from utils.fuel_levels import normalize_fuel_level_eighths
 from utils.mongo_indexes import ensure_indexes_for_collection
@@ -44,6 +45,7 @@ ALLOWED_MOVEMENT_TYPES = {
     "internal_company_delivery",
     "stock_transfer",
     "supplier_pickup",
+    "smart_living_delivery",
     "stock_return",
     "fuel_station_visit",
     "compliance_inspection_visit",
@@ -63,7 +65,11 @@ ALLOWED_MOVEMENT_STATUSES = {
     "returned",
     "closed",
     "cancelled",
+    "force_closed",
+    "superseded",
+    "voided",
 }
+TERMINAL_MOVEMENT_STATUSES = {"closed", "cancelled", "force_closed", "superseded", "voided"}
 OPEN_MOVEMENT_STATUSES = {
     "draft",
     "pending_approval",
@@ -80,6 +86,13 @@ LIST_PROJECTION = {
     "source_key": 1,
     "source_module": 1,
     "source_reference": 1,
+    "canonical_source_key": 1,
+    "replaces_movement_id": 1,
+    "superseded_by_movement_id": 1,
+    "superseded_at": 1,
+    "supersession_reason": 1,
+    "replacement_created_at": 1,
+    "replacement_reason": 1,
     "vehicle_id": 1,
     "driver_id": 1,
     "movement_custodian_id": 1,
@@ -135,6 +148,7 @@ LIST_PROJECTION = {
     "started_at": 1,
     "completed_at": 1,
     "updated_at": 1,
+    "fuel_advance": 1,
 }
 DETAIL_PROJECTION = {
     **LIST_PROJECTION,
@@ -149,6 +163,10 @@ DETAIL_PROJECTION = {
     "parts_changed": 1,
     "test_result": 1,
     "cancellation_reason": 1,
+    "force_close_reason": 1,
+    "force_closed_at": 1,
+    "force_closed_by": 1,
+    "physical_vehicle_confirmed": 1,
     "approved_by": 1,
     "approved_at": 1,
     "checked_out_by": 1,
@@ -266,8 +284,9 @@ def dispatch_jobs_collection():
 
 
 def ensure_vehicle_movement_indexes():
+    collection = vehicle_movements_collection()
     ensure_indexes_for_collection(
-        vehicle_movements_collection(),
+        collection,
         [
             {"keys": [("movement_id", ASCENDING)], "options": {"unique": True}},
             {"keys": [("vehicle_id", ASCENDING)]},
@@ -328,6 +347,35 @@ def ensure_vehicle_movement_indexes():
         ],
         collection_name="vehicle_movements",
     )
+    duplicate_driver = next(collection.aggregate([
+        {"$match": {"driver_id": {"$type": "objectId"}, "status": {"$in": sorted(OPEN_MOVEMENT_STATUSES)}}},
+        {"$group": {"_id": "$driver_id", "count": {"$sum": 1}, "movement_ids": {"$push": "$_id"}}},
+        {"$match": {"count": {"$gt": 1}}},
+        {"$limit": 1},
+    ]), None)
+    if duplicate_driver is None:
+        ensure_indexes_for_collection(
+            collection,
+            [{
+                "keys": [("driver_id", ASCENDING)],
+                "options": {
+                    "name": "driver_id_open_movement_unique",
+                    "unique": True,
+                    "partialFilterExpression": {
+                        "driver_id": {"$type": "objectId"},
+                        "status": {"$in": sorted(OPEN_MOVEMENT_STATUSES)},
+                    },
+                },
+            }],
+            collection_name="vehicle_movements",
+        )
+    else:
+        current_app.logger.error(
+            "[Flux Movement Recovery] Driver %s has %s active movements; resolve these records before the driver uniqueness index can be enabled. Movement IDs: %s",
+            duplicate_driver.get("_id"),
+            duplicate_driver.get("count"),
+            duplicate_driver.get("movement_ids"),
+        )
 
 
 def _normalize_role(value) -> str | None:
@@ -702,6 +750,37 @@ def _assert_driver_is_not_blocked(document: dict):
         raise ApiError(availability.get("primary_reason") or "Driver is unavailable for movement.", status_code=409)
 
 
+def _release_linked_reservations(document: dict, *, reason: str, timestamp: datetime) -> int:
+    links = []
+    for field_name in ("reservation_id",):
+        if isinstance(document.get(field_name), ObjectId):
+            links.append({"_id": document[field_name]})
+    for field_name in (
+        "movement_id", "vehicle_movement_id", "dispatch_job_id",
+        "vehicle_operation_request_id", "operation_request_id",
+        "stock_transfer_id", "delivery_run_id",
+    ):
+        value = document.get(field_name)
+        if value is not None:
+            links.append({field_name: value})
+    source_id = document.get("source_id")
+    source_type = document.get("source_type")
+    if source_id is not None and source_type:
+        links.append({"source_type": source_type, "source_id": source_id})
+    if not links:
+        return 0
+    result = resource_reservations_collection().update_many(
+        {"status": {"$in": ["reserved", "consumed"]}, "$or": links},
+        {"$set": {
+            "status": "released",
+            "released_at": timestamp,
+            "release_reason": reason,
+            "updated_at": timestamp,
+        }},
+    )
+    return result.modified_count
+
+
 def _normalize_vehicle_movement_payload(payload: dict, *, partial: bool = False) -> dict:
     normalized: dict = {}
     if "vehicle_id" in payload or not partial:
@@ -879,20 +958,21 @@ def _notify_movement_participants(document: dict, *, event: str, message: str, a
         recipients[custodian_id] = "action" if actionable_for_custodian else "visibility"
     if isinstance(permanent_driver_id, ObjectId):
         recipients.setdefault(permanent_driver_id, "visibility")
+    is_fuel_purchase = document.get("movement_type") == "fuel_purchase"
     for recipient_id, recipient_kind in recipients.items():
-        title = f"Maintenance movement {event}"
+        title = f"{'Fuel purchase' if is_fuel_purchase else 'Maintenance movement'} {event}"
         if recipient_kind == "action" and recipient_id == permanent_driver_id:
             title = f"Maintenance movement {event} - action required"
         create_notification(
             recipient_user_id=recipient_id,
             title=title,
             message=message,
-            category="maintenance",
+            category="fuel" if is_fuel_purchase else "maintenance",
             priority="high" if actionable_for_custodian and recipient_id == custodian_id else "medium",
             reference_type="vehicle_movement",
             reference_id=document["_id"],
             action_type="resubmit_maintenance_completion" if actionable_for_custodian and recipient_id == custodian_id else None,
-            action_url="my-vehicle" if actionable_for_custodian and recipient_id == custodian_id else None,
+            action_url=("fuel-logs" if is_fuel_purchase else "my-vehicle") if actionable_for_custodian and recipient_id == custodian_id else None,
             action_label="Correct and resubmit" if actionable_for_custodian and recipient_id == custodian_id else None,
         )
 
@@ -1066,7 +1146,21 @@ def create_vehicle_movement(payload: dict, *, current_user_id: str, current_role
             "New vehicle movements must start as draft, pending_approval, or approved.",
             status_code=400,
         )
+    if normalized_payload["movement_type"] == "fuel_purchase" and normalized_payload["status"] == "approved":
+        raise ApiError("Fuel Purchase movements must be approved through the advance-issuance workflow.", status_code=400)
+    if normalized_payload["movement_type"] == "fuel_purchase" and not normalized_payload.get("assignment_id"):
+        active_assignment = assignments_collection().find_one(
+            {"vehicle_id": normalized_payload["vehicle_id"], "status": "active"},
+            sort=[("created_at", DESCENDING)],
+        )
+        if active_assignment:
+            normalized_payload["assignment_id"] = active_assignment["_id"]
+            normalized_payload["primary_assignment_id"] = active_assignment["_id"]
     vehicle, driver, assignment = _validate_relationships(normalized_payload)
+    fuel_advance = None
+    if normalized_payload["movement_type"] == "fuel_purchase":
+        from services.fuel_advance_service import build_pending_fuel_advance
+        fuel_advance = build_pending_fuel_advance(request_payload, driver=driver, assignment=assignment)
     _validate_time_relationships(normalized_payload)
     _validate_odometer_relationships(normalized_payload)
     if normalized_payload["status"] in OPEN_MOVEMENT_STATUSES:
@@ -1133,6 +1227,7 @@ def create_vehicle_movement(payload: dict, *, current_user_id: str, current_role
         "delivery_note": None,
         "delivered_by": None,
         "notes": normalized_payload.get("notes"),
+        "fuel_advance": fuel_advance,
         "cancellation_reason": normalized_payload.get("cancellation_reason"),
         "approved_by": _to_object_id(current_user_id, "current_user_id") if normalized_payload["status"] == "approved" else None,
         "approved_at": timestamp if normalized_payload["status"] == "approved" else None,
@@ -1157,6 +1252,12 @@ def create_vehicle_movement(payload: dict, *, current_user_id: str, current_role
             event="assigned",
             message=f"A {document.get('movement_type')} movement was created for {vehicle.get('registration_number') or 'the vehicle'} to {document.get('destination') or 'the workshop'}.",
             actionable_for_custodian=True,
+        )
+    if document.get("movement_type") == "fuel_purchase":
+        _notify_movement_participants(
+            document,
+            event="assigned",
+            message=f"A company-funded fuel purchase was assigned for {vehicle.get('registration_number') or 'the vehicle'}.",
         )
     return _batch_enrich_vehicle_movements([document])[0]
 
@@ -1283,6 +1384,9 @@ def _apply_status_transition(
     current_status = document.get("status")
     if current_status not in allowed_current_statuses:
         raise ApiError(f"Vehicle movement cannot transition from {current_status} to {next_status}.", status_code=400)
+    if next_status in {"closed", "force_closed", "cancelled"} and current_status not in {"draft", "pending_approval"}:
+        from services.fuel_advance_service import assert_fuel_advance_can_finish
+        assert_fuel_advance_can_finish(document)
 
     payload = payload or {}
     timestamp = now_utc()
@@ -1363,9 +1467,23 @@ def _apply_status_transition(
         if not cancellation_reason:
             raise ApiError("cancellation_reason is required when cancelling a vehicle movement.", status_code=400)
         update_fields["cancellation_reason"] = cancellation_reason
+    elif next_status == "force_closed":
+        force_close_reason = _normalize_text(payload.get("reason") or payload.get("force_close_reason"))
+        if not force_close_reason:
+            raise ApiError("A force-close reason is required.", status_code=400)
+        if payload.get("physical_vehicle_confirmed") is not True:
+            raise ApiError("Confirm the vehicle's physical state before force closing the movement.", status_code=400)
+        update_fields.update({
+            "force_close_reason": force_close_reason,
+            "physical_vehicle_confirmed": True,
+            "force_closed_by": actor_id,
+            "force_closed_at": timestamp,
+            "completed_at": document.get("completed_at") or timestamp,
+        })
 
     updated_document = {**document, **update_fields}
-    _validate_time_relationships(updated_document)
+    if next_status != "force_closed":
+        _validate_time_relationships(updated_document)
     _validate_odometer_relationships(updated_document)
     if updated_document.get("status") in OPEN_MOVEMENT_STATUSES:
         _assert_vehicle_is_not_blocked(updated_document["vehicle_id"], exclude_movement_id=document["_id"], exclude_reservation_id=updated_document.get("reservation_id"), source_type=updated_document.get("movement_type"))
@@ -1385,10 +1503,17 @@ def _apply_status_transition(
     document.update(update_fields)
     document.setdefault("status_history", []).append(history_event)
     document.setdefault("audit_log", []).append(audit_event)
-    if next_status == "returned" and isinstance(document.get("reservation_id"), ObjectId):
-        get_collection("resource_reservations").update_one(
-            {"_id": document["reservation_id"], "status": {"$in": ["reserved", "consumed"]}},
-            {"$set": {"status": "released", "released_at": timestamp, "release_reason": "Vehicle movement returned", "updated_at": timestamp}},
+    if next_status in {"returned", "closed", "cancelled", "force_closed"}:
+        _release_linked_reservations(
+            document,
+            reason=f"Vehicle movement {next_status.replace('_', ' ')}",
+            timestamp=timestamp,
+        )
+    if next_status in {"closed", "cancelled", "force_closed"}:
+        from services.maintenance_override_service import close_overrides_for_movement
+        close_overrides_for_movement(
+            document["_id"], actor_id=current_user_id,
+            collection=get_collection("maintenance_availability_overrides"),
         )
     if document.get("movement_type") in {"maintenance", "workshop"}:
         if next_status in {"checked_out", "in_progress"}:
@@ -1396,16 +1521,24 @@ def _apply_status_transition(
                 {"_id": document["vehicle_id"]},
                 {"$set": {"status": "maintenance", "updated_at": timestamp}},
             )
-        elif next_status in {"closed", "cancelled"}:
+        elif next_status in {"closed", "cancelled", "force_closed"}:
             vehicle_document = vehicles_collection().find_one(
                 {"_id": document["vehicle_id"]},
                 {"assigned_driver_id": 1},
             ) or {}
+            active_maintenance = get_collection("maintenance_jobs").find_one(
+                {"vehicle_id": document["vehicle_id"], "status": {"$in": ["pending", "approved", "in_progress", "waiting_parts"]}},
+                {"_id": 1},
+            )
+            unresolved_safety_fault = get_collection("faults").find_one(
+                {"vehicle_id": document["vehicle_id"], "status": {"$nin": ["resolved", "rejected", "closed"]}, "$or": [{"severity": "critical"}, {"vehicle_unsafe": True}]},
+                {"_id": 1},
+            )
             vehicles_collection().update_one(
                 {"_id": document["vehicle_id"]},
                 {
                     "$set": {
-                        "status": "assigned" if vehicle_document.get("assigned_driver_id") else "available",
+                        "status": "maintenance" if active_maintenance or unresolved_safety_fault else "assigned" if vehicle_document.get("assigned_driver_id") else "available",
                         "updated_at": timestamp,
                     }
                 },
@@ -1429,6 +1562,15 @@ def _apply_status_transition(
 def approve_vehicle_movement(movement_id: str, *, current_user_id: str, current_role: str) -> dict:
     if _normalize_role(current_role) not in {"owner", "admin"}:
         raise ApiError("You do not have permission to approve vehicle movements.", status_code=403)
+    document = _get_vehicle_movement_document(movement_id)
+    if document.get("movement_type") == "fuel_purchase":
+        from services.fuel_advance_service import issue_fuel_purchase_advance
+        issued = issue_fuel_purchase_advance(
+            document,
+            actor_id=current_user_id,
+            actor_role=_normalize_role(current_role) or current_role,
+        )
+        return _batch_enrich_vehicle_movements([issued])[0]
     return _apply_status_transition(
         movement_id,
         next_status="approved",
@@ -1459,6 +1601,11 @@ def start_vehicle_movement(movement_id: str, payload: dict, *, current_user_id: 
         raise ApiError("You do not have permission to start vehicle movements.", status_code=403)
     if document.get("status") == "in_progress" and document.get("opening_fuel_level") is not None:
         return _batch_enrich_vehicle_movements([document])[0]
+    if document.get("status") in TERMINAL_MOVEMENT_STATUSES:
+        raise ApiError(
+            "Journey couldn't start because the previous vehicle movement is already closed. Contact Operations to recover or reassign this task.",
+            status_code=409,
+        )
     return _apply_status_transition(
         movement_id,
         next_status="in_progress",
@@ -1515,6 +1662,19 @@ def cancel_vehicle_movement(movement_id: str, payload: dict, *, current_user_id:
         movement_id,
         next_status="cancelled",
         allowed_current_statuses={"draft", "pending_approval", "approved"},
+        current_user_id=current_user_id,
+        current_role=current_role,
+        payload=payload,
+    )
+
+
+def force_close_vehicle_movement(movement_id: str, payload: dict, *, current_user_id: str, current_role: str) -> dict:
+    if _normalize_role(current_role) not in {"owner", "admin"}:
+        raise ApiError("You do not have permission to force close vehicle movements.", status_code=403)
+    return _apply_status_transition(
+        movement_id,
+        next_status="force_closed",
+        allowed_current_statuses=set(OPEN_MOVEMENT_STATUSES) | {"returned"},
         current_user_id=current_user_id,
         current_role=current_role,
         payload=payload,
@@ -1694,6 +1854,12 @@ def list_vehicle_movement_options(*, current_user_id: str, current_role: str) ->
     )
     log_db_duration("vehicle_movements.options.assignments", assignments_started_at)
 
+    finance_accounts = list(
+        get_collection("finance_accounts").find(
+            {"status": "active", "account_type": {"$in": ["cash", "momo", "bank"]}}
+        ).sort([("account_type", ASCENDING), ("account_name", ASCENDING)])
+    )
+
     payload = {
         "movement_types": sorted(ALLOWED_MOVEMENT_TYPES),
         "creatable_movement_types": sorted(
@@ -1704,6 +1870,7 @@ def list_vehicle_movement_options(*, current_user_id: str, current_role: str) ->
         "drivers": [serialize_user(driver) for driver in drivers],
         "vehicles": [serialize_vehicle(vehicle, include_sensitive=False) for vehicle in vehicles],
         "assignments": [serialize_assignment(item) for item in assignments],
+        "finance_accounts": [serialize_finance_account_snapshot(item) for item in finance_accounts],
         "branches": [
             {"id": str(item["_id"]), "name": item.get("name"), "code": item.get("code")}
             for item in get_collection("branches").find({"active": {"$ne": False}}, {"name": 1, "code": 1}).sort("name", ASCENDING)

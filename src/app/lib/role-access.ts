@@ -19,6 +19,7 @@ export type AppModule =
   | 'driver-approval'
   | 'assignments'
   | 'vehicle-movements'
+  | 'operations-control'
   | 'operational-requests'
   | 'stock-transfers'
   | 'supplier-pickup'
@@ -29,6 +30,7 @@ export type AppModule =
   | 'dispatch-requests'
   | 'dispatch-planner'
   | 'collections'
+  | 'driver-remittances'
   | 'deposits'
   | 'expenses'
   | 'finance-accounts'
@@ -125,6 +127,11 @@ const NO_ACCESS: RolePermissions = {
   can_view_sensitive_finance: false,
 };
 
+// Named aliases make elevated-role grants explicit instead of conflating them
+// with the owner/admin roles used by global integrations such as SmartLiving.
+const SYSTEM_ADMIN_ACCESS = FULL_ACCESS;
+const OPERATIONS_ADMIN_ACCESS = OPERATIONAL_ADMIN;
+
 export const SMARTLIVING_GLOBAL_ADMIN_ROLES: readonly SessionUserRole[] = ['owner', 'admin'];
 
 export function canManageSmartLiving(role: SessionUserRole | null | undefined) {
@@ -152,6 +159,7 @@ export const MODULE_ACCESS_MATRIX: Record<AppModule, RoleMatrix> = {
   'driver-approval': { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
   assignments: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
   'vehicle-movements': { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
+  'operations-control': { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN },
   'operational-requests': { owner: FULL_ACCESS, admin: { ...OPERATIONAL_ADMIN, can_approve: true }, driver: NO_ACCESS },
   'stock-transfers': { owner: FULL_ACCESS, admin: { ...OPERATIONAL_ADMIN, can_approve: true }, driver: NO_ACCESS },
   'supplier-pickup': { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
@@ -186,9 +194,10 @@ export const MODULE_ACCESS_MATRIX: Record<AppModule, RoleMatrix> = {
     driver: NO_ACCESS,
   },
   collections: { owner: FULL_ACCESS, admin: { ...OPERATIONAL_ADMIN, can_approve: true }, driver: NO_ACCESS },
+  'driver-remittances': { owner: FULL_ACCESS, admin: { ...OPERATIONAL_ADMIN, can_approve: true }, driver: NO_ACCESS },
   deposits: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, driver: NO_ACCESS },
   expenses: { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, finance_officer: OPERATIONAL_ADMIN, driver: NO_ACCESS },
-  'finance-accounts': { owner: FULL_ACCESS, admin: NO_ACCESS, driver: NO_ACCESS },
+  'finance-accounts': { owner: FULL_ACCESS, admin: FULL_ACCESS, driver: NO_ACCESS },
   'funding-ledger': { owner: FULL_ACCESS, admin: OPERATIONAL_ADMIN, finance_officer: OPERATIONAL_ADMIN, driver: NO_ACCESS },
   revenue: { owner: FULL_ACCESS, admin: NO_ACCESS, driver: NO_ACCESS },
   'driver-wallet': { owner: NO_ACCESS, admin: NO_ACCESS, driver: NO_ACCESS },
@@ -220,7 +229,13 @@ export const MODULE_ACCESS_MATRIX: Record<AppModule, RoleMatrix> = {
   calendar: { owner: NO_ACCESS, admin: NO_ACCESS, driver: DRIVER_ACCESS },
   'fuel-logs': { owner: NO_ACCESS, admin: NO_ACCESS, driver: DRIVER_ACCESS },
   'my-performance': { owner: NO_ACCESS, admin: NO_ACCESS, driver: DRIVER_ACCESS },
-  'report-fault': { owner: NO_ACCESS, admin: NO_ACCESS, driver: DRIVER_ACCESS },
+  'report-fault': {
+    owner: FULL_ACCESS,
+    admin: OPERATIONAL_ADMIN,
+    operations_administrator: OPERATIONS_ADMIN_ACCESS,
+    system_administrator: SYSTEM_ADMIN_ACCESS,
+    driver: DRIVER_ACCESS,
+  },
   'fault-history': { owner: NO_ACCESS, admin: NO_ACCESS, driver: DRIVER_ACCESS },
   'my-profile': { owner: NO_ACCESS, admin: NO_ACCESS, driver: DRIVER_ACCESS },
 };
@@ -237,18 +252,27 @@ export function canAccessModule(
     return canManageSmartLiving(role) && Boolean(MODULE_ACCESS_MATRIX[moduleId]?.[role]?.[capability]);
   }
   if (moduleId === 'dashboard') return true;
+  const roleAccess = Boolean(MODULE_ACCESS_MATRIX[moduleId]?.[role]?.[capability]);
   const requiredPermission = MODULE_REQUIRED_PERMISSION[moduleId];
   if (requiredPermission && typeof localStorage !== 'undefined') {
     try {
-      const stored = JSON.parse(localStorage.getItem('flux_user') || '{}') as { permissions?: string[] };
+      const stored = JSON.parse(localStorage.getItem('flux_user') || '{}') as {
+        permissions?: string[];
+        permission_denials?: string[];
+      };
       const required = Array.isArray(requiredPermission) ? requiredPermission : [requiredPermission];
+      if (required.some(permission => stored.permission_denials?.includes(permission))) return false;
       if (stored.permissions?.includes('*') || required.some(permission => stored.permissions?.includes(permission))) return true;
+      // Built-in role access is authoritative even when a browser session was
+      // issued before a new permission was added. Explicit denials above still
+      // take precedence; custom roles continue to rely on server permissions.
+      if (roleAccess) return true;
       if (Array.isArray(stored.permissions)) return false;
     } catch {
       // Fall through for legacy sessions created before server-issued permissions.
     }
   }
-  return Boolean(MODULE_ACCESS_MATRIX[moduleId]?.[role]?.[capability]);
+  return roleAccess;
 }
 
 const MODULE_REQUIRED_PERMISSION: Partial<Record<AppModule, string | string[]>> = {
@@ -264,6 +288,7 @@ const MODULE_REQUIRED_PERMISSION: Partial<Record<AppModule, string | string[]>> 
   reports: 'operations.reports', notifications: 'notifications.view', settings: 'system.configure',
   security: 'security.manage', expenses: 'expenses.manage', fuel: 'fuel.expenses',
   'finance-accounts': 'finance.view', 'my-dispatches': 'delivery.view_own',
+  'driver-remittances': 'finance.view',
   'funding-ledger': 'finance.view',
   'my-operational-tasks': 'delivery.view_own', 'my-vehicle': 'vehicle.view_assigned',
   'personal-vehicle-use': 'personal_vehicle_use.create',

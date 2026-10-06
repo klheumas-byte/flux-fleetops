@@ -28,9 +28,11 @@ import {
   fetchVehicleMovementById,
   fetchVehicleMovementOptions,
   fetchVehicleMovements,
+  forceCloseVehicleMovement,
   returnVehicleMovement,
   startVehicleMovement,
   reviewMaintenanceMovementCompletion,
+  returnFuelPurchaseAdvance,
   type AssignmentSummary,
   type UserSummary,
   type VehicleMovementOptionsResponse,
@@ -47,7 +49,7 @@ import { FuelGaugeSelector } from '../shared/FuelGaugeSelector';
 import { Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle } from '../ui/drawer';
 import { Skeleton } from '../ui/skeleton';
 
-type LifecycleAction = 'approve' | 'check_out' | 'start' | 'return' | 'close' | 'cancel';
+type LifecycleAction = 'approve' | 'check_out' | 'start' | 'return' | 'close' | 'cancel' | 'force_close';
 
 interface CreateFormState {
   vehicle_id: string;
@@ -63,6 +65,8 @@ interface CreateFormState {
   opening_fuel_level: string;
   notes: string;
   instructions: string;
+  finance_account_id: string;
+  issued_amount: string;
 }
 
 interface ReturnFormState {
@@ -112,6 +116,9 @@ const STATUS_LABELS: Record<VehicleMovementStatus, string> = {
   returned: 'Returned',
   closed: 'Closed',
   cancelled: 'Cancelled',
+  force_closed: 'Force Closed',
+  superseded: 'Superseded',
+  voided: 'Voided',
 };
 
 const STATUS_BADGES: Record<VehicleMovementStatus, string> = {
@@ -123,6 +130,9 @@ const STATUS_BADGES: Record<VehicleMovementStatus, string> = {
   returned: 'border-emerald-200 bg-emerald-100 text-emerald-800',
   closed: 'border-green-200 bg-green-100 text-green-800',
   cancelled: 'border-rose-200 bg-rose-100 text-rose-800',
+  force_closed: 'border-orange-200 bg-orange-100 text-orange-800',
+  superseded: 'border-slate-200 bg-slate-100 text-slate-700',
+  voided: 'border-slate-200 bg-slate-100 text-slate-700',
 };
 
 const initialCreateFormState = (): CreateFormState => ({
@@ -139,6 +149,8 @@ const initialCreateFormState = (): CreateFormState => ({
   opening_fuel_level: '',
   notes: '',
   instructions: '',
+  finance_account_id: '',
+  issued_amount: '',
 });
 
 const initialReturnFormState = (): ReturnFormState => ({
@@ -192,7 +204,13 @@ function buildCreatePayload(form: CreateFormState) {
     opening_fuel_level: form.opening_fuel_level ? normalizeFuelLevelEighths(form.opening_fuel_level) ?? undefined : undefined,
     notes: form.notes || undefined,
     instructions: form.instructions || undefined,
+    finance_account_id: form.movement_type === 'fuel_purchase' ? form.finance_account_id : undefined,
+    issued_amount: form.movement_type === 'fuel_purchase' ? Number(form.issued_amount) : undefined,
   };
+}
+
+function formatCurrency(value?: number | null) {
+  return `GHS ${Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function getFuelFormValue(value: string) {
@@ -207,15 +225,15 @@ function getAllowedActions(status: VehicleMovementStatus): LifecycleAction[] {
   switch (status) {
     case 'draft':
     case 'pending_approval':
-      return ['approve', 'cancel'];
+      return ['approve', 'cancel', 'force_close'];
     case 'approved':
-      return ['check_out', 'start', 'cancel'];
+      return ['check_out', 'start', 'cancel', 'force_close'];
     case 'checked_out':
-      return ['start', 'return'];
+      return ['start', 'return', 'force_close'];
     case 'in_progress':
-      return ['return'];
+      return ['return', 'force_close'];
     case 'returned':
-      return ['close'];
+      return ['close', 'force_close'];
     default:
       return [];
   }
@@ -254,7 +272,10 @@ export default function VehicleMovements() {
   const [isActionSubmitting, setIsActionSubmitting] = useState(false);
   const [returnForm, setReturnForm] = useState<ReturnFormState>(initialReturnFormState);
   const [cancelForm, setCancelForm] = useState<CancelFormState>(initialCancelFormState);
+  const [forceCloseForm, setForceCloseForm] = useState({ reason: '', physical_vehicle_confirmed: false });
   const [checkOutForm, setCheckOutForm] = useState<CheckOutFormState>(initialCheckOutFormState);
+  const [advanceReturnForm, setAdvanceReturnForm] = useState({ amount: '', finance_account_id: '', reference_number: '' });
+  const [isReturningAdvance, setIsReturningAdvance] = useState(false);
   const debouncedSearchQuery = useDebouncedValue(searchQuery, 300);
 
   usePageToastFeedback(pageError, pageNotice);
@@ -327,6 +348,7 @@ export default function VehicleMovements() {
       ...initialCreateFormState(),
       vehicle_id: assignment?.vehicle_id || options?.vehicles?.[0]?.id || '',
       driver_id: assignment?.driver_id || '',
+      finance_account_id: options?.finance_accounts?.[0]?.id || '',
     });
     setShowCreateModal(true);
     void loadOptions();
@@ -375,6 +397,7 @@ export default function VehicleMovements() {
       notes: movement.notes || '',
     });
     setCancelForm(initialCancelFormState());
+    setForceCloseForm({ reason: '', physical_vehicle_confirmed: false });
     setCheckOutForm({
       ...initialCheckOutFormState(),
       opening_odometer: movement.opening_odometer !== null && movement.opening_odometer !== undefined ? String(movement.opening_odometer) : '',
@@ -414,6 +437,26 @@ export default function VehicleMovements() {
       setFormError(getErrorMessage(error, 'Unable to create vehicle movement right now.'));
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleAdvanceReturn = async () => {
+    if (!detailMovement?.fuel_advance) return;
+    setIsReturningAdvance(true);
+    setDetailError('');
+    try {
+      const updated = await returnFuelPurchaseAdvance(detailMovement.id, {
+        amount: Number(advanceReturnForm.amount),
+        finance_account_id: advanceReturnForm.finance_account_id || undefined,
+        reference_number: advanceReturnForm.reference_number || undefined,
+      });
+      replaceMovementInState(updated);
+      setAdvanceReturnForm({ amount: '', finance_account_id: '', reference_number: '' });
+      setPageNotice('Fuel advance return recorded successfully.');
+    } catch (error) {
+      setDetailError(getErrorMessage(error, 'Unable to record the fuel advance return.'));
+    } finally {
+      setIsReturningAdvance(false);
     }
   };
 
@@ -472,6 +515,9 @@ export default function VehicleMovements() {
           updatedMovement = await cancelVehicleMovement(actionTarget.id, {
             cancellation_reason: cancelForm.cancellation_reason,
           });
+          break;
+        case 'force_close':
+          updatedMovement = await forceCloseVehicleMovement(actionTarget.id, forceCloseForm);
           break;
       }
       replaceMovementInState(updatedMovement!);
@@ -776,7 +822,7 @@ export default function VehicleMovements() {
                   </option>
                 ))}
               </SelectField>
-              <SelectField label={['maintenance', 'workshop'].includes(createForm.movement_type) ? 'Movement Custodian (Optional)' : 'Driver (Optional)'} value={createForm.driver_id} onChange={(value) => setCreateForm((current) => ({ ...current, driver_id: value }))}>
+              <SelectField label={['maintenance', 'workshop'].includes(createForm.movement_type) ? 'Movement Custodian (Optional)' : createForm.movement_type === 'fuel_purchase' ? 'Driver / Person Buying Fuel (Required)' : 'Driver (Optional)'} value={createForm.driver_id} onChange={(value) => setCreateForm((current) => ({ ...current, driver_id: value }))}>
                 <option value="">Unassigned</option>
                 {driverOptions.map((driver) => (
                   <option key={driver.id} value={driver.id}>
@@ -794,6 +840,22 @@ export default function VehicleMovements() {
                   </option>
                 ))}
               </SelectField>
+              {createForm.movement_type === 'fuel_purchase' ? (
+                <>
+                  <SelectField label="Advance Source Account" value={createForm.finance_account_id} onChange={(value) => setCreateForm((current) => ({ ...current, finance_account_id: value }))}>
+                    <option value="">Select Cash, MoMo, or Bank account</option>
+                    {(options?.finance_accounts || []).map((account) => (
+                      <option key={account.id} value={account.id}>
+                        {account.account_name} · {account.account_type.toUpperCase()}{account.provider_name ? ` · ${account.provider_name}` : ''}
+                      </option>
+                    ))}
+                  </SelectField>
+                  <InputField label="Amount Issued (GHS)" type="number" value={createForm.issued_amount} onChange={(value) => setCreateForm((current) => ({ ...current, issued_amount: value }))} />
+                  <div className="md:col-span-2 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
+                    Funds are debited only when this movement is approved. They remain a staff advance until the linked fuel purchase is approved.
+                  </div>
+                </>
+              ) : null}
               <SelectField
                 label="Linked Assignment (Auto via driver/vehicle if available)"
                 value={
@@ -930,6 +992,34 @@ export default function VehicleMovements() {
                     </div>
                   </DetailGrid>
                 </DetailSection>
+                {detailMovement.fuel_advance ? (
+                  <DetailSection title="Fuel Purchase Advance">
+                    <DetailGrid>
+                      <DetailRow label="Advance Status" value={detailMovement.fuel_advance.status.replaceAll('_', ' ')} />
+                      <DetailRow label="Source Account" value={detailMovement.fuel_advance.finance_account_snapshot?.account_name || 'Unknown account'} />
+                      <DetailRow label="Issued" value={formatCurrency(detailMovement.fuel_advance.issued_amount)} />
+                      <DetailRow label="Spent" value={formatCurrency(detailMovement.fuel_advance.spent_amount)} />
+                      <DetailRow label="Returned" value={formatCurrency(detailMovement.fuel_advance.returned_amount)} />
+                      <DetailRow label="Outstanding" value={formatCurrency(detailMovement.fuel_advance.outstanding_amount)} />
+                      <DetailRow label="Issued At" value={formatDateTime(detailMovement.fuel_advance.issued_at)} />
+                      <DetailRow label="Settled At" value={formatDateTime(detailMovement.fuel_advance.settled_at)} />
+                    </DetailGrid>
+                    {detailMovement.fuel_advance.outstanding_amount > 0 && ['issued', 'return_outstanding'].includes(detailMovement.fuel_advance.status) ? (
+                      <div className="mt-4 grid gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 sm:grid-cols-2">
+                        <InputField label="Returned Amount (GHS)" type="number" value={advanceReturnForm.amount} onChange={(value) => setAdvanceReturnForm((current) => ({ ...current, amount: value }))} />
+                        <SelectField label="Return Destination" value={advanceReturnForm.finance_account_id || detailMovement.fuel_advance.finance_account_id} onChange={(value) => setAdvanceReturnForm((current) => ({ ...current, finance_account_id: value }))}>
+                          {(options?.finance_accounts || []).map((account) => <option key={account.id} value={account.id}>{account.account_name} · {account.account_type.toUpperCase()}</option>)}
+                        </SelectField>
+                        <InputField label="Return Reference (Optional)" value={advanceReturnForm.reference_number} onChange={(value) => setAdvanceReturnForm((current) => ({ ...current, reference_number: value }))} />
+                        <div className="flex items-end">
+                          <button type="button" disabled={isReturningAdvance || !advanceReturnForm.amount} onClick={() => void handleAdvanceReturn()} className="w-full rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-60">
+                            {isReturningAdvance ? 'Recording...' : 'Record Treasury Return'}
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+                  </DetailSection>
+                ) : null}
                 <DetailSection title="Workflow">
                   <DetailGrid>
                     <DetailRow label="Created By" value={detailMovement.created_by_user?.full_name || 'Unknown'} />
@@ -987,7 +1077,9 @@ export default function VehicleMovements() {
             <div className="space-y-4 overflow-y-auto px-6 py-5">
               {actionType === 'approve' && (
                 <p className="text-sm text-gray-600">
-                  Approving this movement confirms it is ready to leave the yard when operations checks are complete.
+                  {actionTarget.movement_type === 'fuel_purchase'
+                    ? `Approval issues ${formatCurrency(actionTarget.fuel_advance?.issued_amount)} from ${actionTarget.fuel_advance?.finance_account_snapshot?.account_name || 'the selected treasury account'} to the assigned driver.`
+                    : 'Approving this movement confirms it is ready to leave the yard when operations checks are complete.'}
                 </p>
               )}
               {actionType === 'check_out' && (
@@ -1031,13 +1123,25 @@ export default function VehicleMovements() {
               {actionType === 'cancel' && (
                 <TextAreaField label="Cancellation Reason" value={cancelForm.cancellation_reason} onChange={(value) => setCancelForm({ cancellation_reason: value })} placeholder="Explain why this movement was cancelled." />
               )}
+              {actionType === 'force_close' && (
+                <>
+                  <div className="rounded-lg border border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-800">
+                    Emergency recovery only. This permanently ends the movement and releases its reservation. The source workflow may create a new replacement movement later.
+                  </div>
+                  <TextAreaField label="Recovery Reason" value={forceCloseForm.reason} onChange={(reason) => setForceCloseForm((current) => ({ ...current, reason }))} placeholder="Explain why normal return/close cannot be completed." />
+                  <label className="flex items-start gap-3 rounded-lg border border-gray-200 px-4 py-3 text-sm text-gray-700">
+                    <input type="checkbox" className="mt-0.5" checked={forceCloseForm.physical_vehicle_confirmed} onChange={(event) => setForceCloseForm((current) => ({ ...current, physical_vehicle_confirmed: event.target.checked }))} />
+                    I have confirmed the vehicle's current physical state and custody.
+                  </label>
+                </>
+              )}
               {actionError && (
                 <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
                   {actionError}
                 </div>
               )}
             </div>
-            <ModalFooter onCancel={closeActionModal} submitLabel={isActionSubmitting ? 'Saving...' : getActionSubmitLabel(actionType)} isSubmitting={isActionSubmitting} />
+            <ModalFooter onCancel={closeActionModal} submitLabel={isActionSubmitting ? getActionProgressLabel(actionType) : getActionSubmitLabel(actionType)} isSubmitting={isActionSubmitting} />
           </form>
         </ModalShell>
       )}
@@ -1075,6 +1179,7 @@ function ActionBadge({ action, onClick }: { action: LifecycleAction; onClick: ()
     return: { label: 'Return', className: 'border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100', icon: TimerReset },
     close: { label: 'Close', className: 'border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100', icon: ShieldCheck },
     cancel: { label: 'Cancel', className: 'border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100', icon: XCircle },
+    force_close: { label: 'Force Close', className: 'border-orange-200 bg-orange-50 text-orange-800 hover:bg-orange-100', icon: ShieldCheck },
   };
   const Icon = config[action].icon;
   return (
@@ -1279,6 +1384,8 @@ function getActionTitle(action: LifecycleAction) {
       return 'Close Vehicle Movement';
     case 'cancel':
       return 'Cancel Vehicle Movement';
+    case 'force_close':
+      return 'Force Close & Release';
   }
 }
 
@@ -1296,5 +1403,19 @@ function getActionSubmitLabel(action: LifecycleAction) {
       return 'Close Movement';
     case 'cancel':
       return 'Cancel Movement';
+    case 'force_close':
+      return 'Force Close & Release';
+  }
+}
+
+function getActionProgressLabel(action: LifecycleAction) {
+  switch (action) {
+    case 'approve': return 'Approving...';
+    case 'check_out': return 'Checking out...';
+    case 'start': return 'Starting...';
+    case 'return': return 'Saving return...';
+    case 'close': return 'Closing...';
+    case 'cancel': return 'Cancelling...';
+    case 'force_close': return 'Force closing...';
   }
 }

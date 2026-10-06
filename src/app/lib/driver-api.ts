@@ -196,6 +196,21 @@ export interface DriverWeeklyCyclePayment {
   admin_approval_note?: string | null;
   rejection_reason: string | null;
   is_late: boolean;
+  submitted_at?: string | null;
+  approved_at?: string | null;
+  rejected_at?: string | null;
+  reversed_at?: string | null;
+  submitted_by_user?: { id: string; full_name?: string | null; role?: string | null; email?: string | null } | null;
+  confirmed_by_user?: { id: string; full_name?: string | null; role?: string | null; email?: string | null } | null;
+  rejected_by_user?: { id: string; full_name?: string | null; role?: string | null; email?: string | null } | null;
+  created_at?: string | null;
+  actual_payment_date?: string | null;
+  allocated_amount?: number;
+  allocations?: Array<{ cycle_key: string; week_start?: string; amount: number }>;
+  weeks_covered?: string[];
+  decision_reason?: string | null;
+  reversal_reason?: string | null;
+  reversed_by_user?: { id?: string; full_name?: string | null; role?: string | null; email?: string | null } | null;
 }
 
 export interface DriverWeeklyCycle {
@@ -205,12 +220,46 @@ export interface DriverWeeklyCycle {
   week_end: string;
   payment_deadline: string;
   weekly_target: number;
+  original_amount?: number;
+  approved_adjustment?: number;
+  final_due?: number;
+  confirmed_allocated_payments?: number;
+  pending_total?: number;
+  outstanding?: number;
+  is_overdue?: boolean;
+  is_partial?: boolean;
+  is_reduced?: boolean;
+  is_waived?: boolean;
+  payment_status?: string;
+  payment_status_label?: string;
+  exception_reason?: string | null;
+  exception_explanation?: string | null;
+  problem_request?: DriverWorkException | null;
+  effective_deadline?: string;
+  defaulted?: boolean;
   submitted_total: number;
   approved_total: number;
   outstanding_balance: number;
   achievement_percentage: number;
   status: 'open' | 'completed' | 'overdue' | string;
   payments: DriverWeeklyCyclePayment[];
+}
+
+export interface DriverWorkException {
+  id: string;
+  cycle_key: string;
+  start_date: string;
+  end_date: string;
+  affected_dates?: string[];
+  affected_working_days?: number;
+  reason_code: string;
+  explanation?: string | null;
+  requested_action: 'reduction' | 'full_exemption';
+  request_status: string;
+  original_amount?: number;
+  approved_adjustment?: number;
+  revised_amount_due?: number | null;
+  decision_reason?: string | null;
 }
 
 export interface DriverWalletData {
@@ -225,6 +274,31 @@ export interface DriverWalletData {
   weekly_cycle: DriverWeeklyCycle | null;
   weekly_history: DriverWeeklyCycle[];
   ledger_entries: DriverWalletLedgerEntry[];
+  credit?: number;
+  arrears?: number;
+  remittance_agreement?: {
+    effective_start: string;
+    effective_end?: string | null;
+    weekly_amount: number;
+    week_pattern: 'mon_sat' | 'mon_sun';
+    status: 'active' | 'paused' | 'ended';
+  } | null;
+  financial_position?: {
+    gross_expected: number;
+    approved_waivers_reductions: number;
+    adjusted_expected: number;
+    confirmed_receipts: number;
+    applicable_credit: number;
+    outstanding: number;
+    pending_confirmation: number;
+    arrears: number;
+    overdue_balance: number;
+    current_week_unpaid: number;
+    total_unpaid: number;
+    available_credit: number;
+  } | null;
+  work_exception_requests?: DriverWorkException[];
+  credit_payments?: Array<DriverWeeklyCyclePayment & { allocated_amount: number; unallocated_amount: number; allocations: Array<{ cycle_key: string; week_start: string; amount: number }> }>;
 }
 
 export interface DriverDispatchStop {
@@ -417,12 +491,34 @@ export async function submitDriverPayment(payload: {
   payment_method: 'cash' | 'momo' | 'bank' | 'other';
   reference_number?: string;
   notes?: string;
+  idempotency_key?: string;
+  remittance_allocations?: Array<{ cycle_key: string; amount: number }>;
 }): Promise<DriverLatestCollection> {
   const response = await apiRequest<DriverPaymentSubmissionResponse>('/driver/payments', {
     method: 'POST',
+    headers: payload.idempotency_key ? { 'Idempotency-Key': payload.idempotency_key } : undefined,
     body: JSON.stringify(payload),
   });
   return response.data.payment;
+}
+
+export async function submitDriverNonWorkingRequest(payload: {
+  selection_type: 'single_day' | 'multiple_days' | 'date_range' | 'whole_week';
+  start_date: string;
+  end_date: string;
+  affected_dates?: string[];
+  reason_code: string;
+  explanation?: string;
+  requested_action: 'reduction' | 'full_exemption';
+  attachments?: string[];
+  idempotency_key?: string;
+}) {
+  const response = await apiRequest<{ success: boolean; data: { request: unknown } }>('/driver/remittance/non-working', {
+    method: 'POST',
+    headers: payload.idempotency_key ? { 'Idempotency-Key': payload.idempotency_key } : undefined,
+    body: JSON.stringify(payload),
+  });
+  return response.data.request;
 }
 
 export async function fetchDriverDispatchJobs(): Promise<DriverDispatchJob[]> {

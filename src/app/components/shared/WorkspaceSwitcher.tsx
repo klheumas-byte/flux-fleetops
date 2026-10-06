@@ -1,5 +1,5 @@
 import { toast } from 'sonner';
-import { apiRequest } from '../../lib/api';
+import { apiRequest, resetApiSessionState } from '../../lib/api';
 import {
   getWorkspaceLandingPage,
   setStoredSessionUser,
@@ -24,7 +24,10 @@ export default function WorkspaceSwitcher({
         method: 'POST',
         body: JSON.stringify({ role }),
       });
-      if (response.data.access_token) localStorage.setItem('flux_token', response.data.access_token);
+      if (response.data.access_token) {
+        resetApiSessionState();
+        localStorage.setItem('flux_token', response.data.access_token);
+      }
       const workspace = workspaces.find((item) => item.code === role);
       const updated: SessionUser = response.data.user || {
         ...user,

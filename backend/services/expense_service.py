@@ -12,6 +12,7 @@ from services.assignment_service import get_active_assignment_for_driver
 from services.finance_account_service import (
     decrement_finance_account_balance,
     get_finance_account_document,
+    run_finance_transaction,
 )
 from services.master_data_service import resolve_master_data_item
 from utils.api_error import ApiError
@@ -73,6 +74,9 @@ def ensure_expense_indexes():
             {"keys": [("funding_source_id", ASCENDING)]},
             {"keys": [("maintenance_job_id", ASCENDING)], "options": {"sparse": True}},
             {"keys": [("dispatch_job_id", ASCENDING)], "options": {"sparse": True}},
+            {"keys": [("vehicle_movement_id", ASCENDING)], "options": {"sparse": True}},
+            {"keys": [("fuel_log_id", ASCENDING)], "options": {"unique": True, "sparse": True}},
+            {"keys": [("fuel_instruction_id", ASCENDING)], "options": {"unique": True, "sparse": True}},
             {"keys": [("idempotency_key", ASCENDING)], "options": {"unique": True, "sparse": True}},
             {"keys": [("requested_by", ASCENDING)]},
             {"keys": [("approved_by", ASCENDING)]},
@@ -362,6 +366,115 @@ def create_expense(payload: dict, current_user_id: str, current_role: str, idemp
     return _enrich_expense(document)
 
 
+def create_paid_fuel_advance_expense(*, fuel_log: dict, movement: dict, actor_id, actor_role: str, session=None) -> dict:
+    """Create the single expense recognition entry for an approved fuel-advance purchase.
+
+    Treasury was debited when the advance was issued, so this records expense
+    recognition without posting a second cash debit.
+    """
+    existing = expenses_collection().find_one({"fuel_log_id": fuel_log["_id"]}, **({"session": session} if session else {}))
+    if existing:
+        return existing
+    timestamp = now_utc()
+    account = get_finance_account_document(movement["fuel_advance"]["finance_account_id"])
+    payment_method = {
+        "mobile_money": "momo_transfer", "company_card": "card", "fuel_card": "card",
+    }.get(fuel_log.get("payment_method"), fuel_log.get("payment_method"))
+    if payment_method not in ALLOWED_PAYMENT_METHODS:
+        payment_method = "other"
+    requester = fuel_log.get("submitted_by") or movement.get("driver_id")
+    document = {
+        "expense_title": f"Fuel purchase - {movement.get('movement_id')}",
+        "expense_category": "fuel",
+        "amount": round(float(fuel_log.get("amount") or 0), 2),
+        "expense_date": str(fuel_log.get("fuel_date") or timestamp.date().isoformat())[:10],
+        "vehicle_id": movement.get("vehicle_id"),
+        "driver_id": movement.get("driver_id"),
+        "finance_account_id": account["_id"],
+        "finance_account_snapshot": serialize_finance_account_snapshot(account),
+        "funding_source_id": None,
+        "funding_source_snapshot": {"id": None, "name": "Treasury Fuel Advance"},
+        "funding_source_description": "Recognized from an issued company fuel advance",
+        "maintenance_job_id": None,
+        "dispatch_job_id": movement.get("dispatch_job_id"),
+        "vehicle_movement_id": movement["_id"],
+        "fuel_log_id": fuel_log["_id"],
+        "payment_source": "fuel_advance",
+        "treasury_posting_status": "debited_on_advance_issue",
+        "description": f"Fuel purchase settled from advance for {movement.get('movement_id')}",
+        "payment_method": payment_method,
+        "reference_number": None,
+        "receipt_image": fuel_log.get("receipt_image"),
+        "notes": fuel_log.get("notes"),
+        "status": "paid",
+        "requested_by": requester,
+        "approved_by": actor_id,
+        "paid_by": movement.get("driver_id"),
+        "paid_recorded_by": actor_id,
+        "rejected_by": None,
+        "approved_at": timestamp,
+        "rejected_at": None,
+        "paid_at": timestamp,
+        "rejection_reason": None,
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "idempotency_key": f"fuel-advance-expense:{fuel_log['_id']}",
+        "audit_log": [
+            {"action": "fuel_advance_expense_recognized", "actor_id": actor_id, "actor_role": actor_role, "at": timestamp,
+             "fuel_log_id": str(fuel_log["_id"]), "vehicle_movement_id": str(movement["_id"]),
+             "treasury_debit": False},
+        ],
+    }
+    document["_id"] = expenses_collection().insert_one(
+        document, **({"session": session} if session else {})
+    ).inserted_id
+    return document
+
+
+def create_paid_fuel_instruction_expense(*, fuel_log: dict, request_document: dict, actor_id, actor_role: str, session=None) -> dict:
+    """Recognize a verified Fuel Instruction purchase; caller owns the treasury debit."""
+    kwargs = {"session": session} if session else {}
+    existing = expenses_collection().find_one({"fuel_log_id": fuel_log["_id"]}, **kwargs)
+    if existing:
+        return existing
+    timestamp = now_utc()
+    instruction = request_document["fuel_instruction"]
+    account = get_finance_account_document(instruction["finance_account_id"])
+    payment_method = {"cash": "cash", "momo": "momo_transfer", "bank": "bank_transfer"}.get(account.get("account_type"), "other")
+    document = {
+        "expense_title": f"Fuel purchase - {request_document.get('request_id')}",
+        "expense_category": "fuel", "amount": round(float(fuel_log.get("amount") or 0), 2),
+        "expense_date": str(fuel_log.get("fuel_date") or timestamp.date().isoformat())[:10],
+        "vehicle_id": request_document.get("vehicle_id"), "driver_id": request_document.get("driver_id"),
+        "finance_account_id": account["_id"], "finance_account_snapshot": serialize_finance_account_snapshot(account),
+        "funding_source_id": None, "funding_source_snapshot": {"id": None, "name": "Treasury Fuel Instruction"},
+        "funding_source_description": "Verified company-funded Fuel Instruction",
+        "maintenance_job_id": None, "dispatch_job_id": None,
+        "vehicle_movement_id": request_document.get("linked_vehicle_movement_id"),
+        "fuel_log_id": fuel_log["_id"], "fuel_instruction_id": request_document["_id"],
+        "payment_source": "fuel_instruction", "treasury_posting_status": "debited_on_verification",
+        "description": f"Verified fuel purchase for {request_document.get('request_id')}",
+        "payment_method": payment_method, "reference_number": None,
+        "receipt_image": fuel_log.get("receipt_image"), "notes": fuel_log.get("notes"),
+        "status": "paid", "requested_by": fuel_log.get("submitted_by") or request_document.get("driver_id"),
+        "approved_by": actor_id, "paid_by": request_document.get("driver_id"), "paid_recorded_by": actor_id,
+        "rejected_by": None, "approved_at": timestamp, "rejected_at": None, "paid_at": timestamp,
+        "rejection_reason": None, "created_at": timestamp, "updated_at": timestamp,
+        "idempotency_key": f"fuel-instruction-expense:{request_document['_id']}",
+        "audit_log": [{"action": "fuel_instruction_verified_and_paid", "actor_id": actor_id,
+                       "actor_role": actor_role, "at": timestamp, "fuel_log_id": fuel_log["_id"],
+                       "vehicle_operation_request_id": request_document["_id"], "treasury_debit": True}],
+    }
+    try:
+        document["_id"] = expenses_collection().insert_one(document, **kwargs).inserted_id
+    except Exception:
+        existing = expenses_collection().find_one({"idempotency_key": document["idempotency_key"]}, **kwargs)
+        if existing:
+            return existing
+        raise
+    return document
+
+
 def approve_expense(expense_id: str, current_user_id: str) -> dict:
     expense_object_id = _to_object_id(expense_id, "expense_id")
     document = expenses_collection().find_one({"_id": expense_object_id, "record_scope": {"$ne": "personal"}})
@@ -448,9 +561,6 @@ def mark_expense_paid(expense_id: str, current_user_id: str, paid_by: str | None
     if not payer_id:
         raise ApiError("paid_by is required.", status_code=400)
     _get_user_document(payer_id)
-    if document.get("maintenance_reserve_amount") is not None:
-        from services.dispatch_finance_engine_service import post_reserve_spend_for_expense
-        post_reserve_spend_for_expense(document, actor_id=current_user_id)
     update_fields = {
         "status": "paid",
         "paid_by": payer_id,
@@ -460,8 +570,23 @@ def mark_expense_paid(expense_id: str, current_user_id: str, paid_by: str | None
         "updated_at": timestamp,
     }
     audit = {"action": "expense_paid", "actor_id": _to_object_id(current_user_id, "paid_recorded_by"), "actor_role": "owner", "at": timestamp, "paid_by": str(payer_id)}
-    expenses_collection().update_one({"_id": expense_object_id}, {"$set": update_fields, "$push": {"audit_log": audit}})
-    decrement_finance_account_balance(finance_account_document["_id"], amount, actor_id=current_user_id, reference_type="expense", reference_id=expense_object_id)
+    def post(session):
+        kwargs = {"session": session} if session is not None else {}
+        updated = expenses_collection().update_one(
+            {"_id": expense_object_id, "status": "approved"},
+            {"$set": update_fields, "$push": {"audit_log": audit}}, **kwargs,
+        )
+        if updated.modified_count != 1:
+            raise ApiError("Expense payment was already posted.", status_code=409)
+        decrement_finance_account_balance(
+            finance_account_document["_id"], amount, actor_id=current_user_id,
+            reference_type="expense", reference_id=expense_object_id,
+            effective_date=document.get("expense_date"), session=session,
+        )
+    run_finance_transaction(post)
+    if document.get("maintenance_reserve_amount") is not None:
+        from services.dispatch_finance_engine_service import post_reserve_spend_for_expense
+        post_reserve_spend_for_expense(document, actor_id=current_user_id)
     document.update(update_fields)
     document.setdefault("audit_log", []).append(audit)
     return _enrich_expense(document)

@@ -2,11 +2,12 @@ from datetime import datetime, timezone
 
 from bson import ObjectId
 from pymongo import ASCENDING, DESCENDING
+from pymongo.errors import DuplicateKeyError
 
 from extensions import get_collection
 from models.user import serialize_user
 from models.wallet_entry import serialize_wallet_entry
-from services.payment_cycle_service import get_current_cycle_for_assignment, list_assignment_weekly_cycles
+from services.payment_cycle_service import build_weekly_ledger, get_current_cycle_for_assignment, get_weekly_cycle_window, list_non_working_requests
 from utils.api_error import ApiError
 from utils.performance import build_cache_key, get_ttl_cached, set_ttl_cached
 
@@ -36,6 +37,7 @@ def ensure_wallet_indexes():
     wallet_entries_collection().create_index([("assignment_id", ASCENDING)])
     wallet_entries_collection().create_index([("type", ASCENDING)])
     wallet_entries_collection().create_index([("created_at", DESCENDING)])
+    wallet_entries_collection().create_index([("event_key", ASCENDING)], unique=True, sparse=True)
 
 
 def to_object_id(value, field_name: str, required: bool = True):
@@ -69,6 +71,7 @@ def create_wallet_entry(
     credit: float = 0,
     reference_id=None,
     created_by=None,
+    event_key: str | None = None,
 ):
     if entry_type not in ALLOWED_WALLET_ENTRY_TYPES:
         raise ApiError(
@@ -90,6 +93,11 @@ def create_wallet_entry(
     reference_object_id = to_object_id(reference_id, "reference_id", required=False)
     created_by_object_id = to_object_id(created_by, "created_by", required=False)
 
+    if event_key:
+        existing = wallet_entries_collection().find_one({"event_key": str(event_key)})
+        if existing:
+            return serialize_wallet_entry(existing)
+
     latest_entry = wallet_entries_collection().find_one(
         {"driver_id": driver_object_id},
         sort=[("created_at", DESCENDING), ("_id", DESCENDING)],
@@ -110,7 +118,15 @@ def create_wallet_entry(
         "created_by": created_by_object_id,
         "created_at": now_utc(),
     }
-    result = wallet_entries_collection().insert_one(wallet_entry_document)
+    if event_key:
+        wallet_entry_document["event_key"] = str(event_key)
+    try:
+        result = wallet_entries_collection().insert_one(wallet_entry_document)
+    except DuplicateKeyError:
+        existing = wallet_entries_collection().find_one({"event_key": str(event_key)}) if event_key else None
+        if existing:
+            return serialize_wallet_entry(existing)
+        raise
     wallet_entry_document["_id"] = result.inserted_id
     return serialize_wallet_entry(wallet_entry_document)
 
@@ -134,7 +150,8 @@ def _wallet_summary_from_entries(driver: dict, entries: list[dict]) -> dict:
         {"driver_id": driver["_id"], "status": {"$in": ["active", "suspended"]}}
     )
     if active_assignment:
-        weekly_target = float(active_assignment.get("weekly_target") or 0)
+        current_cycle = get_current_cycle_for_assignment(active_assignment)
+        weekly_target = float(current_cycle.get("final_due") if current_cycle.get("final_due") is not None else current_cycle.get("weekly_target") or 0)
 
     total_collected = sum(
         float(entry.get("credit") or 0) for entry in entries if entry.get("type") == "collection"
@@ -239,15 +256,19 @@ def get_logged_in_driver_wallet(driver_user_id: str) -> dict:
             }
         )
 
-    weekly_target = float(active_assignment.get("weekly_target") or 0)
     daily_target = float(active_assignment.get("daily_target") or 0)
-    outstanding_balance = round(total_debits - total_credits, 2)
+    remittance = build_weekly_ledger(active_assignment)
+    current_cycle_key = get_weekly_cycle_window()["cycle_key"]
+    weekly_cycle = next((row for row in remittance["weeks"] if row["cycle_key"] == current_cycle_key), None)
+    weekly_target = float(weekly_cycle.get("final_due") if weekly_cycle and weekly_cycle.get("final_due") is not None else remittance["agreement"].get("weekly_amount") or 0)
+    weekly_history = remittance["weeks"]
+    outstanding_balance = remittance["position"]["outstanding"]
     achievement_percentage = round(
-        (total_credits / weekly_target * 100) if weekly_target > 0 else 0,
+        ((remittance["position"]["adjusted_expected"] - outstanding_balance)
+         / remittance["position"]["adjusted_expected"] * 100)
+        if remittance["position"]["adjusted_expected"] > 0 else 100,
         2,
     )
-    weekly_cycle = get_current_cycle_for_assignment(active_assignment)
-    weekly_history = list_assignment_weekly_cycles(active_assignment)
 
     return set_ttl_cached(
         cache_key,
@@ -262,6 +283,12 @@ def get_logged_in_driver_wallet(driver_user_id: str) -> dict:
         "achievement_percentage": achievement_percentage,
         "weekly_cycle": weekly_cycle,
         "weekly_history": weekly_history,
+        "work_exception_requests": list_non_working_requests(driver_id=str(driver["_id"])),
+        "remittance_agreement": remittance["agreement"],
+        "financial_position": remittance["position"],
+        "credit_payments": remittance.get("credit_payments", []),
+        "credit": remittance["position"]["applicable_credit"],
+        "arrears": remittance["position"]["arrears"],
         "ledger_entries": serialized_ledger,
     },
         ttl_seconds=15,

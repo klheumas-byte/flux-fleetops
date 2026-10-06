@@ -36,6 +36,7 @@ def serialize_fault(fault_document: dict) -> dict:
         "resolution_notes": fault_document.get("resolution_notes"),
         "maintenance_job_id": _serialize_reference_id(fault_document.get("maintenance_job_id")),
         "reported_at": _serialize_datetime(fault_document.get("reported_at")),
+        "detected_at": _serialize_datetime(fault_document.get("detected_at") or fault_document.get("reported_at")),
         "reported_by": _serialize_reference_id(fault_document.get("reported_by") or fault_document.get("created_by")),
         "reporter_role": fault_document.get("reporter_role") or "driver",
         "participant_comments": [

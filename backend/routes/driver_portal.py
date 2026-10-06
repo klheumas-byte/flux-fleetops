@@ -5,6 +5,7 @@ from services.assignment_service import get_active_assignment_for_driver
 from flask import request
 
 from services.collection_service import get_driver_dashboard_summary, submit_driver_payment
+from services.payment_cycle_service import get_remittance_position, get_work_exception_analytics, list_non_working_requests, list_remittance_agreements, submit_non_working_request, update_problem_request
 from services.dispatch_planner_service import (
     accept_driver_dispatch_job,
     get_driver_dispatch_job,
@@ -47,6 +48,7 @@ from services.operational_task_service import (
     list_driver_operational_tasks,
 )
 from services.wallet_service import get_logged_in_driver_wallet
+from services.ride_service import get_driver_earnings
 from services.driver_private_finance_service import (
     create_private_entry,
     delete_private_entry,
@@ -61,6 +63,21 @@ from utils.responses import success_response
 
 
 driver_portal_bp = Blueprint("driver_portal", __name__)
+
+
+@driver_portal_bp.get("/earnings")
+@role_required("driver")
+def get_driver_earnings_route():
+    return success_response(data=get_driver_earnings(
+        get_jwt_identity(),
+        period=request.args.get("period"),
+        start_date=request.args.get("start_date"),
+        end_date=request.args.get("end_date"),
+        source=request.args.get("source"),
+        payment_method=request.args.get("payment_method"),
+        page=request.args.get("page", type=int),
+        limit=request.args.get("limit", type=int),
+    ))
 
 
 @driver_portal_bp.get("/dispatch-finance-analytics")
@@ -249,7 +266,11 @@ def post_driver_maintenance_progress(maintenance_id: str):
 @role_required("driver")
 @driver_mode_required("targets")
 def submit_payment():
-    payment = submit_driver_payment(request.get_json(silent=True) or {}, get_jwt_identity())
+    payment = submit_driver_payment(
+        request.get_json(silent=True) or {},
+        get_jwt_identity(),
+        idempotency_key=request.headers.get("Idempotency-Key"),
+    )
     return success_response(
         data={"payment": payment},
         message="Payment submitted successfully and is pending admin confirmation.",
@@ -333,6 +354,56 @@ def update_driver_dispatch_workflow(job_id: str):
         data={"job": job},
         message="Dispatch updated successfully.",
     )
+
+
+@driver_portal_bp.get("/remittance")
+@role_required("driver")
+@driver_mode_required("targets")
+def get_driver_remittance():
+    identity = get_jwt_identity()
+    return success_response(data=get_remittance_position(
+        current_user_id=identity, current_role="driver", driver_id=identity, assignment_id=request.args.get("assignment_id"),
+        as_of=request.args.get("end_date") or request.args.get("as_of"), start_date=request.args.get("start_date"),
+        limit=request.args.get("limit", default=12, type=int),
+    ))
+
+
+@driver_portal_bp.get("/remittance/agreements")
+@role_required("driver")
+@driver_mode_required("targets")
+def get_driver_remittance_agreements():
+    return success_response(data={"agreements": list_remittance_agreements(driver_id=get_jwt_identity(), as_of=request.args.get("as_of"))})
+
+
+@driver_portal_bp.get("/remittance/requests")
+@role_required("driver")
+@driver_mode_required("targets")
+def get_driver_problem_requests():
+    identity = get_jwt_identity()
+    return success_response(data={
+        "requests": list_non_working_requests(driver_id=identity),
+        "analytics": get_work_exception_analytics(driver_id=identity),
+    })
+
+
+@driver_portal_bp.post("/remittance/non-working")
+@driver_portal_bp.post("/remittance/requests")
+@role_required("driver")
+@driver_mode_required("targets")
+def post_driver_non_working():
+    item = submit_non_working_request(
+        request.get_json(silent=True) or {}, current_user_id=get_jwt_identity(),
+        request_key=request.headers.get("Idempotency-Key"),
+    )
+    return success_response(data={"request": item}, message="Remittance problem submitted for review.", status_code=201)
+
+
+@driver_portal_bp.patch("/remittance/requests/<request_id>")
+@role_required("driver")
+@driver_mode_required("targets")
+def update_driver_problem_request(request_id: str):
+    item = update_problem_request(request_id, request.get_json(silent=True) or {}, current_user_id=get_jwt_identity(), current_role="driver")
+    return success_response(data={"request": item}, message="Remittance problem updated.")
 
 
 @driver_portal_bp.get("/dispatch-jobs/<job_id>/fuel")

@@ -83,6 +83,7 @@ def test_incoming_stock_is_limited_to_primary_and_explicit_allowed_branches():
     primary, allowed, unauthorized = ObjectId(), ObjectId(), ObjectId()
     user_id = db.users.insert_one({
         "full_name": "Multi Role Manager", "role": "driver", "role_ids": ["driver", "branch_manager"],
+        "selected_workspace": "branch_manager",
         "primary_branch_id": primary, "allowed_branch_ids": [allowed], "status": "active",
     }).inserted_id
     db.stock_transfers.insert_many([_transfer(primary, "ST-PRIMARY"), _transfer(allowed, "ST-ALLOWED"), _transfer(unauthorized, "ST-HIDDEN")])

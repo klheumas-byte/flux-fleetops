@@ -1,5 +1,5 @@
 from flask import Blueprint, request
-from flask_jwt_extended import get_jwt_identity
+from flask_jwt_extended import get_jwt, get_jwt_identity
 
 from services.collection_service import (
     create_collection,
@@ -9,6 +9,19 @@ from services.collection_service import (
     list_collections,
     list_pending_payment_submissions,
     update_collection_status,
+)
+from services.payment_cycle_service import (
+    apply_confirmed_credit,
+    decide_non_working_request,
+    get_remittance_migration_report,
+    get_remittance_position,
+    get_work_exception_analytics,
+    list_non_working_requests,
+    list_remittance_agreements,
+    replace_payment_allocations,
+    submit_non_working_request,
+    update_remittance_agreement,
+    update_problem_request,
 )
 from utils.decorators import role_required
 from utils.responses import success_response
@@ -66,12 +79,98 @@ def get_collection_options():
 @role_required("owner", "admin")
 def create_collection_route():
     payload = request.get_json(silent=True) or {}
+    if request.headers.get("Idempotency-Key"):
+        payload["idempotency_key"] = request.headers.get("Idempotency-Key")
     collection = create_collection(payload, get_jwt_identity())
     return success_response(
         data={"collection": collection},
         message="Collection recorded successfully.",
         status_code=201,
     )
+
+
+@collections_bp.get("/remittance/agreements")
+@role_required("owner", "admin")
+def get_remittance_agreements_route():
+    return success_response(data={
+        "agreements": list_remittance_agreements(as_of=request.args.get("as_of")),
+        "migration_report": get_remittance_migration_report(),
+    })
+
+
+@collections_bp.patch("/remittance/agreements/<assignment_id>")
+@role_required("owner", "admin")
+def update_remittance_agreement_route(assignment_id: str):
+    agreement = update_remittance_agreement(
+        assignment_id, request.get_json(silent=True) or {}, current_user_id=get_jwt_identity()
+    )
+    return success_response(data={"agreement": agreement}, message="Weekly remittance agreement updated successfully.")
+
+
+@collections_bp.get("/remittance/position")
+@role_required("owner", "admin", "driver")
+def get_remittance_position_route():
+    data = get_remittance_position(
+        current_user_id=get_jwt_identity(), current_role=get_jwt().get("role"),
+        driver_id=request.args.get("driver_id"), assignment_id=request.args.get("assignment_id"),
+        as_of=request.args.get("end_date") or request.args.get("as_of"), start_date=request.args.get("start_date"),
+        limit=request.args.get("limit", default=12, type=int),
+    )
+    return success_response(data=data)
+
+
+@collections_bp.get("/remittance/non-working")
+@collections_bp.get("/remittance/requests")
+@role_required("owner", "admin")
+def get_non_working_requests_route():
+    driver_id = request.args.get("driver_id")
+    return success_response(data={
+        "requests": list_non_working_requests(driver_id=driver_id),
+        "analytics": get_work_exception_analytics(driver_id=driver_id),
+    })
+
+
+@collections_bp.post("/remittance/requests")
+@role_required("owner", "admin")
+def record_remittance_problem_route():
+    payload = request.get_json(silent=True) or {}
+    item = submit_non_working_request(payload, current_user_id=get_jwt_identity(), driver_id=payload.get("driver_id"),
+                                      entered_by_role=get_jwt().get("role") or "admin", request_key=request.headers.get("Idempotency-Key"))
+    return success_response(data={"request": item}, message="Driver remittance problem recorded.", status_code=201)
+
+
+@collections_bp.patch("/remittance/requests/<request_id>")
+@role_required("owner", "admin")
+def update_remittance_problem_route(request_id: str):
+    item = update_problem_request(request_id, request.get_json(silent=True) or {}, current_user_id=get_jwt_identity(), current_role=get_jwt().get("role"))
+    return success_response(data={"request": item}, message="Remittance problem request updated.")
+
+
+@collections_bp.patch("/remittance/non-working/<request_id>/decision")
+@collections_bp.patch("/remittance/requests/<request_id>/decision")
+@role_required("owner", "admin")
+def decide_non_working_request_route(request_id: str):
+    item = decide_non_working_request(request_id, request.get_json(silent=True) or {}, current_user_id=get_jwt_identity(), decision_key=request.headers.get("Idempotency-Key"))
+    return success_response(data={"request": item}, message="Attendance and financial decisions recorded.")
+
+
+@collections_bp.put("/remittance/payments/<collection_id>/allocations")
+@role_required("owner", "admin")
+def replace_payment_allocations_route(collection_id: str):
+    payload = request.get_json(silent=True) or {}
+    result = replace_payment_allocations(collection_id, payload.get("allocations") or [], current_user_id=get_jwt_identity())
+    return success_response(data=result, message="Payment allocation updated successfully.")
+
+
+@collections_bp.post("/remittance/credit/apply")
+@role_required("owner", "admin")
+def apply_remittance_credit_route():
+    payload = request.get_json(silent=True) or {}
+    allocations = payload.get("allocations") if "allocations" in payload else None
+    result = apply_confirmed_credit(
+        payload.get("assignment_id"), allocations, current_user_id=get_jwt_identity()
+    )
+    return success_response(data=result, message="Confirmed credit applied successfully.")
 
 
 @collections_bp.get("/<collection_id>")
@@ -88,7 +187,7 @@ def update_collection_status_route(collection_id: str):
         collection_id=collection_id,
         status=payload.get("status"),
         current_user_id=get_jwt_identity(),
-        rejection_reason=payload.get("rejection_reason"),
+        rejection_reason=payload.get("reversal_reason") if str(payload.get("status") or "").strip().lower() == "reversed" else payload.get("rejection_reason"),
         admin_received_amount=payload.get("admin_received_amount"),
         admin_approval_note=payload.get("admin_approval_note"),
     )

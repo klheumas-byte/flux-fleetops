@@ -35,7 +35,7 @@ def create_fuel_log_route():
     )
     return success_response(
         data={"log": log},
-        message="Fuel log submitted successfully.",
+        message="Fuel log saved successfully.",
         status_code=201,
     )
 

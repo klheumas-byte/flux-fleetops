@@ -58,6 +58,7 @@ interface FaultFormState {
   description: string;
   photos: string[];
   vehicle_unsafe: boolean;
+  detected_at: string;
 }
 
 const initialFormState: FaultFormState = {
@@ -67,6 +68,7 @@ const initialFormState: FaultFormState = {
   description: '',
   photos: [],
   vehicle_unsafe: false,
+  detected_at: new Date().toISOString().slice(0, 16),
 };
 
 function formatDateTime(value: Date) {
@@ -194,6 +196,8 @@ export default function ReportFault({ currentUser, activeAssignment }: ReportFau
   const submissionKey = useRef(crypto.randomUUID());
   const [movementVehicles, setMovementVehicles] = useState<NonNullable<VehicleMovementRecord['vehicle']>[]>([]);
   const [selectedVehicleId, setSelectedVehicleId] = useState(activeAssignment?.vehicle_id || '');
+  const isAdministrativeReporter = ['owner', 'admin', 'operations_administrator', 'system_administrator']
+    .includes(String(currentUser?.selected_workspace || currentUser?.role || '').toLowerCase());
 
   const permittedVehicles = useMemo(() => {
     if (activeAssignment?.vehicle) return [activeAssignment.vehicle];
@@ -249,6 +253,15 @@ export default function ReportFault({ currentUser, activeAssignment }: ReportFau
     let cancelled = false;
     const loadMovementVehicles = async () => {
       try {
+        if (isAdministrativeReporter) {
+          const response = await apiRequest<{ data: { vehicles: Array<{ id: string; registration_number: string; make?: string | null; model?: string | null }> } }>('/vehicles', { cacheTtlMs: 10_000 });
+          if (!cancelled) {
+            const vehicles = response.data?.vehicles || [];
+            setMovementVehicles(vehicles);
+            setSelectedVehicleId((current) => current || vehicles[0]?.id || '');
+          }
+          return;
+        }
         const response = await fetchVehicleMovements({ page_size: 100 });
         const openStatuses = new Set(['approved', 'checked_out', 'in_progress']);
         const vehiclesById = new Map<string, NonNullable<VehicleMovementRecord['vehicle']>>();
@@ -269,7 +282,7 @@ export default function ReportFault({ currentUser, activeAssignment }: ReportFau
     };
     void loadMovementVehicles();
     return () => { cancelled = true; };
-  }, [activeAssignment?.vehicle_id, currentUser?.id]);
+  }, [activeAssignment?.vehicle_id, currentUser?.id, isAdministrativeReporter]);
 
   useEffect(() => {
     if (!formState.category_id) {
@@ -369,13 +382,16 @@ export default function ReportFault({ currentUser, activeAssignment }: ReportFau
         method: 'POST',
         body: JSON.stringify({
           vehicle_id: vehicleId,
-          driver_id: currentUser?.id,
+          // Administrative reporters select a vehicle, not themselves as the
+          // driver. The backend associates the assigned driver when available.
+          driver_id: isAdministrativeReporter ? undefined : currentUser?.id,
           category_id: formState.category_id,
           component_id: formState.component_id,
           severity: formState.severity,
           description: formState.description,
           photos: formState.photos,
           vehicle_unsafe: formState.vehicle_unsafe,
+          detected_at: new Date(formState.detected_at).toISOString(),
           submission_key: submissionKey.current,
         }),
       });
@@ -403,7 +419,7 @@ export default function ReportFault({ currentUser, activeAssignment }: ReportFau
     return (
       <div className="p-6">
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-          You need an active vehicle assignment or an approved/in-progress movement as custodian before you can report a fault.
+          {isAdministrativeReporter ? 'No authorized fleet vehicles are available for fault reporting.' : 'You need an active vehicle assignment or an approved/in-progress movement as custodian before you can report a fault.'}
         </div>
       </div>
     );
@@ -445,7 +461,7 @@ export default function ReportFault({ currentUser, activeAssignment }: ReportFau
         <div className="border-b border-gray-200 px-6 py-4">
           <h2 className="text-lg font-semibold text-[#0F172A]">Fault Report Form</h2>
           <p className="mt-1 text-sm text-gray-600">
-            Assigned vehicle, driver, and report time are captured automatically.
+            {isAdministrativeReporter ? 'Select an authorized vehicle; reporter and audit details are captured automatically.' : 'Assigned vehicle, driver, and report time are captured automatically.'}
           </p>
         </div>
 
@@ -483,7 +499,7 @@ export default function ReportFault({ currentUser, activeAssignment }: ReportFau
               </div>
             </div>
 
-            {permittedVehicles.length > 1 && (
+            {(permittedVehicles.length > 1 || isAdministrativeReporter) && (
               <div>
                 <label className="mb-2 block text-sm font-medium text-gray-700">Vehicle</label>
                 <select
@@ -497,6 +513,11 @@ export default function ReportFault({ currentUser, activeAssignment }: ReportFau
                 </select>
               </div>
             )}
+
+            <div className="max-w-md">
+              <label className="mb-2 block text-sm font-medium text-gray-700">Fault detected date / time</label>
+              <input type="datetime-local" required max={new Date().toISOString().slice(0, 16)} value={formState.detected_at} onChange={(event) => setFormState((current) => ({ ...current, detected_at: event.target.value }))} className="w-full rounded-lg border border-gray-300 px-4 py-2.5 focus:border-transparent focus:ring-2 focus:ring-[#2563EB]" />
+            </div>
 
             <div>
               <label className="mb-3 block text-sm font-medium text-gray-700">Category</label>

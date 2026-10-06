@@ -1,5 +1,6 @@
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
+from math import isfinite
 from time import perf_counter
 from typing import Any
 import re
@@ -17,7 +18,7 @@ from models.vehicle import serialize_vehicle
 from services.master_data_service import get_active_master_data_items, resolve_master_data_item
 from services.notification_service import create_notification, notify_roles
 from utils.api_error import ApiError
-from utils.performance import build_cache_key, get_ttl_cached, log_db_duration, set_ttl_cached
+from utils.performance import build_cache_key, get_ttl_cached, invalidate_ttl_cache, log_db_duration, set_ttl_cached
 
 
 TRIP_STATUSES = {
@@ -26,6 +27,8 @@ TRIP_STATUSES = {
     "Completed",
     "Cancelled",
 }
+
+PAYMENT_METHODS = {"Cash", "MoMo"}
 
 ACTIVE_BOOKING_STATUSES = ["Scheduled", "Acknowledged", "En Route", "Picked Up", "Confirmed"]
 
@@ -54,6 +57,9 @@ RIDE_LIST_PROJECTION = {
     "updated_at": 1,
     "source_booking_id": 1,
     "actual_fare": 1,
+    "payment_method": 1,
+    "platform_fee": 1,
+    "net_earnings": 1,
 }
 
 RIDE_SUMMARY_PROJECTION = {
@@ -64,6 +70,10 @@ RIDE_SUMMARY_PROJECTION = {
     "trip_purpose": 1,
     "driver_id": 1,
     "customer_id": 1,
+    "actual_fare": 1,
+    "payment_method": 1,
+    "platform_fee": 1,
+    "net_earnings": 1,
 }
 
 
@@ -166,6 +176,7 @@ def ensure_ride_indexes():
     _ensure_index_if_missing([("status", ASCENDING), ("created_at", DESCENDING)])
     _ensure_index_if_missing([("status", ASCENDING), ("vehicle_id", ASCENDING), ("created_at", DESCENDING)])
     _ensure_index_if_missing([("status", ASCENDING), ("driver_id", ASCENDING), ("created_at", DESCENDING)])
+    _ensure_index_if_missing([("driver_id", ASCENDING), ("status", ASCENDING), ("trip_date", DESCENDING)])
     _ensure_index_if_missing([("trip_source_id", ASCENDING)])
     _ensure_index_if_missing([("trip_purpose_id", ASCENDING)])
     _ensure_index_if_missing([("source_booking_id", ASCENDING)])
@@ -235,14 +246,47 @@ def _parse_time_value(value, field_name: str, *, required: bool = False):
     raise ApiError(f"{field_name} must be a valid time.", status_code=400)
 
 
-def _validate_number(value, field_name: str, *, required: bool = False):
+def _validate_number(value, field_name: str, *, required: bool = False, non_negative: bool = False):
     if value in (None, ""):
         if required:
             raise ApiError(f"{field_name} is required.", status_code=400)
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ApiError(f"{field_name} must be numeric.", status_code=400)
-    return round(float(value), 2)
+    parsed = round(float(value), 2)
+    if not isfinite(parsed):
+        raise ApiError(f"{field_name} must be a finite number.", status_code=400)
+    if non_negative and parsed < 0:
+        raise ApiError(f"{field_name} cannot be negative.", status_code=400)
+    return parsed
+
+
+def _validate_payment_method(value):
+    normalized = _normalize_text(value)
+    if normalized is None:
+        return None
+    match = next((item for item in PAYMENT_METHODS if item.lower() == normalized.lower()), None)
+    if match is None:
+        raise ApiError("payment_method must be one of: Cash, MoMo.", status_code=400)
+    return match
+
+
+def _apply_earnings_values(normalized: dict, existing: dict | None = None):
+    existing = existing or {}
+    amount = normalized.get("actual_fare", existing.get("actual_fare"))
+    fee = normalized.get("platform_fee", existing.get("platform_fee"))
+    if amount is None:
+        if fee not in (None, 0, 0.0):
+            raise ApiError("platform_fee requires an amount charged.", status_code=400)
+        if "actual_fare" in normalized or "platform_fee" in normalized:
+            normalized["platform_fee"] = None
+            normalized["net_earnings"] = None
+        return
+    fee = round(float(fee or 0), 2)
+    if fee > amount:
+        raise ApiError("platform_fee cannot exceed amount charged.", status_code=400)
+    normalized["platform_fee"] = fee
+    normalized["net_earnings"] = round(amount - fee, 2)
 
 
 def _validate_status(value: str | None):
@@ -319,8 +363,8 @@ def _assert_ride_access(ride_document: dict, *, current_user_id: str, current_ro
         raise ApiError("You do not have permission to access this trip log.", status_code=403)
 
 
-def _enrich_ride(ride_document: dict):
-    ride = serialize_ride(ride_document)
+def _enrich_ride(ride_document: dict, *, include_earnings: bool = False):
+    ride = serialize_ride(ride_document, include_earnings=include_earnings)
     customer = customers_collection().find_one({"_id": ride_document.get("customer_id")})
     driver = users_collection().find_one({"_id": ride_document.get("driver_id")})
     vehicle = vehicles_collection().find_one({"_id": ride_document.get("vehicle_id")})
@@ -407,6 +451,7 @@ def _serialize_ride_option_booking(booking_document: dict) -> dict:
         "pickup_time": booking_document.get("pickup_time"),
         "pickup_at": pickup_at.isoformat() if pickup_at else None,
         "status": booking_document.get("status"),
+        "expected_fare": booking_document.get("expected_fare"),
     }
 
 
@@ -521,8 +566,9 @@ def _enrich_ride_list_item(
     *,
     driver_map: dict[str, dict],
     vehicle_map: dict[str, dict],
+    include_earnings: bool = False,
 ) -> dict:
-    ride = serialize_ride(ride_document)
+    ride = serialize_ride(ride_document, include_earnings=include_earnings)
     driver = driver_map.get(str(ride_document.get("driver_id"))) if ride_document.get("driver_id") else None
     vehicle = vehicle_map.get(str(ride_document.get("vehicle_id"))) if ride_document.get("vehicle_id") else None
     ride["customer"] = {
@@ -710,9 +756,24 @@ def _normalized_ride_payload(payload: dict, *, partial: bool = False) -> dict:
         normalized["actual_fare"] = _validate_number(
             payload.get("actual_fare") if "actual_fare" in payload else payload.get("amount_charged"),
             "actual_fare",
+            non_negative=True,
         )
     elif not partial:
         normalized["actual_fare"] = None
+
+    if "platform_fee" in payload:
+        normalized["platform_fee"] = _validate_number(
+            payload.get("platform_fee"), "platform_fee", non_negative=True
+        )
+    elif not partial:
+        normalized["platform_fee"] = 0.0 if normalized.get("actual_fare") is not None else None
+
+    if "payment_method" in payload:
+        normalized["payment_method"] = _validate_payment_method(payload.get("payment_method"))
+    elif not partial:
+        normalized["payment_method"] = None
+
+    _apply_earnings_values(normalized)
 
     if "status" in payload or not partial:
         normalized["status"] = _validate_status(payload.get("status"))
@@ -738,6 +799,7 @@ def list_ride_options(current_user_id: str, current_role: str) -> dict:
     bookings_query = {
         "status": {"$in": ACTIVE_BOOKING_STATUSES},
         "is_recurring_template": False,
+        "trip_log_id": None,
     }
     if current_role == "driver":
         current_object_id = _to_object_id(current_user_id, "current_user_id")
@@ -816,6 +878,7 @@ def list_ride_options(current_user_id: str, current_role: str) -> dict:
                 "pickup_time": 1,
                 "pickup_at": 1,
                 "status": 1,
+                "expected_fare": 1,
             },
         ).sort([("pickup_at", ASCENDING)])
     )
@@ -894,6 +957,7 @@ def list_rides(
             ride_document,
             driver_map=driver_map,
             vehicle_map=vehicle_map,
+            include_earnings=current_role == "driver",
         )
         for ride_document in ride_documents
     ]
@@ -948,6 +1012,8 @@ def create_ride(payload: dict, current_user_id: str, current_role: str) -> dict:
         booking_document = _get_booking_document(str(normalized["source_booking_id"]))
         if customer_document and booking_document.get("customer_id") != customer_document["_id"]:
             raise ApiError("Booking does not belong to the selected customer.", status_code=400)
+        if booking_document.get("trip_log_id") or rides_collection().find_one({"source_booking_id": booking_document["_id"]}, {"_id": 1}):
+            raise ApiError("This booking already has a trip log.", status_code=409)
 
     if current_role == "driver":
         current_driver_id = _to_object_id(current_user_id, "current_user_id")
@@ -962,6 +1028,7 @@ def create_ride(payload: dict, current_user_id: str, current_role: str) -> dict:
     timestamp = now_utc()
     trip_identifier = _build_trip_id()
     ride_document = {
+        "_id": ObjectId(),
         "trip_id": trip_identifier,
         "ride_id": trip_identifier,
         "customer_id": normalized.get("customer_id"),
@@ -980,6 +1047,9 @@ def create_ride(payload: dict, current_user_id: str, current_role: str) -> dict:
         "odometer_start": normalized.get("odometer_start"),
         "odometer_end": normalized.get("odometer_end"),
         "actual_fare": normalized.get("actual_fare"),
+        "payment_method": normalized.get("payment_method"),
+        "platform_fee": normalized.get("platform_fee"),
+        "net_earnings": normalized.get("net_earnings"),
         "notes": normalized.get("notes"),
         "status": normalized.get("status", "Logged"),
         "created_by": _to_object_id(current_user_id, "current_user_id"),
@@ -994,9 +1064,24 @@ def create_ride(payload: dict, current_user_id: str, current_role: str) -> dict:
             )
         ],
     }
-    result = rides_collection().insert_one(ride_document)
-    ride_document["_id"] = result.inserted_id
+    if booking_document:
+        reserved = bookings_collection().update_one(
+            {"_id": booking_document["_id"], "trip_log_id": None},
+            {"$set": {"trip_log_id": ride_document["_id"], "updated_at": timestamp}},
+        )
+        if reserved.matched_count != 1:
+            raise ApiError("This booking already has a trip log.", status_code=409)
+    try:
+        rides_collection().insert_one(ride_document)
+    except Exception:
+        if booking_document:
+            bookings_collection().update_one(
+                {"_id": booking_document["_id"], "trip_log_id": ride_document["_id"]},
+                {"$unset": {"trip_log_id": ""}},
+            )
+        raise
     _sync_booking_status_from_ride(ride_document)
+    invalidate_ttl_cache("ride_summary", "ride_options")
 
     customer_name = customer_document.get("full_name") if customer_document else "Trip log"
     _create_ride_notifications(
@@ -1004,7 +1089,7 @@ def create_ride(payload: dict, current_user_id: str, current_role: str) -> dict:
         "Trip logged",
         f"{customer_name} trip has been logged for {ride_document['trip_date']}.",
     )
-    return _enrich_ride(ride_document)
+    return _enrich_ride(ride_document, include_earnings=current_role == "driver")
 
 
 def convert_booking_to_ride(booking_id: str, payload: dict, current_user_id: str, current_role: str) -> dict:
@@ -1017,7 +1102,7 @@ def convert_booking_to_ride(booking_id: str, payload: dict, current_user_id: str
         "customer_id": str(booking_document.get("customer_id")) if booking_document.get("customer_id") else None,
         "driver_id": str(booking_document.get("driver_id")) if booking_document.get("driver_id") else None,
         "vehicle_id": str(booking_document.get("vehicle_id")) if booking_document.get("vehicle_id") else None,
-        "trip_source_id": payload.get("trip_source_id") or payload.get("ride_source"),
+        "trip_source_id": "Flux Booking",
         "trip_purpose_id": payload.get("trip_purpose_id") or payload.get("ride_purpose") or "Company Ride",
         "trip_date": payload.get("trip_date") or pickup_date,
         "start_time": payload.get("start_time") or pickup_time,
@@ -1025,14 +1110,14 @@ def convert_booking_to_ride(booking_id: str, payload: dict, current_user_id: str
         "pickup_area": payload.get("pickup_area") or payload.get("pickup_location") or booking_document.get("pickup_location"),
         "destination_area": payload.get("destination_area") or payload.get("destination") or booking_document.get("destination"),
         "notes": payload.get("notes") or booking_document.get("notes"),
-        "actual_fare": payload.get("actual_fare") if "actual_fare" in payload else payload.get("amount_charged"),
+        "actual_fare": booking_document.get("expected_fare") if booking_document.get("expected_fare") is not None else (payload.get("actual_fare") if "actual_fare" in payload else payload.get("amount_charged")),
+        "payment_method": payload.get("payment_method"),
+        "platform_fee": payload.get("platform_fee"),
         "status": payload.get("status") or "Scheduled",
         "source_booking_id": booking_id,
         "odometer_start": payload.get("odometer_start"),
         "odometer_end": payload.get("odometer_end"),
     }
-    if not source_payload["trip_source_id"]:
-        source_payload["trip_source_id"] = "Direct Customer"
     return create_ride(source_payload, current_user_id, current_role)
 
 
@@ -1045,7 +1130,7 @@ def get_ride_by_id(ride_id: str, current_user_id: str, current_role: str) -> dic
         current_user_id=current_user_id,
         current_role=current_role,
     )
-    return _enrich_ride(ride_document)
+    return _enrich_ride(ride_document, include_earnings=current_role == "driver")
 
 
 def update_ride(ride_id: str, payload: dict, current_user_id: str, current_role: str) -> dict:
@@ -1061,6 +1146,7 @@ def update_ride(ride_id: str, payload: dict, current_user_id: str, current_role:
     normalized = _normalized_ride_payload(payload, partial=True)
     if not normalized:
         raise ApiError("No trip log fields provided for update.", status_code=400)
+    _apply_earnings_values(normalized, ride_document)
 
     if current_role == "driver" and "driver_id" in normalized:
         current_driver_id = _to_object_id(current_user_id, "current_user_id")
@@ -1096,6 +1182,7 @@ def update_ride(ride_id: str, payload: dict, current_user_id: str, current_role:
     ride_document.update(update_fields)
     ride_document.setdefault("audit_events", []).append(audit_event)
     _sync_booking_status_from_ride(ride_document)
+    invalidate_ttl_cache("ride_summary", "ride_options")
 
     if "status" in normalized:
         customer_document = customers_collection().find_one({"_id": ride_document.get("customer_id")})
@@ -1106,7 +1193,7 @@ def update_ride(ride_id: str, payload: dict, current_user_id: str, current_role:
             f"{customer_name} trip is now {ride_document.get('status')}.",
             priority="high" if ride_document.get("status") in {"Completed", "Cancelled"} else "medium",
         )
-    return _enrich_ride(ride_document)
+    return _enrich_ride(ride_document, include_earnings=current_role == "driver")
 
 
 def _status_count(documents: list[dict], status: str):
@@ -1133,6 +1220,161 @@ def _in_date_window(trip_date_value: str | None, start_date, end_date):
         return False
     trip_date = datetime.strptime(trip_date_value, "%Y-%m-%d").date()
     return start_date <= trip_date <= end_date
+
+
+def _earnings_summary(documents: list[dict]) -> dict:
+    earning_trips = [
+        document for document in documents
+        if document.get("status") == "Completed" and document.get("actual_fare") is not None
+    ]
+    gross = round(sum(float(document.get("actual_fare") or 0) for document in earning_trips), 2)
+    fees = round(sum(float(document.get("platform_fee") or 0) for document in earning_trips), 2)
+
+    def breakdown(field_name: str):
+        grouped: dict[str, dict] = {}
+        for document in earning_trips:
+            label = document.get(field_name) or "Not specified"
+            item = grouped.setdefault(label, {"label": label, "trip_count": 0, "gross_charged": 0.0, "platform_fees": 0.0, "net_earnings": 0.0})
+            item["trip_count"] += 1
+            item["gross_charged"] += float(document.get("actual_fare") or 0)
+            item["platform_fees"] += float(document.get("platform_fee") or 0)
+            item["net_earnings"] += float(document.get("net_earnings") if document.get("net_earnings") is not None else (document.get("actual_fare") or 0) - (document.get("platform_fee") or 0))
+        for item in grouped.values():
+            for amount_field in ("gross_charged", "platform_fees", "net_earnings"):
+                item[amount_field] = round(item[amount_field], 2)
+        return sorted(grouped.values(), key=lambda item: (-item["net_earnings"], item["label"]))
+
+    return {
+        "trip_count": len(earning_trips),
+        "gross_charged": gross,
+        "platform_fees": fees,
+        "net_earnings": round(gross - fees, 2),
+        "payment_method_breakdown": breakdown("payment_method"),
+        "source_breakdown": breakdown("trip_source"),
+    }
+
+
+def _earnings_date_range(period: str | None, start_date: str | None, end_date: str | None):
+    today = now_utc().date()
+    normalized_period = str(period or "month").strip().lower()
+    if normalized_period == "today":
+        return normalized_period, today, today
+    if normalized_period == "week":
+        return normalized_period, today - timedelta(days=today.weekday()), today
+    if normalized_period == "month":
+        return normalized_period, today.replace(day=1), today
+    if normalized_period != "custom":
+        raise ApiError("period must be one of: today, week, month, custom.", status_code=400)
+    try:
+        first = datetime.strptime(str(start_date or ""), "%Y-%m-%d").date()
+        last = datetime.strptime(str(end_date or ""), "%Y-%m-%d").date()
+    except ValueError as error:
+        raise ApiError("start_date and end_date are required as YYYY-MM-DD for a custom range.", status_code=400) from error
+    if first > last:
+        raise ApiError("start_date cannot be after end_date.", status_code=400)
+    return normalized_period, first, last
+
+
+def get_driver_earnings(
+    current_user_id: str,
+    *,
+    period: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    source: str | None = None,
+    payment_method: str | None = None,
+    page: int | None = None,
+    limit: int | None = None,
+) -> dict:
+    """Return private earnings derived directly from the authenticated driver's completed trips."""
+    driver_id = _to_object_id(current_user_id, "current_user_id")
+    normalized_period, first, last = _earnings_date_range(period, start_date, end_date)
+    normalized_page, normalized_limit = _normalize_page_limit(page, limit)
+    normalized_source = _normalize_text(source)
+    normalized_method = _normalize_text(payment_method)
+    if normalized_method and normalized_method not in PAYMENT_METHODS:
+        raise ApiError("payment_method must be one of: Cash, MoMo.", status_code=400)
+
+    query: dict[str, Any] = {
+        "driver_id": driver_id,
+        "status": "Completed",
+        "actual_fare": {"$ne": None},
+        "trip_date": {"$gte": first.isoformat(), "$lte": last.isoformat()},
+    }
+    if normalized_source:
+        query["trip_source"] = normalized_source
+    if normalized_method:
+        query["payment_method"] = normalized_method
+
+    documents = list(rides_collection().find(query, RIDE_LIST_PROJECTION).sort([
+        ("trip_date", DESCENDING), ("end_time", DESCENDING), ("created_at", DESCENDING),
+    ]))
+    summary = _earnings_summary(documents)
+    trend_by_date: dict[str, dict] = {}
+    for document in documents:
+        trip_date = document.get("trip_date")
+        if not trip_date:
+            continue
+        row = trend_by_date.setdefault(trip_date, {
+            "date": trip_date, "trip_count": 0, "gross_earnings": 0.0,
+            "platform_fees": 0.0, "net_earnings": 0.0,
+        })
+        gross = float(document.get("actual_fare") or 0)
+        fee = float(document.get("platform_fee") or 0)
+        row["trip_count"] += 1
+        row["gross_earnings"] += gross
+        row["platform_fees"] += fee
+        row["net_earnings"] += gross - fee
+    for row in trend_by_date.values():
+        for field in ("gross_earnings", "platform_fees", "net_earnings"):
+            row[field] = round(row[field], 2)
+
+    offset = (normalized_page - 1) * normalized_limit
+    page_documents = documents[offset:offset + normalized_limit]
+    transactions = []
+    for document in page_documents:
+        gross = round(float(document.get("actual_fare") or 0), 2)
+        fee = round(float(document.get("platform_fee") or 0), 2)
+        transactions.append({
+            "id": str(document.get("_id")),
+            "trip_id": document.get("trip_id") or document.get("ride_id"),
+            "trip_date": document.get("trip_date"),
+            "start_time": document.get("start_time"),
+            "end_time": document.get("end_time"),
+            "source": document.get("trip_source"),
+            "payment_method": document.get("payment_method"),
+            "gross_earnings": gross,
+            "platform_fee": fee,
+            "net_earnings": round(gross - fee, 2),
+            "pickup_area": document.get("pickup_area"),
+            "destination_area": document.get("destination_area"),
+        })
+
+    total = len(documents)
+    cash = next((row["gross_charged"] for row in summary["payment_method_breakdown"] if row["label"] == "Cash"), 0.0)
+    momo = next((row["gross_charged"] for row in summary["payment_method_breakdown"] if row["label"] == "MoMo"), 0.0)
+    available_sources = sorted(value for value in rides_collection().distinct("trip_source", {
+        "driver_id": driver_id, "status": "Completed", "actual_fare": {"$ne": None},
+    }) if value)
+    return {
+        "summary": {
+            "trip_count": summary["trip_count"],
+            "gross_earnings": summary["gross_charged"],
+            "platform_fees": summary["platform_fees"],
+            "net_earnings": summary["net_earnings"],
+            "cash": round(float(cash), 2),
+            "momo": round(float(momo), 2),
+        },
+        "trend": [trend_by_date[key] for key in sorted(trend_by_date)],
+        "transactions": transactions,
+        "filters": {"sources": available_sources, "payment_methods": sorted(PAYMENT_METHODS)},
+        "range": {"period": normalized_period, "start_date": first.isoformat(), "end_date": last.isoformat()},
+        "pagination": {
+            "page": normalized_page, "limit": normalized_limit, "total": total,
+            "total_pages": max((total + normalized_limit - 1) // normalized_limit, 1),
+            "has_next": offset + normalized_limit < total, "has_prev": normalized_page > 1,
+        },
+    }
 
 
 def get_ride_summary(current_user_id: str, current_role: str) -> dict:
@@ -1283,6 +1525,12 @@ def get_ride_summary(current_user_id: str, current_role: str) -> dict:
         "customer_linked_trip_count": len([document for document in ride_documents if document.get("customer_id")]),
         "generated_at": now.isoformat(),
     }
+    if current_role == "driver":
+        result["earnings"] = {
+            "today": _earnings_summary(trips_today),
+            "week": _earnings_summary(trips_this_week),
+            "month": _earnings_summary(trips_this_month),
+        }
     total_duration_ms = (perf_counter() - request_started_at) * 1000
     current_app.logger.info(
         "[Flux Rides] summary role=%s duration_ms=%.2f",

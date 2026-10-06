@@ -905,7 +905,7 @@ def _ensure_movement(document, *, current_user_id):
         if not availability.get("is_available"):
             raise ApiError("; ".join(item.get("message") for item in availability.get("blocking_reasons") or []) or "Vehicle is unavailable.", status_code=409)
     actor = _oid(current_user_id, "current_user_id"); timestamp = now_utc()
-    result = ensure_movement_for_source(source_type=operation_type, source_record_id=document["_id"], source_reference=document.get("transfer_id"), existing_movement=existing, movement_defaults={
+    result = ensure_movement_for_source(source_type=operation_type, source_record_id=document["_id"], source_reference=document.get("transfer_id"), existing_movement=existing, replace_terminal=True, recovery_actor_id=current_user_id, recovery_reason=f"{_reference_label(document).title()} is active and requires a journey movement.", movement_defaults={
         "vehicle_id": document["vehicle_id"], "driver_id": document.get("driver_id"), "movement_custodian_id": None,
         "stock_transfer_id": document["_id"], "movement_type": operation_type, "financial_class": "non_revenue", "status": "approved",
         "requested_departure_time": document.get("scheduled_at"), "origin": document.get("sending_location"), "destination": document.get("receiving_location"),
@@ -1847,6 +1847,50 @@ def _sync_exception_status(document, exception, *, status, current_user_id, curr
         get_collection("waybills").update_one({"_id": document["linked_waybill_id"]}, {"$set": {"delivery_exception_status": status, "delivery_exception_summary.operational_status": status, "updated_at": timestamp}, "$push": {"audit_log": {"event": event, "actor_id": _oid(current_user_id, "current_user_id"), "timestamp": timestamp, "details": details or {}, "immutable": True}}})
 
 
+def _ensure_delivery_return_movement(request: dict, *, current_user_id: str) -> dict:
+    existing = None
+    linked_id = request.get("linked_vehicle_movement_id")
+    if isinstance(linked_id, ObjectId):
+        existing = movements_collection().find_one({"_id": linked_id})
+    result = ensure_movement_for_source(
+        source_type="delivery_return_request",
+        source_record_id=request["_id"],
+        source_reference=request.get("return_number"),
+        existing_movement=existing,
+        replace_terminal=True,
+        recovery_actor_id=current_user_id,
+        recovery_reason="Delivery return remains active and requires a movement.",
+        movement_defaults={
+            "movement_type": "stock_return",
+            "financial_class": "non_revenue",
+            "status": "approved",
+            "vehicle_id": request.get("vehicle_id"),
+            "driver_id": request.get("driver_id"),
+            "movement_custodian_id": request.get("driver_id"),
+            "origin": request.get("origin"),
+            "destination": request.get("destination"),
+            "purpose": request.get("return_number"),
+            "delivery_exception_id": request.get("delivery_exception_id"),
+            "created_by": _oid(current_user_id, "current_user_id"),
+        },
+    )
+    movement = result["movement"]
+    if request.get("linked_vehicle_movement_id") != movement["_id"]:
+        timestamp = now_utc()
+        get_collection("delivery_return_requests").update_one(
+            {"_id": request["_id"]},
+            {"$set": {"linked_vehicle_movement_id": movement["_id"], "updated_at": timestamp}},
+        )
+        if isinstance(request.get("linked_waybill_id"), ObjectId):
+            get_collection("waybills").update_one(
+                {"_id": request["linked_waybill_id"], "movement_id": request.get("linked_vehicle_movement_id")},
+                {"$set": {"movement_id": movement["_id"], "vehicle_id": movement.get("vehicle_id"), "driver_id": movement.get("driver_id"), "updated_at": timestamp},
+                 "$push": {"audit_log": _action_audit("movement_relinked_after_terminal_recovery", current_user_id, "system", timestamp, {"replacement_movement_id": str(movement["_id"])})}},
+            )
+        request["linked_vehicle_movement_id"] = movement["_id"]
+    return movement
+
+
 def take_delivery_exception_action(transfer_id, payload, *, current_user_id, current_role):
     if current_role not in {"owner", "admin"}:
         raise ApiError("Only an owner or admin can select a Delivery Exception action.", status_code=403)
@@ -1873,7 +1917,7 @@ def take_delivery_exception_action(transfer_id, payload, *, current_user_id, cur
         request = {"return_number": f"RTR-{timestamp.strftime('%Y%m%d')}-{uuid4().hex[:6].upper()}", "delivery_exception_id": exception["_id"], "stock_transfer_id": document["_id"], "original_waybill_id": document.get("linked_waybill_id"), "items": [{"item_id": item["item_id"], "name": item.get("name") or item["item_id"], "unit": item.get("unit") or "unit", "expected_quantity": item["exception_quantity"], "quantity": item["exception_quantity"]} for item in items], "origin": document.get("receiving_location"), "destination": document.get("sending_location"), "vehicle_id": vehicle_id, "driver_id": driver_id, "status": "assigned", "status_history": [{"status": "pending", "timestamp": timestamp}, {"status": "assigned", "timestamp": timestamp}], "audit_log": [_action_audit("return_request_created", current_user_id, current_role, timestamp), _action_audit("return_assigned", current_user_id, current_role, timestamp, {"driver_id": str(driver_id), "vehicle_id": str(vehicle_id)})], "created_by": _oid(current_user_id, "current_user_id"), "created_at": timestamp, "updated_at": timestamp}
         try: request["_id"] = get_collection("delivery_return_requests").insert_one(request).inserted_id
         except DuplicateKeyError: request = get_collection("delivery_return_requests").find_one({"delivery_exception_id": exception["_id"]})
-        movement = ensure_movement_for_source(source_type="delivery_return_request", source_record_id=request["_id"], source_reference=request["return_number"], movement_defaults={"movement_type": "stock_return", "financial_class": "non_revenue", "status": "approved", "vehicle_id": vehicle_id, "driver_id": driver_id, "movement_custodian_id": driver_id, "origin": request["origin"], "destination": request["destination"], "purpose": request["return_number"], "delivery_exception_id": exception["_id"], "created_by": _oid(current_user_id, "current_user_id")})["movement"]
+        movement = _ensure_delivery_return_movement(request, current_user_id=current_user_id)
         from services.waybill_service import ensure_waybill_for_source
         waybill = ensure_waybill_for_source(source_type="delivery_return_request", source_document=request, movement_document=movement, current_user_id=current_user_id)["waybill"]
         get_collection("waybills").update_one({"_id": waybill["_id"], "status": "draft"}, {"$set": {"status": "approved", "approved_at": timestamp, "updated_at": timestamp}})
@@ -1919,6 +1963,8 @@ def transition_delivery_exception_return(transfer_id, target, payload, *, curren
         get_collection("waybills").update_one({"_id": waybill_id, "status": "approved"}, {"$set": {"driver_id": driver_id, "vehicle_id": vehicle_id}})
         extra = {"driver_id": driver_id, "vehicle_id": vehicle_id}
     elif target == "in_transit":
+        movement = _ensure_delivery_return_movement(request, current_user_id=current_user_id)
+        movement_id = movement["_id"]
         from services.vehicle_movement_service import start_vehicle_movement
         start_vehicle_movement(str(movement_id), payload or {}, current_user_id=current_user_id, current_role=current_role); get_collection("waybills").update_one({"_id": waybill_id}, {"$set": {"status": "in_transit"}}); extra = {}
     elif target == "returned":

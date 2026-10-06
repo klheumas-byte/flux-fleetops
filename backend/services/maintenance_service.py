@@ -398,6 +398,9 @@ def _ensure_maintenance_transport_movement(
         source_type="maintenance_job",
         source_record_id=source_record_id,
         source_reference=f"{maintenance_document.get('title') or maintenance_document['_id']}:{direction}",
+        replace_terminal=True,
+        recovery_actor_id=current_user_id,
+        recovery_reason=f"Maintenance {direction} transport remains active and requires a movement.",
         movement_defaults={
             "vehicle_id": maintenance_document["vehicle_id"],
             "driver_id": maintenance_document.get("driver_id"),
@@ -1685,6 +1688,10 @@ def update_maintenance_status(
         update_fields["current_stage"] = "waiting_parts"
         update_fields["waiting_parts_since"] = timestamp
     if next_status == "completed":
+        safety_fault = bool(fault_document and (fault_document.get("severity") == "critical" or fault_document.get("vehicle_unsafe")))
+        previously_confirmed = document.get("current_stage") == "driver_confirmed" or document.get("roadworthy_confirmed") is True
+        if safety_fault and payload.get("roadworthy_confirmed") is not True and not previously_confirmed:
+            raise ApiError("Roadworthy confirmation is required before completing maintenance for an unsafe vehicle.", status_code=400)
         update_fields["completed_by"] = _to_object_id(current_user_id, "completed_by")
         update_fields["completion_date"] = update_fields.get("completion_date") or timestamp.date().isoformat()
         update_fields["completed_at"] = timestamp
@@ -1708,6 +1715,9 @@ def update_maintenance_status(
             raise ApiError("parts_changed must be a string or list.", status_code=400)
         update_fields["parts_changed"] = parts_changed or None
         update_fields["current_stage"] = "completed"
+        update_fields["roadworthy_confirmed"] = bool(payload.get("roadworthy_confirmed") is True or previously_confirmed)
+        update_fields["roadworthy_confirmed_at"] = timestamp if update_fields["roadworthy_confirmed"] else None
+        update_fields["roadworthy_confirmed_by"] = _to_object_id(current_user_id, "roadworthy_confirmed_by") if update_fields["roadworthy_confirmed"] else None
         if document.get("transport_required"):
             return_movement = _ensure_maintenance_transport_movement(
                 {**document, **update_fields},

@@ -908,7 +908,7 @@ def get_dashboard_summary(*, current_role: str) -> dict:
         fuel_logs_collection().find(
             {
                 "record_scope": {"$ne": "personal"},
-                "status": "approved",
+                "status": {"$in": ["approved", "recorded"]},
                 "fuel_date": {
                     "$gte": week_window["week_start"],
                     "$lte": week_window["week_end"],

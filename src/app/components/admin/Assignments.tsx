@@ -15,6 +15,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
+import { getActiveSessionRole, getStoredSessionUser } from '../../lib/auth-session';
 import { useDebouncedValue } from '../../lib/use-debounced-value';
 
 type AssignmentStatus = 'pending_handover' | 'active' | 'pending_return' | 'ended' | 'suspended';
@@ -208,8 +209,7 @@ export default function Assignments() {
   const [selectedAssignment, setSelectedAssignment] = useState<Assignment | null>(null);
   const [historyVehicleId, setHistoryVehicleId] = useState<string | null>(null);
 
-  const storedUser = localStorage.getItem('flux_user');
-  const currentRole = storedUser ? JSON.parse(storedUser).role : null;
+  const currentRole = getActiveSessionRole(getStoredSessionUser());
   const debouncedSearchQuery = useDebouncedValue(searchQuery, 250);
 
   const getSettledData = <T,>(result: PromiseSettledResult<T>, fallback: T): T =>

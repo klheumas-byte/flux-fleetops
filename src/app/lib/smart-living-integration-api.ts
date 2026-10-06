@@ -38,6 +38,7 @@ export type SmartLivingEndpointStatus = {
 
 export type SmartLivingConnectionStatus = {
   configured: boolean;
+  configuration_missing?: string[];
   connection_status: 'connected' | 'failed' | 'not_configured' | null;
   endpoints: SmartLivingEndpointStatus[];
   last_checked: string | null;

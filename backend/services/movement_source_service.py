@@ -94,6 +94,9 @@ SOURCE_MODULES = {
 SOURCE_OWNERSHIP_FIELDS = frozenset(
     {"source_type", "source_id", "source_key", "source_module", "source_reference"}
 )
+TERMINAL_MOVEMENT_STATUSES = frozenset(
+    {"closed", "cancelled", "force_closed", "superseded", "voided"}
+)
 
 
 def get_movement_source_ownership(movement_type: str | None) -> dict | None:
@@ -210,6 +213,44 @@ def _attach_source_traceability(movement: dict, source_fields: dict, *, collecti
     return movement
 
 
+def _assert_replacement_resources_available(movement: dict, movement_defaults: dict) -> None:
+    """Validate a replacement against the same shared availability boundary."""
+    from services.vehicle_availability_service import (
+        resolve_driver_availability,
+        resolve_vehicle_availability,
+    )
+
+    context = {
+        "movement_type": movement_defaults.get("movement_type"),
+        "related_source_type": movement_defaults.get("related_source_type"),
+        "related_source_id": movement_defaults.get("related_source_id"),
+        "exclude_movement_id": movement.get("_id"),
+        "exclude_reservation_id": movement_defaults.get("reservation_id"),
+        "exclude_dispatch_job_id": movement_defaults.get("dispatch_job_id"),
+        "start_time": movement_defaults.get("requested_departure_time"),
+        "end_time": movement_defaults.get("expected_return_time"),
+    }
+    vehicle_id = movement_defaults.get("vehicle_id")
+    if isinstance(vehicle_id, ObjectId):
+        availability = resolve_vehicle_availability(vehicle_id, context=context)
+        blockers = availability.get("blocking_reasons") or []
+        if movement_defaults.get("movement_type") in {"maintenance_transport", "workshop_transport"}:
+            maintenance_id = movement_defaults.get("maintenance_job_id")
+            blockers = [item for item in blockers if not (
+                item.get("code") == "maintenance"
+                or (item.get("code") == "active_maintenance_job" and item.get("entity_id") == str(maintenance_id))
+            )]
+        if blockers:
+            reason = blockers[0].get("message") or "Vehicle is unavailable for a replacement movement."
+            raise ApiError(reason, status_code=409)
+    driver_id = movement_defaults.get("driver_id")
+    if isinstance(driver_id, ObjectId):
+        availability = resolve_driver_availability(driver_id, context=context)
+        if not availability.get("is_available"):
+            reason = availability.get("primary_reason") or "Driver is unavailable for a replacement movement."
+            raise ApiError(reason, status_code=409)
+
+
 def ensure_movement_for_source(
     *,
     source_type: str,
@@ -220,6 +261,9 @@ def ensure_movement_for_source(
     legacy_query: dict | None = None,
     movement_collection=None,
     session=None,
+    replace_terminal: bool = False,
+    recovery_actor_id: str | ObjectId | None = None,
+    recovery_reason: str | None = None,
 ) -> dict:
     """Return one movement for a source, creating it atomically when absent.
 
@@ -253,6 +297,12 @@ def ensure_movement_for_source(
         )
     if movement is None and legacy_query:
         movement = collection.find_one(legacy_query, **session_options)
+
+    # Older source-managed movements may predate source_key.  Attach the
+    # canonical key before deciding whether a terminal movement must be
+    # replaced.  Without this, the compare-and-set recovery below only matches
+    # already-migrated records and leaves an active source linked to its closed
+    # movement, which then fails as ``closed -> in_progress`` on start.
     if movement is not None:
         movement = _attach_source_traceability(
             movement,
@@ -260,6 +310,70 @@ def ensure_movement_for_source(
             collection=collection,
             session=session,
         )
+
+    replaced_movement = None
+    if movement is not None and movement.get("status") in TERMINAL_MOVEMENT_STATUSES and replace_terminal:
+        # A terminal movement is immutable history.  Recover an active source by
+        # moving the canonical key to a fresh movement, never by reopening the
+        # old record.  The compare-and-set claim makes repeated/concurrent start
+        # requests converge on one replacement.
+        _assert_replacement_resources_available(movement, movement_defaults)
+        actor_id = (
+            recovery_actor_id
+            if isinstance(recovery_actor_id, ObjectId)
+            else ObjectId(str(recovery_actor_id))
+            if recovery_actor_id and ObjectId.is_valid(str(recovery_actor_id))
+            else None
+        )
+        timestamp = now_utc()
+        canonical_key = source_fields["source_key"]
+        archived_key = f"{canonical_key}:history:{movement['_id']}"
+        reason = str(recovery_reason or "Active source required a replacement movement.").strip()
+        claim = uuid4().hex
+        recovery_event = {
+            "event": "terminal_movement_superseded",
+            "timestamp": timestamp,
+            "actor_id": actor_id,
+            "reason": reason,
+            "previous_status": movement.get("status"),
+            "immutable": True,
+        }
+        claim_result = collection.update_one(
+            {
+                "_id": movement["_id"],
+                "status": movement.get("status"),
+                "source_key": canonical_key,
+            },
+            {
+                "$set": {
+                    "source_key": archived_key,
+                    "canonical_source_key": canonical_key,
+                    "superseded_at": timestamp,
+                    "superseded_by": actor_id,
+                    "supersession_reason": reason,
+                    "recovery_claim": claim,
+                    "updated_at": timestamp,
+                    # The legacy dispatch uniqueness constraint otherwise
+                    # prevents a replacement while source_id keeps traceability.
+                    **({"superseded_dispatch_job_id": movement.get("dispatch_job_id"), "dispatch_job_id": None}
+                       if movement.get("source_type") == "dispatch_job" else {}),
+                },
+                "$push": {"audit_log": recovery_event},
+            },
+            **session_options,
+        )
+        if claim_result.matched_count == 1:
+            replaced_movement = movement
+            movement = None
+        else:
+            movement = collection.find_one({"source_key": canonical_key}, **session_options)
+            if movement is None:
+                raise ApiError(
+                    "Movement recovery is already in progress. Please retry the action.",
+                    status_code=409,
+                )
+
+    if movement is not None:
         return {
             "movement": movement,
             "created": False,
@@ -275,12 +389,33 @@ def ensure_movement_for_source(
         "created_at": movement_defaults.get("created_at") or timestamp,
         "updated_at": timestamp,
     }
+    if replaced_movement is not None:
+        document.update({
+            "replaces_movement_id": replaced_movement["_id"],
+            "replacement_reason": str(recovery_reason or "Active source required a replacement movement.").strip(),
+            "replacement_created_by": (
+                recovery_actor_id
+                if isinstance(recovery_actor_id, ObjectId)
+                else ObjectId(str(recovery_actor_id))
+                if recovery_actor_id and ObjectId.is_valid(str(recovery_actor_id))
+                else None
+            ),
+            "replacement_created_at": timestamp,
+        })
     try:
         document["_id"] = collection.insert_one(document, **session_options).inserted_id
+        if replaced_movement is not None:
+            collection.update_one(
+                {"_id": replaced_movement["_id"], "recovery_claim": claim},
+                {"$set": {"superseded_by_movement_id": document["_id"], "updated_at": timestamp}},
+                **session_options,
+            )
         return {
             "movement": document,
             "created": True,
             "source_key": source_fields["source_key"],
+            "replaced": replaced_movement is not None,
+            "replaced_movement_id": replaced_movement["_id"] if replaced_movement else None,
         }
     except DuplicateKeyError:
         if session is not None:
@@ -298,6 +433,13 @@ def ensure_movement_for_source(
         if winner is None and legacy_query:
             winner = collection.find_one(legacy_query, **session_options)
         if winner is None:
+            if replaced_movement is not None:
+                collection.update_one(
+                    {"_id": replaced_movement["_id"], "source_key": archived_key, "recovery_claim": claim},
+                    {"$set": {"source_key": source_fields["source_key"], "dispatch_job_id": replaced_movement.get("dispatch_job_id"), "updated_at": now_utc()},
+                     "$unset": {"recovery_claim": "", "superseded_at": "", "superseded_by": "", "supersession_reason": ""}},
+                    **session_options,
+                )
             raise ApiError(
                 "Vehicle already has another open movement.",
                 status_code=409,
@@ -408,6 +550,9 @@ def ensure_dispatch_movement(
     initial_status: str = "approved",
     departure_at: datetime | None = None,
 ) -> dict:
+    source_is_active = job_document.get("status") in {
+        "reserved", "assigned", "accepted", "clarification_requested", "in_progress"
+    } or initial_status == "in_progress"
     linked_movement = None
     linked_id = job_document.get("linked_vehicle_movement_id")
     if isinstance(linked_id, ObjectId):
@@ -436,6 +581,9 @@ def ensure_dispatch_movement(
         ),
         existing_movement=linked_movement,
         legacy_query={"dispatch_job_id": job_document["_id"]},
+        replace_terminal=source_is_active,
+        recovery_actor_id=current_user_id,
+        recovery_reason="Dispatch job is active and requires a movement.",
     )
     movement = result["movement"]
     if movement.get("dispatch_job_id") not in (None, job_document["_id"]):

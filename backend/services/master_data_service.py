@@ -124,6 +124,7 @@ MASTER_DATA_DEFAULTS: dict[str, list[str]] = {
         "Bolt",
         "Uber",
         "Yango",
+        "Flux Booking",
         "Direct Customer",
         "Corporate Customer",
         "Airport Pickup",

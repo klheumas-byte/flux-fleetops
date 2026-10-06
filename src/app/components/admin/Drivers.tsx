@@ -21,6 +21,7 @@ import {
   X,
 } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
+import { getActiveSessionRole, getStoredSessionUser } from '../../lib/auth-session';
 import { useDebouncedValue } from '../../lib/use-debounced-value';
 import { useDataSync } from '../../lib/data-sync';
 import PersonalUserAccounts from './PersonalUserAccounts';
@@ -349,8 +350,7 @@ export default function Drivers() {
   const [formError, setFormError] = useState('');
   const [actionError, setActionError] = useState('');
 
-  const storedUser = localStorage.getItem('flux_user');
-  const currentRole = storedUser ? JSON.parse(storedUser).role : null;
+  const currentRole = getActiveSessionRole(getStoredSessionUser());
   const debouncedSearchQuery = useDebouncedValue(searchQuery, 250);
 
   const loadDrivers = async () => {

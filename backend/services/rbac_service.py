@@ -41,7 +41,7 @@ ROLE_DEFINITIONS = {
             "batches.create", "batches.manage", "delivery.create", "delivery.update", "delivery.batch",
             "driver.assign", "driver.view", "driver.update", "drivers.assign", "vehicle.assign",
             "vehicles.assign", "vehicle.view", "vehicle.manage", "maintenance.view", "maintenance.manage",
-            "fault.view", "fault.manage", "items.issue", "items.receive", "items.correct", "items.reissue", "custody.view", "custody.accept", "custody.dispute",
+            "fault.view", "fault.manage", "fault.report", "items.issue", "items.receive", "items.correct", "items.reissue", "custody.view", "custody.accept", "custody.dispute",
             "delivery_execution.accept", "delivery_execution.start", "delivery_execution.stop_update", "delivery_execution.complete", "delivery_execution.override_custody", "returns.manage",
             "operations.reports", "operations.view", "notifications.view",
         ],
@@ -124,9 +124,9 @@ ROLE_DEFINITIONS = {
 # required phase permissions so existing installations gain the workflow
 # without replacing administrator-defined custom roles.
 SYSTEM_PERMISSION_ADDITIONS = {
-    "system_administrator": {"users.manage_operational", "stock_transfers.view_incoming", "stock_transfers.receive", "stock_transfers.verify", "stock_transfers.report_variance", "stock_transfers.view_history"},
-    "operations_administrator": {"delivery_batches.view", "delivery_batches.create", "delivery_batches.update", "delivery_batches.publish", "delivery_batches.assign", "delivery_routes.manage", "delivery_execution.manage", "delivery_execution.override", "delivery_items.issue", "delivery_items.acknowledge", "returns.receive", "returns.manage", "exceptions.manage", "investigations.manage", "reconciliation.manage", "delivery_batches.close", "delivery_batches.reopen", "branches.view_assigned", "delivery_operations.view_branch", "branch_operations.view", "stock_transfers.view_incoming", "stock_transfers.receive", "stock_transfers.verify", "stock_transfers.report_variance", "stock_transfers.view_history", "personal_vehicle_use.approve", "vehicle_movements.view", "vehicle_movements.manage"},
-    "admin": {"integrations.manage"},
+    "system_administrator": {"users.manage_operational", "fault.view", "fault.report", "stock_transfers.view_incoming", "stock_transfers.receive", "stock_transfers.verify", "stock_transfers.report_variance", "stock_transfers.view_history"},
+    "operations_administrator": {"fault.report", "delivery_batches.view", "delivery_batches.create", "delivery_batches.update", "delivery_batches.publish", "delivery_batches.assign", "delivery_routes.manage", "delivery_execution.manage", "delivery_execution.override", "delivery_items.issue", "delivery_items.acknowledge", "returns.receive", "returns.manage", "exceptions.manage", "investigations.manage", "reconciliation.manage", "delivery_batches.close", "delivery_batches.reopen", "branches.view_assigned", "delivery_operations.view_branch", "branch_operations.view", "stock_transfers.view_incoming", "stock_transfers.receive", "stock_transfers.verify", "stock_transfers.report_variance", "stock_transfers.view_history", "personal_vehicle_use.approve", "vehicle_movements.view", "vehicle_movements.manage"},
+    "admin": {"fault.report", "integrations.manage"},
     "operations_manager": {"delivery_batches.view", "delivery_batches.create", "delivery_batches.update", "delivery_batches.publish", "delivery_batches.assign", "delivery_routes.manage", "delivery_execution.manage", "returns.manage", "exceptions.manage", "investigations.manage", "reconciliation.manage", "delivery_batches.close", "personal_vehicle_use.approve", "vehicle_movements.view", "vehicle_movements.manage"},
     "driver": {"delivery_batches.view", "delivery_routes.execute", "delivery_items.acknowledge", "delivery_execution.manage", "personal_vehicle_use.create", "personal_vehicle_use.start", "personal_vehicle_use.complete", "vehicle_movements.view"},
     "field_agent": {"delivery_batches.view", "delivery_routes.execute", "delivery_items.acknowledge", "delivery_execution.manage"},
@@ -245,18 +245,18 @@ def permissions_for_user(user: dict | None) -> list[str]:
     if not user:
         return []
     permissions = set()
-    for code in user_role_codes(user):
-        definition = role_definition(code)
-        if definition and definition.get("status", "active") == "active":
-            permissions.update(definition.get("permissions", []))
+    active_role = primary_workspace(user)
+    definition = role_definition(active_role)
+    if definition and definition.get("status", "active") == "active":
+        permissions.update(definition.get("permissions", []))
     permissions.update(str(item).strip() for item in user.get("permission_grants", []) if str(item).strip())
     permissions.difference_update(str(item).strip() for item in user.get("permission_denials", []) if str(item).strip())
     return sorted(permissions)
 
 
 def effective_data_scope(user: dict | None) -> str:
-    scopes = [role_definition(code).get("default_data_scope", "OWN_RECORDS") for code in user_role_codes(user)]
-    return max(scopes, key=lambda item: SCOPE_RANK.get(item, 0), default="OWN_RECORDS")
+    active_role = primary_workspace(user)
+    return role_definition(active_role).get("default_data_scope", "OWN_RECORDS")
 
 
 def primary_workspace(user: dict | None) -> str | None:

@@ -54,6 +54,15 @@ function normalizeSessionUserRole(role: string | null | undefined): SessionUserR
   return /^[a-z0-9_]+$/.test(normalized) ? normalized : null;
 }
 
+export function getActiveSessionRole(user: SessionUser | null | undefined): SessionUserRole | null {
+  if (!user) return null;
+  const selected = normalizeSessionUserRole(user.selected_workspace);
+  if (selected && (user.roles || []).some((role) => role.active !== false && normalizeSessionUserRole(role.code) === selected)) {
+    return selected;
+  }
+  return normalizeSessionUserRole(user.role || user.user_type);
+}
+
 function normalizeSessionUser(user: SessionUser): SessionUser {
   const rawRoles = Array.isArray(user.roles) ? user.roles : [];
   const roleCodes = [
@@ -104,6 +113,7 @@ interface AuthMeResponse {
   message: string;
   data: {
     user: SessionUser;
+    access_token?: string;
   };
 }
 
@@ -132,6 +142,9 @@ export function clearStoredSession() {
 
 export async function fetchAuthenticatedUser(): Promise<SessionUser> {
   const response = await apiRequest<AuthMeResponse>('/auth/me');
+  if (response.data.access_token) {
+    localStorage.setItem('flux_token', response.data.access_token);
+  }
   const user = normalizeSessionUser(response.data.user);
   if (!normalizeSessionUserRole(user.role)) {
     throw new Error('Invalid session role.');

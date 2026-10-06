@@ -66,6 +66,7 @@ FAULT_LIST_PROJECTION = {
     "resolution_notes": 1,
     "maintenance_job_id": 1,
     "reported_at": 1,
+    "detected_at": 1,
     "reported_by": 1,
     "reporter_role": 1,
     "participant_comments": 1,
@@ -373,6 +374,24 @@ def _validate_severity(value: str | None):
     if severity not in ALLOWED_FAULT_SEVERITIES:
         raise ApiError("severity must be one of: low, medium, high, critical.", status_code=400)
     return severity
+
+
+def _validate_detected_at(value, timestamp: datetime) -> datetime:
+    if value in (None, ""):
+        return timestamp
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ApiError("detected_at must be a valid date and time.", status_code=400) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    parsed = parsed.astimezone(timezone.utc)
+    if parsed > timestamp:
+        raise ApiError("detected_at cannot be in the future.", status_code=400)
+    return parsed
 
 
 def _get_user_document(user_id: str | ObjectId, field_name: str = "user_id"):
@@ -801,7 +820,10 @@ def get_fault_by_id(fault_id: str, current_user_id: str, current_role: str) -> d
 
 def create_fault(payload: dict, current_user_id: str, current_role: str) -> dict:
     current_role = (current_role or "").strip().lower()
-    if current_role not in {"driver", "admin", "owner", "fleet_owner"}:
+    if current_role not in {
+        "driver", "admin", "owner", "fleet_owner",
+        "operations_administrator", "system_administrator",
+    }:
         raise ApiError("You do not have permission to create fault reports.", status_code=403)
 
     category_document = _get_category_document(payload.get("category_id"))
@@ -828,12 +850,13 @@ def create_fault(payload: dict, current_user_id: str, current_role: str) -> dict
         vehicle_object_id = vehicle_document["_id"]
         driver_object_id = vehicle_document.get("assigned_driver_id")
     else:
-        driver_object_id = _to_object_id(payload.get("driver_id"), "driver_id")
-        vehicle_object_id = _to_object_id(payload.get("vehicle_id"), "vehicle_id")
-        driver_document = _get_user_document(driver_object_id, "driver_id")
-        if driver_document.get("role") != "driver":
-            raise ApiError("Selected driver must have the driver role.", status_code=400)
-        _get_vehicle_document(vehicle_object_id)
+        vehicle_document = _get_vehicle_document(payload.get("vehicle_id"))
+        vehicle_object_id = vehicle_document["_id"]
+        driver_object_id = _to_object_id(payload.get("driver_id"), "driver_id", required=False) or vehicle_document.get("assigned_driver_id")
+        if driver_object_id:
+            driver_document = _get_user_document(driver_object_id, "driver_id")
+            if driver_document.get("role") != "driver":
+                raise ApiError("Selected driver must have the driver role.", status_code=400)
 
     photos = _validate_photos(payload.get("photos"))
     submission_key = (payload.get("submission_key") or "").strip() or None
@@ -843,6 +866,7 @@ def create_fault(payload: dict, current_user_id: str, current_role: str) -> dict
     if not isinstance(vehicle_unsafe, bool):
         raise ApiError("vehicle_unsafe must be true or false.", status_code=400)
     timestamp = now_utc()
+    detected_at = _validate_detected_at(payload.get("detected_at"), timestamp)
     document = {
         "vehicle_id": vehicle_object_id,
         "driver_id": driver_object_id,
@@ -859,6 +883,7 @@ def create_fault(payload: dict, current_user_id: str, current_role: str) -> dict
         "resolution_notes": None,
         "maintenance_job_id": None,
         "reported_at": timestamp,
+        "detected_at": detected_at,
         "reported_by": _to_object_id(current_user_id, "reported_by"),
         "reporter_role": current_role,
         "reviewed_by": None,

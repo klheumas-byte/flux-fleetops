@@ -21,7 +21,7 @@ import {
 import { toast } from 'sonner';
 
 import { ApiRequestError } from '../../lib/api';
-import { getStoredSessionUser } from '../../lib/auth-session';
+import { getActiveSessionRole, getStoredSessionUser } from '../../lib/auth-session';
 import {
   addDispatchStop,
   approveDispatchPricing,
@@ -190,7 +190,7 @@ const REQUEST_TYPE_LABELS: Record<string, string> = {
 };
 
 const sessionUser = getStoredSessionUser();
-const currentRole = String(sessionUser?.role || '').trim().toLowerCase();
+const currentRole = getActiveSessionRole(sessionUser) || '';
 const canApprovePricing = currentRole === 'owner' || currentRole === 'admin';
 const canManagePricing = canApprovePricing || currentRole === 'dispatcher' || currentRole === 'customer_service';
 

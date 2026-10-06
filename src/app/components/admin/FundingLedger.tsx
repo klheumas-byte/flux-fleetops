@@ -3,13 +3,14 @@ import { Loader2, Plus } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
 
 interface Source { id: string; name: string; active: boolean }
-interface Account { id: string; account_name: string; status: string }
+interface Account { id: string; account_name: string; account_type: 'cash' | 'momo' | 'bank'; provider_name?: string | null; account_number?: string | null; status: string }
 interface Contribution { id: string; amount: number; contribution_date: string; description: string; funding_source_snapshot?: { name: string }; finance_account_snapshot?: { account_name: string } }
 interface Position { money_in: number; expenses_out: number; net_funding_position: number; sources: Array<{ funding_source_id: string; funding_source?: { name: string }; money_in: number; expenses_out: number; net_position: number }> }
 interface ReconciliationRow { driver: { id: string; full_name: string }; gross_collections: number; amount_submitted: number; target: number; target_achievement_percentage: number; fleet_sales_funded_expenses: number; expected_cash_submission: number; outstanding_unsubmitted_amount: number; net_operating_position: number; submission_history: Array<{ id: string; collection_date: string; status: string; amount: number; submitted_amount?: number }>; expenses: Array<{ id: string; expense_date: string; expense_category: string; amount: number; funding_source_snapshot?: { name: string }; approved_by?: string }> }
 
 const today = new Date().toISOString().slice(0, 10);
 const money = (value = 0) => `GHS ${value.toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
+const accountLabel = (account: Account) => `${account.account_name} · ${account.account_type.toUpperCase()}${account.provider_name ? ` · ${account.provider_name}` : ''}${account.account_number ? ` · ••••${account.account_number.slice(-4)}` : ''}`;
 
 export default function FundingLedger() {
   const [sources, setSources] = useState<Source[]>([]);
@@ -58,7 +59,7 @@ export default function FundingLedger() {
   };
   const selectedSource = sources.find((item) => item.id === form.funding_source_id);
 
-  return <div className="space-y-6 p-6">
+  return <div className="space-y-6 p-4 sm:p-6">
     <div><h1 className="text-2xl font-semibold text-slate-900">Funding & Source Ledger</h1><p className="text-gray-600">Record non-sales funding and report money in, expenses out, and net source position.</p></div>
     {error && <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>}
     {success && <div className="rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-700">{success}</div>}
@@ -71,7 +72,7 @@ export default function FundingLedger() {
       <form onSubmit={submit} className="grid gap-4 rounded-xl border bg-white p-5 md:grid-cols-2">
         <h2 className="md:col-span-2 text-lg font-semibold">Record Funding Contribution</h2>
         <select required value={form.funding_source_id} onChange={(e) => setForm({ ...form, funding_source_id: e.target.value })} className="rounded-lg border p-2.5"><option value="">Funding source...</option>{sources.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
-        <select required value={form.finance_account_id} onChange={(e) => setForm({ ...form, finance_account_id: e.target.value })} className="rounded-lg border p-2.5"><option value="">Destination account...</option>{accounts.filter((item) => item.status === 'active').map((item) => <option key={item.id} value={item.id}>{item.account_name}</option>)}</select>
+        <select required value={form.finance_account_id} onChange={(e) => setForm({ ...form, finance_account_id: e.target.value })} className="rounded-lg border p-2.5"><option value="">Destination treasury account...</option>{accounts.filter((item) => item.status === 'active').map((item) => <option key={item.id} value={item.id}>{accountLabel(item)}</option>)}</select>
         {selectedSource?.name.toLowerCase() === 'other' && <input required placeholder="Describe other funding source" value={form.funding_source_description} onChange={(e) => setForm({ ...form, funding_source_description: e.target.value })} className="rounded-lg border p-2.5" />}
         <input required type="number" min="0.01" step="0.01" placeholder="Amount" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} className="rounded-lg border p-2.5" />
         <input required type="date" value={form.contribution_date} onChange={(e) => setForm({ ...form, contribution_date: e.target.value })} className="rounded-lg border p-2.5" />

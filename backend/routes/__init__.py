@@ -33,6 +33,7 @@ from .maintenance_overrides import maintenance_overrides_bp
 from .master_data import master_data_bp
 from .notifications import notifications_bp
 from .operational_requests import operational_requests_bp
+from .operations_control import operations_control_bp
 from .personal_vehicles import personal_vehicles_bp
 from .preventive_maintenance import preventive_maintenance_bp
 from .reports import reports_bp
@@ -86,6 +87,7 @@ def register_blueprints(app: Flask) -> None:
     app.register_blueprint(master_data_bp, url_prefix="/api/master-data")
     app.register_blueprint(notifications_bp, url_prefix="/api/notifications")
     app.register_blueprint(operational_requests_bp, url_prefix="/api/operational-requests")
+    app.register_blueprint(operations_control_bp, url_prefix="/api/operations-control")
     app.register_blueprint(personal_vehicles_bp, url_prefix="/api/personal-vehicles")
     app.register_blueprint(preventive_maintenance_bp, url_prefix="/api/preventive-maintenance")
     app.register_blueprint(reports_bp, url_prefix="/api/reports")

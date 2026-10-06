@@ -70,7 +70,7 @@ def test_scheduler_prefers_readable_identifiers_and_clear_fallbacks():
 
 def test_driver_workspace_never_renders_global_scheduler_controls():
     assert "const isDriverWorkspace" in SOURCE
-    assert 'String(user?.selected_workspace || user?.role || "")' in SOURCE
+    assert "getActiveSessionRole(user)" in SOURCE
     assert 'const canManage = !isDriverWorkspace' in SOURCE
     assert 'const canViewScheduler =' in SOURCE
     assert '!isDriverWorkspace && has("delivery_scheduler.view")' in SOURCE

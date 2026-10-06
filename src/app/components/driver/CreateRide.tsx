@@ -31,6 +31,8 @@ interface TripFormState {
   odometer_start: string;
   odometer_end: string;
   amount_charged: string;
+  payment_method: string;
+  platform_fee: string;
   notes: string;
   status: string;
 }
@@ -60,6 +62,8 @@ const emptyTripForm: TripFormState = {
   odometer_start: '',
   odometer_end: '',
   amount_charged: '',
+  payment_method: 'Cash',
+  platform_fee: '0',
   notes: '',
   status: 'Completed',
 };
@@ -216,9 +220,11 @@ export default function CreateRide() {
       trip_date: selectedBooking.pickup_date || current.trip_date,
       start_time: selectedBooking.pickup_time || current.start_time,
       end_time: current.end_time || selectedBooking.pickup_time || current.start_time,
+      trip_source_id: options?.trip_sources.find((source) => source.name === 'Flux Booking')?.id || current.trip_source_id,
+      amount_charged: selectedBooking.expected_fare != null ? String(selectedBooking.expected_fare) : '',
       status: 'Scheduled',
     }));
-  }, [selectedBooking]);
+  }, [options?.trip_sources, selectedBooking]);
 
   const recentTrips = useMemo(() => rides.slice(0, 5), [rides]);
 
@@ -294,6 +300,8 @@ export default function CreateRide() {
         odometer_start: form.odometer_start ? Number(form.odometer_start) : undefined,
         odometer_end: form.odometer_end ? Number(form.odometer_end) : undefined,
         actual_fare: form.amount_charged ? Number(form.amount_charged) : undefined,
+        payment_method: form.amount_charged ? form.payment_method : undefined,
+        platform_fee: form.amount_charged ? Number(form.platform_fee || 0) : undefined,
         notes: form.notes || undefined,
         status: form.status,
       };
@@ -337,7 +345,7 @@ export default function CreateRide() {
           <div className="border-b border-gray-200 bg-gradient-to-r from-[#0F172A] to-[#1e293b] px-6 py-5 text-white">
             <h1 className="text-2xl font-semibold">Log Trip</h1>
             <p className="mt-1 text-sm text-gray-300">
-              Record platform usage, customer activity, and vehicle movement without fare tracking.
+              Record trip activity, payment details, platform fees, and net earnings.
             </p>
           </div>
 
@@ -469,6 +477,7 @@ export default function CreateRide() {
                   placeholder="Select trip source"
                   searchPlaceholder="Search trip sources..."
                   emptyLabel="No trip sources found."
+                  disabled={Boolean(selectedBooking)}
                 />
               </label>
 
@@ -601,9 +610,39 @@ export default function CreateRide() {
                   min="0"
                   value={form.amount_charged}
                   onChange={(event) => setForm((current) => ({ ...current, amount_charged: event.target.value }))}
+                  disabled={selectedBooking?.expected_fare != null}
+                  className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm"
+                />
+                {selectedBooking?.expected_fare != null && <span className="text-xs text-gray-500">Using the booking fare.</span>}
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-sm font-medium text-[#0F172A]">Payment Method</span>
+                <select
+                  value={form.payment_method}
+                  onChange={(event) => setForm((current) => ({ ...current, payment_method: event.target.value }))}
+                  className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm"
+                >
+                  {['Cash', 'MoMo'].map((method) => <option key={method}>{method}</option>)}
+                </select>
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-sm font-medium text-[#0F172A]">Platform / Provider Fee</span>
+                <input
+                  type="number"
+                  min="0"
+                  max={form.amount_charged || undefined}
+                  value={form.platform_fee}
+                  onChange={(event) => setForm((current) => ({ ...current, platform_fee: event.target.value }))}
                   className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm"
                 />
               </label>
+
+              <div className="rounded-xl bg-emerald-50 px-4 py-3">
+                <div className="text-xs text-emerald-700">Net Earnings</div>
+                <div className="font-semibold text-emerald-900">GHS {Math.max(Number(form.amount_charged || 0) - Number(form.platform_fee || 0), 0).toFixed(2)}</div>
+              </div>
 
               <label className="space-y-2 md:col-span-2">
                 <span className="text-sm font-medium text-[#0F172A]">Notes</span>
@@ -678,7 +717,7 @@ export default function CreateRide() {
                     {trip.odometer_start ?? '-'} to {trip.odometer_end ?? '-'}
                   </div>
                   <div className="mt-2 text-xs text-gray-500">
-                    Amount charged: {trip.amount_charged ?? trip.actual_fare ?? '-'}
+                    Gross: {trip.amount_charged ?? trip.actual_fare ?? '-'} · Fee: {trip.platform_fee ?? '-'} · Net: {trip.net_earnings ?? '-'}
                   </div>
                 </div>
               </div>

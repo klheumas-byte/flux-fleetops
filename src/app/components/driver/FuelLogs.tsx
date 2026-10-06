@@ -18,8 +18,9 @@ import { apiRequest, ApiRequestError } from '../../lib/api';
 import { fetchDriverActiveAssignment, type DriverActiveAssignment } from '../../lib/driver-api';
 import { FuelGaugeSelector } from '../shared/FuelGaugeSelector';
 import { clearDriverQuickActionIntent, peekDriverQuickActionIntent } from '../../lib/driver-quick-actions';
+import type { VehicleMovementRecord } from '../../lib/vehicle-movement-api';
 
-type FuelLogStatus = 'submitted' | 'approved' | 'rejected';
+type FuelLogStatus = 'submitted' | 'recorded' | 'approved' | 'rejected';
 
 interface FuelStation {
   id: string;
@@ -78,6 +79,7 @@ interface FuelLogMutationResponse {
 }
 
 interface FuelFormState {
+  movement_id: string;
   fuel_station_id: string;
   fuel_date: string;
   fuel_type: string;
@@ -92,6 +94,7 @@ interface FuelFormState {
 }
 
 const initialFuelForm: FuelFormState = {
+  movement_id: '',
   fuel_station_id: '',
   fuel_date: new Date().toISOString().slice(0, 10),
   fuel_type: 'petrol',
@@ -123,6 +126,7 @@ function formatDate(value: string | null | undefined) {
 function statusClassName(status: FuelLogStatus) {
   switch (status) {
     case 'approved':
+    case 'recorded':
       return 'border-green-200 bg-green-100 text-green-700';
     case 'rejected':
       return 'border-red-200 bg-red-100 text-red-700';
@@ -150,6 +154,7 @@ export default function FuelLogs() {
     abnormal_fuel_spending: [],
   });
   const [stations, setStations] = useState<FuelStation[]>([]);
+  const [fuelPurchaseMovements, setFuelPurchaseMovements] = useState<VehicleMovementRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [pageError, setPageError] = useState('');
@@ -161,7 +166,7 @@ export default function FuelLogs() {
     setIsLoading(true);
     setPageError('');
     try {
-      const [assignmentResult, logsResult, stationsResult] = await Promise.allSettled([
+      const [assignmentResult, logsResult, stationsResult, movementsResult] = await Promise.allSettled([
         fetchDriverActiveAssignment(),
         apiRequest<DriverFuelLogsResponse>('/driver/fuel-logs', {
           cacheTtlMs: 10000,
@@ -174,6 +179,12 @@ export default function FuelLogs() {
           dedupeKey: 'fuel-stations',
           componentName: 'DriverFuelLogs',
           requestLabel: 'fuel-stations',
+        }),
+        apiRequest<{ success: boolean; data: { movements: VehicleMovementRecord[] } }>('/vehicle-movements?movement_type=fuel_purchase&page_size=20', {
+          cacheTtlMs: 5000,
+          dedupeKey: 'driver-fuel-purchase-movements',
+          componentName: 'DriverFuelLogs',
+          requestLabel: 'fuel-purchase-movements',
         }),
       ]);
 
@@ -190,8 +201,13 @@ export default function FuelLogs() {
           ? stationsResult.value.data.stations
           : [];
       setStations(nextStations);
+      const assignedPurchases = movementsResult.status === 'fulfilled'
+        ? (movementsResult.value.data?.movements || []).filter((movement) => movement.fuel_advance?.status === 'issued' && !movement.fuel_advance.fuel_log_id)
+        : [];
+      setFuelPurchaseMovements(assignedPurchases);
       setFormState((current) => ({
         ...current,
+        movement_id: current.movement_id || assignedPurchases[0]?.id || '',
         fuel_station_id: current.fuel_station_id || nextStations[0]?.id || '',
         fuel_type: assignment?.vehicle?.fuel_type || current.fuel_type,
       }));
@@ -218,7 +234,7 @@ export default function FuelLogs() {
   }, []);
 
   useEffect(() => {
-    if (!activeAssignment) {
+    if (!activeAssignment && fuelPurchaseMovements.length === 0) {
       return;
     }
     if (peekDriverQuickActionIntent() !== 'log_fuel') {
@@ -226,9 +242,9 @@ export default function FuelLogs() {
     }
     clearDriverQuickActionIntent();
     setShowAddModal(true);
-  }, [activeAssignment]);
+  }, [activeAssignment, fuelPurchaseMovements.length]);
 
-  const approvedLogs = logs.filter((log) => log.status === 'approved');
+  const approvedLogs = logs.filter((log) => ['approved', 'recorded'].includes(log.status));
   const averageLitres = approvedLogs.length
     ? approvedLogs.reduce((sum, log) => sum + (log.litres || 0), 0) / approvedLogs.length
     : 0;
@@ -273,6 +289,7 @@ export default function FuelLogs() {
       await apiRequest<FuelLogMutationResponse>('/fuel-logs', {
         method: 'POST',
         body: JSON.stringify({
+          movement_id: formState.movement_id || undefined,
           fuel_station_id: formState.fuel_station_id,
           fuel_date: formState.fuel_date,
           fuel_type: formState.fuel_type,
@@ -289,6 +306,7 @@ export default function FuelLogs() {
       setShowAddModal(false);
       setFormState({
         ...initialFuelForm,
+        movement_id: fuelPurchaseMovements[0]?.id || '',
         fuel_station_id: stations[0]?.id || '',
         fuel_type: activeAssignment?.vehicle?.fuel_type || 'petrol',
       });
@@ -331,7 +349,7 @@ export default function FuelLogs() {
               </button>
               <button
                 onClick={() => setShowAddModal(true)}
-                disabled={!activeAssignment}
+                disabled={!activeAssignment && fuelPurchaseMovements.length === 0}
                 className="inline-flex items-center gap-2 rounded-lg bg-[#2563EB] px-4 py-2.5 text-sm font-medium text-white transition-all hover:bg-[#1d4ed8] disabled:cursor-not-allowed disabled:opacity-70"
               >
                 <Plus className="h-4 w-4" />
@@ -349,7 +367,7 @@ export default function FuelLogs() {
           </div>
         )}
 
-        {!activeAssignment && !isLoading && (
+        {!activeAssignment && fuelPurchaseMovements.length === 0 && !isLoading && (
           <div className="rounded-xl border border-amber-200 bg-amber-50 p-5">
             <div className="flex items-start gap-3">
               <AlertCircle className="mt-0.5 h-5 w-5 text-amber-600" />
@@ -378,7 +396,7 @@ export default function FuelLogs() {
               </div>
               <div>
                 <h2 className="text-lg font-semibold text-[#0F172A]">Fuel History</h2>
-                <p className="text-sm text-gray-500">Your submitted fuel logs and approval outcomes</p>
+                <p className="text-sm text-gray-500">Weekly Remittance fuel is recorded immediately; other fuel follows the existing review flow.</p>
               </div>
             </div>
 
@@ -448,7 +466,7 @@ export default function FuelLogs() {
                 </div>
                 <div>
                   <h2 className="text-lg font-semibold text-[#0F172A]">Fuel Summary</h2>
-                  <p className="text-sm text-gray-500">Quick performance view from approved fuel logs</p>
+                  <p className="text-sm text-gray-500">Quick performance view from approved and immediately recorded fuel logs</p>
                 </div>
               </div>
               <div className="space-y-3">
@@ -511,6 +529,16 @@ export default function FuelLogs() {
               )}
 
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                {fuelPurchaseMovements.length > 0 ? (
+                  <SelectField label="Assigned Fuel Purchase" value={formState.movement_id} onChange={(value) => setFormState((current) => ({ ...current, movement_id: value }))}>
+                    <option value="">Use normal assigned-vehicle fuel flow</option>
+                    {fuelPurchaseMovements.map((movement) => (
+                      <option key={movement.id} value={movement.id}>
+                        {movement.movement_id} · {movement.vehicle?.registration_number || 'Vehicle'} · GHS {movement.fuel_advance?.issued_amount.toFixed(2)} issued
+                      </option>
+                    ))}
+                  </SelectField>
+                ) : null}
                 <SelectField label="Fuel Station" value={formState.fuel_station_id} onChange={(value) => setFormState((current) => ({ ...current, fuel_station_id: value }))}>
                   <option value="">Choose active station...</option>
                   {stations.map((station) => (
@@ -581,7 +609,7 @@ export default function FuelLogs() {
                 </button>
                 <button
                   type="submit"
-                  disabled={isSubmitting || !activeAssignment}
+                  disabled={isSubmitting || (!activeAssignment && !formState.movement_id)}
                   className="flex-1 inline-flex items-center justify-center gap-2 rounded-lg bg-[#2563EB] px-4 py-2.5 font-medium text-white hover:bg-[#1d4ed8] disabled:opacity-70"
                 >
                   {isSubmitting && <Loader2 className="h-4 w-4 animate-spin" />}

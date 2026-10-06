@@ -9,7 +9,7 @@ from extensions import get_collection
 from models.deposit import serialize_deposit
 from models.finance_account import serialize_finance_account_snapshot
 from models.user import serialize_user
-from services.finance_account_service import get_finance_account_document, increment_finance_account_balance
+from services.finance_account_service import get_finance_account_document, increment_finance_account_balance, run_finance_transaction
 from utils.api_error import ApiError
 from utils.file_validation import validate_file_reference
 from utils.mongo_indexes import ensure_indexes_for_collection
@@ -363,8 +363,19 @@ def verify_deposit(deposit_id: str, current_user_id: str, finance_account_id: st
         "rejection_reason": None,
         "updated_at": timestamp,
     }
-    deposits_collection().update_one({"_id": deposit_object_id}, {"$set": update_fields})
-    increment_finance_account_balance(finance_account_document["_id"], float(document.get("amount") or 0))
+    def post(session):
+        kwargs = {"session": session} if session is not None else {}
+        updated = deposits_collection().update_one(
+            {"_id": deposit_object_id, "status": "submitted"}, {"$set": update_fields}, **kwargs,
+        )
+        if updated.modified_count != 1:
+            raise ApiError("Deposit verification was already posted.", status_code=409)
+        increment_finance_account_balance(
+            finance_account_document["_id"], float(document.get("amount") or 0),
+            actor_id=current_user_id, reference_type="deposit", reference_id=deposit_object_id,
+            effective_date=document.get("deposit_date"), session=session,
+        )
+    run_finance_transaction(post)
     document.update(update_fields)
     return _enrich_deposit(document)
 

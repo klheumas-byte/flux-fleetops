@@ -300,8 +300,12 @@ def test_same_stable_source_identity_links_manager_and_agent_to_one_multirole_ac
     assert domain["db"].users.count_documents({}) == before_users
     assert domain["db"].branches.find_one({"_id": domain["a"]})["manager_id"] == domain["agent_a"]
     assert branch_access.branch_ids_for_user(user) == {domain["a"]}
+    assert rbac.effective_data_scope(user) == "ASSIGNED_RECORDS"
+    user["selected_workspace"] = "branch_manager"
     assert rbac.effective_data_scope(user) == "PRIMARY_BRANCH"
     assert rbac.user_has_permission(user, "branch_operations.manage_team") is True
+    assert rbac.user_has_permission(user, "delivery_routes.execute") is False
+    user["selected_workspace"] = "field_agent"
     assert rbac.user_has_permission(user, "delivery_routes.execute") is True
     assert domain["db"].audit_logs.count_documents({"action": "smartliving_identity_role_linked", "target_id": str(domain["agent_a"])}) == 1
 
@@ -1053,6 +1057,21 @@ def test_read_only_connection_probe_persists_only_sanitized_structure(domain):
     assert "super-secret-key" not in repr(stored)
     assert domain["db"].delivery_orders.count_documents({}) == 0
     assert len(seen_requests) == 2
+
+
+def test_connection_status_reports_missing_deployment_configuration(domain):
+    app = Flask(__name__)
+    app.config.update(SMARTLIVING_API_BASE_URL="", SMARTLIVING_API_KEY="")
+
+    with app.app_context():
+        status = integration.integration_status(str(domain["admin"]))
+
+    assert status["configured"] is False
+    assert status["connection_status"] == "not_configured"
+    assert status["configuration_missing"] == [
+        "SMARTLIVING_API_BASE_URL",
+        "SMARTLIVING_API_KEY",
+    ]
 
 
 def test_discovery_and_dry_run_group_records_without_creating_deliveries(domain):

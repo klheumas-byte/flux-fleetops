@@ -510,6 +510,84 @@ class StockTransferTests(Phase1B2Base):
         self.assertEqual(notification.kwargs["action_label"], "Accept Transfer")
         self.assertEqual(notification.kwargs["module"], "my-operational-tasks")
 
+    def test_start_replaces_closed_linked_movement_without_reopening_it(self):
+        created = self.create_transfer()
+        self.approve_transfer(created["id"])
+        stock.schedule_stock_transfer(
+            created["id"],
+            {
+                "vehicle_id": str(self.vehicle_id),
+                "driver_id": str(self.driver_id),
+                "scheduled_at": "2026-07-20T09:00:00Z",
+            },
+            current_user_id=str(self.admin_id),
+            current_role="admin",
+        )
+        stock.acknowledge_stock_transfer(
+            created["id"], current_user_id=str(self.driver_id), current_role="driver",
+        )
+        stock.release_stock_transfer(
+            created["id"], {}, current_user_id=str(self.admin_id), current_role="admin",
+        )
+
+        transfer_id = ObjectId(created["id"])
+        old_movement_id = self.db.stock_transfers.find_one({"_id": transfer_id})["linked_vehicle_movement_id"]
+        # This mirrors a closed historical movement left linked to a transfer
+        # which is still at the Loaded/Released startable stage.
+        self.db.vehicle_movements.update_one(
+            {"_id": old_movement_id}, {"$set": {"status": "closed"}},
+        )
+
+        with patch.object(movement_source_service, "_assert_replacement_resources_available") as available:
+            started = stock.start_stock_transfer(
+                created["id"], {"opening_fuel_level": 6},
+                current_user_id=str(self.driver_id), current_role="driver",
+            )
+            repeated = stock.start_stock_transfer(
+                created["id"], {"opening_fuel_level": 6},
+                current_user_id=str(self.driver_id), current_role="driver",
+            )
+
+        replacement_id = ObjectId(started["linked_vehicle_movement_id"])
+        old_movement = self.db.vehicle_movements.find_one({"_id": old_movement_id})
+        replacement = self.db.vehicle_movements.find_one({"_id": replacement_id})
+        self.assertEqual(started["status"], "in_transit")
+        self.assertEqual(repeated["status"], "in_transit")
+        self.assertEqual(old_movement["status"], "closed")
+        self.assertEqual(replacement["status"], "in_progress")
+        self.assertEqual(replacement["replaces_movement_id"], old_movement_id)
+        self.assertEqual(self.db.vehicle_movements.count_documents({}), 2)
+        available.assert_called_once()
+
+    def test_start_with_closed_linked_movement_keeps_source_released_when_replacement_conflicts(self):
+        created = self.create_transfer()
+        self.approve_transfer(created["id"])
+        stock.schedule_stock_transfer(
+            created["id"],
+            {"vehicle_id": str(self.vehicle_id), "driver_id": str(self.driver_id), "scheduled_at": "2026-07-20T09:00:00Z"},
+            current_user_id=str(self.admin_id), current_role="admin",
+        )
+        stock.acknowledge_stock_transfer(created["id"], current_user_id=str(self.driver_id), current_role="driver")
+        stock.release_stock_transfer(created["id"], {}, current_user_id=str(self.admin_id), current_role="admin")
+        transfer_id = ObjectId(created["id"])
+        old_movement_id = self.db.stock_transfers.find_one({"_id": transfer_id})["linked_vehicle_movement_id"]
+        self.db.vehicle_movements.update_one({"_id": old_movement_id}, {"$set": {"status": "closed"}})
+
+        with patch.object(
+            movement_source_service,
+            "_assert_replacement_resources_available",
+            side_effect=ApiError("Vehicle has an active vehicle movement.", status_code=409),
+        ):
+            with self.assertRaisesRegex(ApiError, "active vehicle movement"):
+                stock.start_stock_transfer(
+                    created["id"], {"opening_fuel_level": 6},
+                    current_user_id=str(self.driver_id), current_role="driver",
+                )
+
+        self.assertEqual(self.db.stock_transfers.find_one({"_id": transfer_id})["status"], "released")
+        self.assertEqual(self.db.vehicle_movements.count_documents({}), 1)
+        self.assertEqual(self.db.vehicle_movements.find_one({"_id": old_movement_id})["status"], "closed")
+
     def test_supplier_pickup_phase_one_shared_engine(self):
         created = self.create_supplier_pickup()
         self.assertEqual(created["operation_type"], "supplier_pickup")
@@ -1617,6 +1695,20 @@ class StockTransferTests(Phase1B2Base):
 
 
 class AvailabilityExceptionTests(unittest.TestCase):
+    def test_vehicle_availability_can_exclude_its_own_active_dispatch(self):
+        db = mongomock.MongoClient().availability_dispatch_exclusion
+        vehicle_id, dispatch_id = ObjectId(), ObjectId()
+        db.vehicles.insert_one({"_id": vehicle_id, "status": "available"})
+        db.dispatch_jobs.insert_one({"_id": dispatch_id, "vehicle_id": vehicle_id, "status": "assigned"})
+        with patch.object(availability, "get_collection", side_effect=lambda name: db[name]):
+            blocked = availability.resolve_vehicle_availability(vehicle_id)
+            excluded = availability.resolve_vehicle_availability(
+                vehicle_id,
+                context={"exclude_dispatch_job_id": dispatch_id},
+            )
+        self.assertFalse(blocked["is_available"])
+        self.assertTrue(excluded["is_available"])
+
     def test_matching_compliance_visit_bypasses_only_matching_compliance_blocker(self):
         db = mongomock.MongoClient().availability_test
         vehicle_id, compliance_id = ObjectId(), ObjectId()

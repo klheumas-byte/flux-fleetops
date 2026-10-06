@@ -11,7 +11,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
-import { getStoredSessionUser } from '../../lib/auth-session';
+import { getActiveSessionRole, getStoredSessionUser } from '../../lib/auth-session';
 
 type ExpenseCategory =
   | 'fuel'
@@ -225,7 +225,7 @@ function statusClassName(status: ExpenseStatus) {
 
 export default function Expenses() {
   const sessionUser = getStoredSessionUser();
-  const currentRole = sessionUser?.role || null;
+  const currentRole = getActiveSessionRole(sessionUser);
   const isOwner = currentRole === 'owner';
   const canCreateExpense = currentRole === 'owner' || currentRole === 'admin' || currentRole === 'finance_officer';
 

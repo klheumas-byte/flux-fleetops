@@ -58,14 +58,16 @@ class PersonalVehicleUseIntegrationTests(unittest.TestCase):
         self.addCleanup(lambda: [item.stop() for item in reversed(self.patches)])
 
     def payload(self, **overrides):
+        planned_departure = datetime.now(timezone.utc) + timedelta(hours=1)
+        expected_return = planned_departure + timedelta(hours=3)
         return {
             "operation_type": "personal_use",
             "purpose": "Family appointment",
             "origin": "Head Office",
             "destination": "Community Clinic",
             "vehicle_id": str(self.vehicle_id),
-            "planned_departure_at": "2026-08-10T09:00:00Z",
-            "expected_return_at": "2026-08-10T12:00:00Z",
+            "planned_departure_at": planned_departure.isoformat(),
+            "expected_return_at": expected_return.isoformat(),
             "submit_for_approval": True,
             **overrides,
         }

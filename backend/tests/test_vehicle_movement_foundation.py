@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from bson import ObjectId
 from pymongo.errors import DuplicateKeyError
+from mongomock import MongoClient
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -154,6 +155,94 @@ class MovementSourceServiceTests(unittest.TestCase):
         self.assertEqual(result["movement"]["_id"], legacy["_id"])
         self.assertEqual(result["movement"]["source_key"], f"dispatch_job:{self.source_id}")
         collection.insert_one.assert_not_called()
+
+    def test_terminal_source_movement_is_replaced_without_reopening_history(self):
+        collection = MongoClient().db.vehicle_movements
+        collection.create_index("source_key", unique=True)
+        old_id = collection.insert_one({
+            **self.defaults,
+            "source_type": "dispatch_job",
+            "source_id": self.source_id,
+            "source_key": f"dispatch_job:{self.source_id}",
+            "dispatch_job_id": self.source_id,
+            "status": "closed",
+        }).inserted_id
+
+        with patch.object(source_service, "_assert_replacement_resources_available") as availability:
+            result = source_service.ensure_movement_for_source(
+                source_type="dispatch_job",
+                source_record_id=self.source_id,
+                source_reference="DJ-RECOVER",
+                movement_defaults={**self.defaults, "dispatch_job_id": self.source_id},
+                movement_collection=collection,
+                replace_terminal=True,
+                recovery_actor_id=self.actor_id,
+                recovery_reason="Dispatch remains active.",
+            )
+            repeated = source_service.ensure_movement_for_source(
+                source_type="dispatch_job",
+                source_record_id=self.source_id,
+                movement_defaults={**self.defaults, "dispatch_job_id": self.source_id},
+                movement_collection=collection,
+                replace_terminal=True,
+                recovery_actor_id=self.actor_id,
+            )
+        availability.assert_called_once()
+
+        old = collection.find_one({"_id": old_id})
+        self.assertEqual(old["status"], "closed")
+        self.assertEqual(old["canonical_source_key"], f"dispatch_job:{self.source_id}")
+        self.assertEqual(old["superseded_by_movement_id"], result["movement"]["_id"])
+        self.assertEqual(result["movement"]["replaces_movement_id"], old_id)
+        self.assertEqual(repeated["movement"]["_id"], result["movement"]["_id"])
+        self.assertEqual(collection.count_documents({}), 2)
+
+    def test_legacy_terminal_source_movement_is_backfilled_then_replaced(self):
+        collection = MongoClient().db.vehicle_movements
+        collection.create_index("source_key", unique=True, sparse=True)
+        old_id = collection.insert_one({
+            **self.defaults,
+            "dispatch_job_id": self.source_id,
+            "status": "closed",
+        }).inserted_id
+
+        with patch.object(source_service, "_assert_replacement_resources_available"):
+            result = source_service.ensure_movement_for_source(
+                source_type="dispatch_job",
+                source_record_id=self.source_id,
+                movement_defaults={**self.defaults, "dispatch_job_id": self.source_id},
+                legacy_query={"dispatch_job_id": self.source_id},
+                movement_collection=collection,
+                replace_terminal=True,
+                recovery_actor_id=self.actor_id,
+            )
+
+        old = collection.find_one({"_id": old_id})
+        self.assertEqual(old["status"], "closed")
+        self.assertEqual(old["canonical_source_key"], f"dispatch_job:{self.source_id}")
+        self.assertEqual(result["movement"]["replaces_movement_id"], old_id)
+        self.assertEqual(result["movement"]["source_key"], f"dispatch_job:{self.source_id}")
+
+    def test_terminal_source_is_not_replaced_without_explicit_recovery(self):
+        collection = MongoClient().db.vehicle_movements
+        old = {
+            "_id": ObjectId(),
+            **self.defaults,
+            "source_type": "dispatch_job",
+            "source_id": self.source_id,
+            "source_key": f"dispatch_job:{self.source_id}",
+            "status": "closed",
+        }
+        collection.insert_one(old)
+        result = source_service.ensure_movement_for_source(
+            source_type="dispatch_job",
+            source_record_id=self.source_id,
+            movement_defaults=self.defaults,
+            movement_collection=collection,
+        )
+        self.assertFalse(result["created"])
+        self.assertEqual(result["movement"]["_id"], old["_id"])
+        self.assertEqual(collection.count_documents({}), 1)
 
 
 class DispatchMovementIntegrationTests(unittest.TestCase):
@@ -315,6 +404,62 @@ class MovementPermissionAndLifecycleTests(unittest.TestCase):
             )
         self.assertEqual(result["notes"], "Safe update")
         collection.update_one.assert_called_once()
+
+    def test_force_close_requires_physical_confirmation_and_releases_reservation(self):
+        db = MongoClient().db
+        reservation_id = db.resource_reservations.insert_one({
+            "status": "consumed",
+            "reservation_type": "vehicle",
+            "resource_id": self.movement["vehicle_id"],
+        }).inserted_id
+        document = {**self.movement, "reservation_id": reservation_id}
+        db.vehicle_movements.insert_one(document)
+        with (
+            patch.object(movement_service, "_get_vehicle_movement_document", return_value=dict(document)),
+            patch.object(movement_service, "vehicle_movements_collection", return_value=db.vehicle_movements),
+            patch.object(movement_service, "get_collection", side_effect=lambda name: db[name]),
+            patch.object(movement_service, "_batch_enrich_vehicle_movements", side_effect=lambda rows: rows),
+        ):
+            with self.assertRaises(ApiError) as raised:
+                movement_service.force_close_vehicle_movement(
+                    str(document["_id"]),
+                    {"reason": "Stale movement"},
+                    current_user_id=str(ObjectId()),
+                    current_role="admin",
+                )
+            self.assertIn("physical state", raised.exception.message)
+
+            result = movement_service.force_close_vehicle_movement(
+                str(document["_id"]),
+                {"reason": "Vehicle verified at depot", "physical_vehicle_confirmed": True},
+                current_user_id=str(ObjectId()),
+                current_role="admin",
+            )
+
+        self.assertEqual(result["status"], "force_closed")
+        self.assertEqual(db.resource_reservations.find_one({"_id": reservation_id})["status"], "released")
+        self.assertEqual(db.vehicle_movements.find_one({"_id": document["_id"]})["force_close_reason"], "Vehicle verified at depot")
+
+    def test_force_close_maintenance_transport_cannot_clear_active_safety_work(self):
+        db = MongoClient().db
+        document = {**self.movement, "movement_type": "maintenance", "status": "in_progress"}
+        db.vehicle_movements.insert_one(document)
+        db.vehicles.insert_one({"_id": document["vehicle_id"], "status": "maintenance"})
+        db.maintenance_jobs.insert_one({"vehicle_id": document["vehicle_id"], "status": "in_progress"})
+        with (
+            patch.object(movement_service, "_get_vehicle_movement_document", return_value=dict(document)),
+            patch.object(movement_service, "vehicle_movements_collection", return_value=db.vehicle_movements),
+            patch.object(movement_service, "vehicles_collection", return_value=db.vehicles),
+            patch.object(movement_service, "get_collection", side_effect=lambda name: db[name]),
+            patch.object(movement_service, "_batch_enrich_vehicle_movements", side_effect=lambda rows: rows),
+            patch.object(movement_service, "_notify_movement_participants"),
+        ):
+            movement_service.force_close_vehicle_movement(
+                str(document["_id"]),
+                {"reason": "Transport record stale", "physical_vehicle_confirmed": True},
+                current_user_id=str(ObjectId()), current_role="owner",
+            )
+        self.assertEqual(db.vehicles.find_one({"_id": document["vehicle_id"]})["status"], "maintenance")
 
 
 if __name__ == "__main__":

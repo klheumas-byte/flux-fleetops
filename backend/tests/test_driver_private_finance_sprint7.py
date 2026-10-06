@@ -116,19 +116,24 @@ class DriverPrivateFinanceRoutePrivacyTests(unittest.TestCase):
         cls.app = create_app("development")
         cls.app.config.update(TESTING=True, JWT_SECRET_KEY="private-finance-test-secret")
         cls.client = cls.app.test_client()
+        cls.db = mongomock.MongoClient().private_finance_routes
 
-    def token(self, role):
+    def token(self, role, user_id):
         with self.app.app_context():
-            return create_access_token(identity=str(ObjectId()), additional_claims={"role": role, "operating_mode": "hybrid"})
+            return create_access_token(identity=str(user_id), additional_claims={"role": role, "operating_mode": "hybrid"})
 
     def test_privileged_business_roles_have_no_bypass(self):
         for role in ("admin", "owner", "fleet_owner"):
-            with self.subTest(role=role):
-                response = self.client.get(
-                    "/api/driver/private-finance",
-                    headers={"Authorization": f"Bearer {self.token(role)}"},
-                )
-                self.assertEqual(response.status_code, 403)
+            for path in ("/api/driver/private-finance", "/api/driver/earnings"):
+                with self.subTest(role=role, path=path):
+                    user_id = ObjectId()
+                    self.db.users.insert_one({"_id": user_id, "role": role, "status": "active"})
+                    with patch("utils.decorators.get_collection", side_effect=lambda name: self.db[name]):
+                        response = self.client.get(
+                            path,
+                            headers={"Authorization": f"Bearer {self.token(role, user_id)}"},
+                        )
+                    self.assertEqual(response.status_code, 403)
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
 from utils.responses import error_response
 from extensions import get_collection
 from bson import ObjectId
-from services.rbac_service import user_can_manage_smartliving, user_has_permission, user_role_codes, write_audit
+from services.rbac_service import primary_workspace, role_definition, user_can_manage_smartliving, user_has_permission, user_role_codes, write_audit
 
 
 PASSWORD_CHANGE_EXEMPT_PATHS = {
@@ -23,10 +23,7 @@ def _current_account_denial():
     current_user_id = get_jwt_identity()
     if not ObjectId.is_valid(str(current_user_id)):
         return error_response("Invalid user identity.", status_code=401)
-    user = get_collection("users").find_one(
-        {"_id": ObjectId(str(current_user_id))},
-        {"status": 1, "must_change_password": 1},
-    )
+    user = get_collection("users").find_one({"_id": ObjectId(str(current_user_id))})
     if not user:
         return error_response("User account no longer exists.", status_code=401)
     if str(user.get("status") or "").strip().lower() != "active":
@@ -35,6 +32,19 @@ def _current_account_denial():
         return error_response(
             "You must change your temporary password before continuing.",
             status_code=428,
+        )
+    token_role = _normalize_role(get_jwt().get("role"))
+    assigned_roles = user_role_codes(user)
+    active_role = primary_workspace(user)
+    if not token_role or token_role not in assigned_roles or role_definition(token_role).get("status") != "active":
+        return error_response(
+            "Your active role has changed or is no longer authorized. Refresh your session.",
+            status_code=401,
+        )
+    if token_role != active_role and request.path != "/api/auth/me":
+        return error_response(
+            "Your active role has changed or is no longer authorized. Refresh your session.",
+            status_code=401,
         )
     return None
 
@@ -82,13 +92,16 @@ def role_required(*allowed_roles: str):
 
             @jwt_required()
             def protected():
+                denial = _current_account_denial()
+                if denial is not None:
+                    return denial
                 current_role = _normalize_role(get_jwt().get("role"))
                 current_user_id = get_jwt_identity()
                 permission = permission_for_request(request.path, request.method)
                 current_user = None
                 if current_app.config.get("MONGO_URI") and ObjectId.is_valid(str(current_user_id)):
                     current_user = get_collection("users").find_one({"_id": ObjectId(str(current_user_id))})
-                role_allowed = current_role in normalized_allowed_roles or bool(set(user_role_codes(current_user)) & set(normalized_allowed_roles))
+                role_allowed = current_role in normalized_allowed_roles
                 if not role_allowed and not (permission and user_has_permission(current_user, permission)):
                     current_app.logger.warning(
                         "[Flux Auth] authorized endpoint=%s method=%s user_id=%s role=%s decision=reject reason=role_not_allowed allowed_roles=%s",
@@ -106,9 +119,6 @@ def role_required(*allowed_roles: str):
                         "You do not have permission to access this resource.",
                         status_code=403,
                     )
-                denial = _current_account_denial()
-                if denial is not None:
-                    return denial
                 current_app.logger.info(
                     "[Flux Auth] authorized endpoint=%s method=%s user_id=%s role=%s decision=allow allowed_roles=%s",
                     request.path,

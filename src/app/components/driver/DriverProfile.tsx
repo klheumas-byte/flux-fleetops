@@ -67,7 +67,7 @@ export default function DriverProfile({ currentUser }: DriverProfileProps) {
 
             <div className="flex flex-wrap items-center justify-center gap-3">
               <div className="rounded-full bg-white/10 px-3 py-1.5 text-xs font-medium text-white backdrop-blur-sm capitalize">
-                {currentUser?.role || 'driver'}
+                {currentUser?.selected_workspace || currentUser?.role || 'driver'}
               </div>
               <div className="rounded-full bg-green-500/20 px-3 py-1.5 text-xs font-medium capitalize text-green-300 backdrop-blur-sm">
                 {currentUser?.status || 'unknown'}
@@ -93,7 +93,7 @@ export default function DriverProfile({ currentUser }: DriverProfileProps) {
           <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
             <h3 className="mb-1 text-sm font-semibold text-gray-900">Driver Account</h3>
             <p className="mb-4 text-xs text-gray-500">Verified from the authenticated backend session</p>
-            <InfoRow label="Role" value={currentUser?.role || 'driver'} icon={Shield} />
+            <InfoRow label="Role" value={currentUser?.selected_workspace || currentUser?.role || 'driver'} icon={Shield} />
             <InfoRow
               label="Account Status"
               value={currentUser?.status || 'unknown'}

@@ -986,6 +986,9 @@ def _ensure_run_vehicle_movement(run: dict, actor_id: str, *, session=None) -> d
         legacy_query={"delivery_run_id": run["_id"]},
         movement_collection=movement_collection,
         session=session,
+        replace_terminal=True,
+        recovery_actor_id=actor_id,
+        recovery_reason="Delivery run is active and requires a route movement.",
         movement_defaults={
             "vehicle_id": run["vehicle_id"], "driver_id": run["driver_id"],
             "movement_custodian_id": run["driver_id"], "branch_id": run["branch_id"],
@@ -1330,9 +1333,12 @@ def start_scheduler_run(run_id: str, payload: dict, actor_id: str) -> dict:
     accepted = issue and issue.get("custody_status") == "ACCEPTED"
     if not accepted and not (reason and (user_has_permission(actor, "delivery_execution.override") or user_has_permission(actor, "delivery_execution.override_custody"))):
         raise ApiError("Accept issued-item custody before starting this run.", status_code=409)
+    movement = _ensure_run_vehicle_movement(run, actor_id)
     _run_transition(run, "IN_PROGRESS", actor_id, "delivery_run_started", {"route_status": "IN_PROGRESS", "started_at": now_utc(), "custody_override_reason": reason or None}, reason=reason or None, enrich=False)
-    if run.get("linked_vehicle_movement_id"):
-        get_collection("vehicle_movements").update_one({"_id": run["linked_vehicle_movement_id"], "status": {"$in": ["approved", "checked_out", "in_progress"]}}, {"$set": {"status": "in_progress", "actual_departure_at": now_utc(), "departure_time": now_utc(), "updated_at": now_utc()}})
+    if movement:
+        transition_result = get_collection("vehicle_movements").update_one({"_id": movement["_id"], "status": {"$in": ["approved", "checked_out", "in_progress"]}}, {"$set": {"status": "in_progress", "actual_departure_at": now_utc(), "departure_time": now_utc(), "updated_at": now_utc()}})
+        if transition_result.matched_count != 1:
+            raise ApiError("The route movement changed before start. Refresh and try again.", status_code=409)
     _notify_run(run, "Delivery route started", f"{run.get('run_number')} has started its route.", "started")
     return _enrich_run(run)
 

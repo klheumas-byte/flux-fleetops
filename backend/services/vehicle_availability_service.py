@@ -1,5 +1,6 @@
 """Single compatibility-aware vehicle availability decision layer."""
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 
 from bson import ObjectId
@@ -18,8 +19,14 @@ DRIVER_MANUAL_UNAVAILABLE_REASONS = {"driver_unavailable", "break", "off_duty", 
 MANUAL_AVAILABILITY_NOTE_LIMIT = 200
 
 
-def _reason(kind, code, message, entity_id=None):
-    return {"type": kind, "code": code, "message": message, "entity_id": str(entity_id) if entity_id else None}
+def _reason(kind, code, message, entity_id=None, **details):
+    return {
+        "type": kind,
+        "code": code,
+        "message": message,
+        "entity_id": str(entity_id) if entity_id else None,
+        **{key: value for key, value in details.items() if value is not None},
+    }
 
 
 def _restriction_view(document):
@@ -219,6 +226,149 @@ def resolve_driver_availability(driver_id: str | ObjectId, context: dict | None 
     }
 
 
+def resolve_many_drivers(
+    driver_ids,
+    context: dict | None = None,
+    *,
+    driver_documents: list[dict] | None = None,
+) -> dict[str, dict]:
+    """Resolve drivers with one bounded query per blocker source."""
+    context = context or {}
+    object_ids = [item if isinstance(item, ObjectId) else ObjectId(str(item)) for item in driver_ids]
+    if not object_ids:
+        return {}
+    if driver_documents is None:
+        driver_documents = list(get_collection("users").find(
+            {"_id": {"$in": object_ids}, "role": "driver"},
+            {
+                "status": 1,
+                "driver_profile.approval_status": 1,
+                "driver_profile.manual_availability_status": 1,
+                "driver_profile.manual_availability_reason": 1,
+                "driver_profile.manual_availability_note": 1,
+                "driver_profile.manual_availability_updated_by": 1,
+                "driver_profile.manual_availability_updated_at": 1,
+            },
+        ))
+    driver_map = {item["_id"]: item for item in driver_documents}
+
+    collections = {
+        name: get_collection(name)
+        for name in ("resource_reservations", "vehicle_movements", "dispatch_jobs")
+    }
+    context_projection = {
+        "created_at": 1, "updated_at": 1, "assigned_at": 1,
+        "scheduled_at": 1, "scheduled_start_time": 1, "start_time": 1, "end_time": 1,
+        "requested_departure_time": 1, "expected_return_time": 1, "started_at": 1,
+        "departure_time": 1, "returned_at": 1, "actual_return_time": 1, "completed_at": 1,
+        "title": 1, "purpose": 1, "origin": 1, "destination": 1,
+        "pickup_location": 1, "dropoff_location": 1,
+    }
+
+    def grouped(collection, query, projection, id_field):
+        result = {}
+        for item in collection.find(query, projection):
+            result.setdefault(item.get(id_field), []).append(item)
+        return result
+
+    reservation_args = (
+        collections["resource_reservations"], _apply_window(
+            {"resource_id": {"$in": object_ids}, "reservation_type": "driver", "status": {"$in": ["reserved", "consumed"]}},
+            start_field="start_time", end_field="end_time", context=context,
+        ),
+        {"_id": 1, "resource_id": 1, "status": 1, "source_type": 1, "source_id": 1, "dispatch_job_id": 1, **context_projection},
+        "resource_id",
+    )
+    movement_args = (
+        collections["vehicle_movements"], _apply_window(
+            {"driver_id": {"$in": object_ids}, "status": {"$in": list(ACTIVE_MOVEMENTS)}, "movement_type": {"$ne": "assignment_handover"}},
+            start_field="requested_departure_time", end_field="expected_return_time", context=context,
+        ),
+        {"_id": 1, "driver_id": 1, "status": 1, "movement_id": 1, "source_type": 1, "source_id": 1, "source_reference": 1, "vehicle_id": 1, **context_projection},
+        "driver_id",
+    )
+    dispatch_args = (
+        collections["dispatch_jobs"], _apply_window(
+            {"driver_id": {"$in": object_ids}, "status": {"$in": list(ACTIVE_DISPATCH)}},
+            start_field="scheduled_start_time", end_field="expected_return_time", context=context,
+        ),
+        {"_id": 1, "driver_id": 1, "vehicle_id": 1, "status": 1, "dispatch_job_id": 1, "linked_vehicle_movement_id": 1, **context_projection},
+        "driver_id",
+    )
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        reservation_future = executor.submit(grouped, *reservation_args)
+        movement_future = executor.submit(grouped, *movement_args)
+        dispatch_future = executor.submit(grouped, *dispatch_args)
+        reservations = reservation_future.result()
+        movements = movement_future.result()
+        dispatches = dispatch_future.result()
+    output = {}
+    priority = {"lifecycle": 0, "dispatch": 1, "movement": 1, "reservation": 1, "manual": 2}
+    for object_id in object_ids:
+        driver = driver_map.get(object_id)
+        if not driver:
+            output[str(object_id)] = {
+                "driver_id": str(object_id), "is_available": False,
+                "operational_state": "unavailable", "primary_reason": "Driver not found",
+                "blocking_reasons": [],
+            }
+            continue
+        reasons = []
+        account_status = str(driver.get("status") or "").strip().lower()
+        profile = driver.get("driver_profile") or {}
+        approval_status = str(profile.get("approval_status") or "approved").strip().lower()
+        if account_status != "active":
+            reasons.append(_reason("lifecycle", "driver_inactive", "Driver is suspended" if account_status == "suspended" else "Driver is inactive", status=account_status))
+        elif approval_status != "approved":
+            reasons.append(_reason("lifecycle", "driver_not_approved", "Driver is not approved", status=approval_status))
+        for reservation in reservations.get(object_id, []):
+            reasons.append(_reason(
+                "reservation", "active_driver_reservation", "Driver has an active reservation", reservation["_id"],
+                status=reservation.get("status"), source_type=reservation.get("source_type"),
+                source_id=str(reservation.get("source_id") or reservation.get("dispatch_job_id") or "") or None,
+                end_time=reservation.get("end_time").isoformat() if hasattr(reservation.get("end_time"), "isoformat") else None,
+                created_at=reservation.get("created_at"), updated_at=reservation.get("updated_at"),
+                scheduled_at=reservation.get("start_time"),
+            ))
+        for movement in movements.get(object_id, []):
+            reasons.append(_reason(
+                "movement", "active_driver_movement", "Driver has an active vehicle movement", movement["_id"],
+                status=movement.get("status"), reference=movement.get("movement_id") or movement.get("source_reference"),
+                source_type=movement.get("source_type"), source_id=str(movement.get("source_id") or "") or None,
+                created_at=movement.get("created_at"), updated_at=movement.get("updated_at"),
+                requested_departure_time=movement.get("requested_departure_time"), expected_return_time=movement.get("expected_return_time"),
+                started_at=movement.get("started_at"), departure_time=movement.get("departure_time"), returned_at=movement.get("returned_at"), actual_return_time=movement.get("actual_return_time"),
+                task=movement.get("title") or movement.get("purpose"), origin=movement.get("origin") or movement.get("pickup_location"), destination=movement.get("destination") or movement.get("dropoff_location"), vehicle_id=str(movement.get("vehicle_id")) if movement.get("vehicle_id") else None,
+            ))
+        for dispatch in dispatches.get(object_id, []):
+            reasons.append(_reason(
+                "dispatch", "active_driver_dispatch", "Driver has an active dispatch", dispatch["_id"],
+                status=dispatch.get("status"), reference=dispatch.get("dispatch_job_id"), source_type="dispatch_job",
+                source_id=str(dispatch.get("_id")), movement_id=str(dispatch.get("linked_vehicle_movement_id") or "") or None,
+                created_at=dispatch.get("created_at"), updated_at=dispatch.get("updated_at"), assigned_at=dispatch.get("assigned_at"), scheduled_at=dispatch.get("scheduled_start_time"), expected_return_time=dispatch.get("expected_return_time"),
+                task=dispatch.get("title") or dispatch.get("purpose"), origin=dispatch.get("origin") or dispatch.get("pickup_location"), destination=dispatch.get("destination") or dispatch.get("dropoff_location"), vehicle_id=str(dispatch.get("vehicle_id")) if dispatch.get("vehicle_id") else None,
+            ))
+        manual_status = profile.get("manual_availability_status") or "available"
+        if manual_status == "temporarily_unavailable":
+            reason = str(profile.get("manual_availability_reason") or "temporarily unavailable").replace("_", " ")
+            note = str(profile.get("manual_availability_note") or "").strip()
+            reasons.append(_reason("manual", "temporarily_unavailable", f"Driver temporarily unavailable — {reason.title()}{f' ({note})' if note else ''}"))
+        reasons.sort(key=lambda item: priority.get(item["type"], 99))
+        primary = reasons[0]["message"] if reasons else None
+        state = ({"dispatch": "on_dispatch", "movement": "in_movement", "reservation": "reserved", "manual": "temporarily_unavailable"}.get(reasons[0]["type"], "unavailable") if reasons else "available")
+        output[str(object_id)] = {
+            "driver_id": str(object_id), "is_available": not reasons, "operational_state": state,
+            "primary_reason": primary, "blocking_reasons": reasons,
+            "manual_availability_status": manual_status,
+            "manual_availability_reason": profile.get("manual_availability_reason"),
+            "manual_availability_note": profile.get("manual_availability_note"),
+            "manual_availability_updated_at": profile.get("manual_availability_updated_at").isoformat() if hasattr(profile.get("manual_availability_updated_at"), "isoformat") else profile.get("manual_availability_updated_at"),
+            "manual_availability_updated_by": str(profile.get("manual_availability_updated_by")) if profile.get("manual_availability_updated_by") else None,
+            "evaluated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    return output
+
+
 def resolve_vehicle_availability(vehicle_id: str | ObjectId, context: dict | None = None) -> dict:
     context = context or {}
     vehicle_object_id = vehicle_id if isinstance(vehicle_id, ObjectId) else ObjectId(str(vehicle_id))
@@ -249,6 +399,11 @@ def resolve_vehicle_availability(vehicle_id: str | ObjectId, context: dict | Non
         {"vehicle_id": vehicle_object_id, "status": {"$in": list(ACTIVE_DISPATCH)}},
         start_field="scheduled_start_time", end_field="expected_return_time", context=context,
     )
+    if context.get("exclude_dispatch_job_id"):
+        excluded_dispatch = context["exclude_dispatch_job_id"]
+        if not isinstance(excluded_dispatch, ObjectId) and ObjectId.is_valid(str(excluded_dispatch)):
+            excluded_dispatch = ObjectId(str(excluded_dispatch))
+        dispatch_query["_id"] = {"$ne": excluded_dispatch}
     dispatch = get_collection("dispatch_jobs").find_one(dispatch_query, {"_id": 1})
     if dispatch:
         reasons.append(_reason("dispatch", "active_dispatch", "Vehicle has an active dispatch", dispatch["_id"]))
@@ -344,35 +499,53 @@ def resolve_vehicle_availability(vehicle_id: str | ObjectId, context: dict | Non
     return {"vehicle_id": str(vehicle_object_id), "is_available": not reasons, "lifecycle_status": "active" if lifecycle in {"available", "assigned", "active"} else lifecycle, "operational_state": state, "primary_reason": primary, "blocking_reasons": reasons, "active_restrictions": [_restriction_view(item) for item in active_overrides], "restriction_acknowledgement_required": bool(active_overrides), "manual_availability_status": vehicle.get("manual_availability_status") or "available", "manual_availability_reason": vehicle.get("manual_availability_reason"), "manual_availability_note": vehicle.get("manual_availability_note"), "manual_availability_updated_at": vehicle.get("manual_availability_updated_at").isoformat() if hasattr(vehicle.get("manual_availability_updated_at"), "isoformat") else vehicle.get("manual_availability_updated_at"), "manual_availability_updated_by": str(vehicle.get("manual_availability_updated_by")) if vehicle.get("manual_availability_updated_by") else None, "permanent_driver_id": str(assigned) if assigned else None, "current_custodian_id": str(vehicle.get("current_custodian_id")) if vehicle.get("current_custodian_id") else None, "evaluated_at": datetime.now(timezone.utc).isoformat()}
 
 
-def resolve_many(vehicle_ids, context: dict | None = None) -> dict[str, dict]:
+def resolve_many(
+    vehicle_ids,
+    context: dict | None = None,
+    *,
+    vehicle_documents: list[dict] | None = None,
+) -> dict[str, dict]:
     """Resolve a vehicle list with one bounded query per blocker source."""
     context = context or {}
     object_ids = [item if isinstance(item, ObjectId) else ObjectId(str(item)) for item in vehicle_ids]
     if not object_ids:
         return {}
     from services.maintenance_override_service import active_overrides_for_vehicles
-    overrides = active_overrides_for_vehicles(
-        object_ids,
-        collection=get_collection("maintenance_availability_overrides"),
+    if vehicle_documents is None:
+        vehicle_documents = list(get_collection("vehicles").find(
+            {"_id": {"$in": object_ids}}, {"status": 1, "assigned_driver_id": 1, "current_custodian_id": 1, "manual_availability_status": 1, "manual_availability_reason": 1}
+        ))
+    vehicle_map = {item["_id"]: item for item in vehicle_documents}
+    collection_names = (
+        "maintenance_availability_overrides", "dispatch_jobs", "resource_reservations",
+        "vehicle_movements", "maintenance_jobs", "faults", "incidents", "vehicle_compliance_records",
     )
-    vehicle_map = {item["_id"]: item for item in get_collection("vehicles").find(
-        {"_id": {"$in": object_ids}}, {"status": 1, "assigned_driver_id": 1, "current_custodian_id": 1, "manual_availability_status": 1, "manual_availability_reason": 1}
-    )}
+    collections = {name: get_collection(name) for name in collection_names}
+
     def grouped(collection, query, projection):
         result = {}
-        for item in get_collection(collection).find(query, projection):
+        for item in collection.find(query, projection):
             result.setdefault(item.get("vehicle_id") or item.get("resource_id"), []).append(item)
         return result
-    dispatches = grouped("dispatch_jobs", _apply_window(
+
+    context_projection = {
+        "created_at": 1, "updated_at": 1, "assigned_at": 1,
+        "scheduled_at": 1, "scheduled_start_time": 1, "start_time": 1, "end_time": 1,
+        "requested_departure_time": 1, "expected_return_time": 1, "expected_end_at": 1,
+        "started_at": 1, "departure_time": 1, "returned_at": 1, "actual_return_time": 1, "completed_at": 1,
+        "title": 1, "purpose": 1, "origin": 1, "destination": 1,
+        "pickup_location": 1, "dropoff_location": 1, "source_location": 1, "destination_location": 1,
+    }
+    jobs = {
+        "dispatches": (collections["dispatch_jobs"], _apply_window(
         {"vehicle_id": {"$in": object_ids}, "status": {"$in": list(ACTIVE_DISPATCH)}},
         start_field="scheduled_start_time", end_field="expected_return_time", context=context,
-    ), {"_id": 1, "vehicle_id": 1, "driver_id": 1})
-    reservations = grouped("resource_reservations", _apply_window(
+    ), {"_id": 1, "vehicle_id": 1, "driver_id": 1, "status": 1, "dispatch_job_id": 1, "linked_vehicle_movement_id": 1, **context_projection}),
+        "reservations": (collections["resource_reservations"], _apply_window(
         {"resource_id": {"$in": object_ids}, "reservation_type": "vehicle", "status": {"$in": ["reserved", "consumed"]}},
         start_field="start_time", end_field="end_time", context=context,
-    ), {"_id": 1, "resource_id": 1, "source_type": 1, "start_time": 1, "end_time": 1})
-    movements = grouped(
-        "vehicle_movements",
+    ), {"_id": 1, "resource_id": 1, "status": 1, "source_type": 1, "source_id": 1, "dispatch_job_id": 1, **context_projection}),
+        "movements": (collections["vehicle_movements"],
         _apply_window(
             {"vehicle_id": {"$in": object_ids}, "status": {"$in": list(ACTIVE_MOVEMENTS)}},
             start_field="requested_departure_time", end_field="expected_return_time", context=context,
@@ -385,12 +558,30 @@ def resolve_many(vehicle_ids, context: dict | None = None) -> dict[str, dict]:
             "movement_type": 1,
             "custody_state": 1,
             "current_custody_location": 1,
-        },
-    )
-    maintenance = grouped("maintenance_jobs", {"vehicle_id": {"$in": object_ids}, "status": {"$in": list(ACTIVE_MAINTENANCE)}}, {"_id": 1, "vehicle_id": 1, "maintenance_coordinator_id": 1})
-    faults = grouped("faults", {"vehicle_id": {"$in": object_ids}, "status": {"$nin": ["resolved", "rejected", "closed"]}, "$or": [{"severity": "critical"}, {"vehicle_unsafe": True}]}, {"_id": 1, "vehicle_id": 1})
-    incidents = grouped("incidents", {"vehicle_id": {"$in": object_ids}, "status": {"$nin": list(TERMINAL_INCIDENTS)}, "can_vehicle_move": False}, {"_id": 1, "vehicle_id": 1})
-    compliance = grouped("vehicle_compliance_records", {"vehicle_id": {"$in": object_ids}, "status": "expired"}, {"_id": 1, "vehicle_id": 1})
+            "status": 1,
+            "movement_id": 1,
+            "source_type": 1,
+            "source_id": 1,
+            "source_reference": 1,
+            **context_projection,
+        }),
+        "maintenance": (collections["maintenance_jobs"], {"vehicle_id": {"$in": object_ids}, "status": {"$in": list(ACTIVE_MAINTENANCE)}}, {"_id": 1, "vehicle_id": 1, "maintenance_id": 1, "status": 1, "maintenance_coordinator_id": 1, **context_projection}),
+        "faults": (collections["faults"], {"vehicle_id": {"$in": object_ids}, "status": {"$nin": ["resolved", "rejected", "closed"]}, "$or": [{"severity": "critical"}, {"vehicle_unsafe": True}]}, {"_id": 1, "vehicle_id": 1, "fault_id": 1, "status": 1, "severity": 1, "vehicle_unsafe": 1, "description": 1, "detected_at": 1, "reported_at": 1, **context_projection}),
+        "incidents": (collections["incidents"], {"vehicle_id": {"$in": object_ids}, "status": {"$nin": list(TERMINAL_INCIDENTS)}, "can_vehicle_move": False}, {"_id": 1, "vehicle_id": 1, "incident_id": 1, "status": 1, **context_projection}),
+        "compliance": (collections["vehicle_compliance_records"], {"vehicle_id": {"$in": object_ids}, "status": "expired"}, {"_id": 1, "vehicle_id": 1, "title": 1, "status": 1, **context_projection}),
+    }
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {name: executor.submit(grouped, *args) for name, args in jobs.items()}
+        override_future = executor.submit(active_overrides_for_vehicles, object_ids, collection=collections["maintenance_availability_overrides"])
+        results = {name: future.result() for name, future in futures.items()}
+        overrides = override_future.result()
+    dispatches = results["dispatches"]
+    reservations = results["reservations"]
+    movements = results["movements"]
+    maintenance = results["maintenance"]
+    faults = results["faults"]
+    incidents = results["incidents"]
+    compliance = results["compliance"]
     priority = {"lifecycle": 0, "fault": 1, "incident": 1, "compliance": 2, "maintenance": 3, "dispatch": 4, "movement": 4, "reservation": 4, "manual": 5}
     output = {}
     for object_id in object_ids:
@@ -415,9 +606,25 @@ def resolve_many(vehicle_ids, context: dict | None = None) -> dict[str, dict]:
                 movement_code = "external_custody"
                 movement_message = f"Vehicle is in custody at {active_movement['current_custody_location']}"
         uncovered_maintenance = [item for item in maintenance.get(object_id, []) if item.get("_id") not in overridden_maintenance_ids]
-        for item, kind, code, message in ((dispatches.get(object_id, []), "dispatch", "active_dispatch", "Vehicle has an active dispatch"), (reservations.get(object_id, []), "reservation", "active_reservation", "Vehicle has an active reservation"), (movement_items, "movement", movement_code, movement_message), (uncovered_maintenance, "maintenance", "active_maintenance_job", "Vehicle has an active maintenance job"), (faults.get(object_id, []), "fault", "critical_or_unsafe_fault", "Vehicle has a critical or unsafe fault"), (incidents.get(object_id, []), "incident", "vehicle_blocking_incident", "Vehicle has a blocking incident"), (compliance.get(object_id, []), "compliance", "expired_mandatory_compliance", "Vehicle has expired mandatory compliance")):
-            if item:
-                reasons.append(_reason(kind, code, message, item[0].get("_id")))
+        for items, kind, code, message in ((dispatches.get(object_id, []), "dispatch", "active_dispatch", "Vehicle has an active dispatch"), (reservations.get(object_id, []), "reservation", "active_reservation", "Vehicle has an active reservation"), (movement_items, "movement", movement_code, movement_message), (uncovered_maintenance, "maintenance", "active_maintenance_job", "Vehicle has an active maintenance job"), (faults.get(object_id, []), "fault", "critical_or_unsafe_fault", "Vehicle has a critical or unsafe fault"), (incidents.get(object_id, []), "incident", "vehicle_blocking_incident", "Vehicle has a blocking incident"), (compliance.get(object_id, []), "compliance", "expired_mandatory_compliance", "Vehicle has expired mandatory compliance")):
+            for item in items:
+                reference = item.get("dispatch_job_id") or item.get("movement_id") or item.get("source_reference") or item.get("maintenance_id") or item.get("fault_id") or item.get("incident_id") or item.get("title")
+                reasons.append(_reason(
+                    kind, code, message, item.get("_id"), status=item.get("status"), reference=reference,
+                    source_type=item.get("source_type") or ("dispatch_job" if kind == "dispatch" else None),
+                    source_id=str(item.get("source_id") or item.get("dispatch_job_id") or "") or None,
+                    movement_id=str(item.get("linked_vehicle_movement_id") or "") or None,
+                    end_time=item.get("end_time").isoformat() if hasattr(item.get("end_time"), "isoformat") else None,
+                    assigned_at=item.get("assigned_at"), scheduled_at=item.get("scheduled_at") or item.get("scheduled_start_time") or item.get("start_time"),
+                    requested_departure_time=item.get("requested_departure_time"), expected_return_time=item.get("expected_return_time") or item.get("end_time"),
+                    started_at=item.get("started_at"), departure_time=item.get("departure_time"), returned_at=item.get("returned_at"), actual_return_time=item.get("actual_return_time"), completed_at=item.get("completed_at"),
+                    created_at=item.get("detected_at") or item.get("reported_at") or item.get("created_at"), updated_at=item.get("updated_at"),
+                    task=item.get("title") or item.get("purpose") or item.get("description"),
+                    origin=item.get("origin") or item.get("pickup_location") or item.get("source_location"),
+                    destination=item.get("destination") or item.get("dropoff_location") or item.get("destination_location"),
+                    vehicle_id=str(item.get("vehicle_id") or item.get("resource_id")) if item.get("vehicle_id") or item.get("resource_id") else None,
+                    driver_id=str(item.get("driver_id") or item.get("maintenance_coordinator_id")) if item.get("driver_id") or item.get("maintenance_coordinator_id") else None,
+                ))
         manual_reason = _manual_reason(vehicle)
         if manual_reason:
             reasons.append(manual_reason)

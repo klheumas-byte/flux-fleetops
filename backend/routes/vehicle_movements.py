@@ -13,6 +13,7 @@ from services.vehicle_movement_service import (
     list_vehicle_movements,
     return_vehicle_movement,
     start_vehicle_movement,
+    force_close_vehicle_movement,
     update_vehicle_movement,
     respond_to_maintenance_movement,
     submit_maintenance_completion,
@@ -24,6 +25,7 @@ from services.movement_custody_service import (
     return_movement_custody,
     transfer_movement_custody,
 )
+from services.fuel_advance_service import return_fuel_advance_balance
 from utils.decorators import role_required
 from utils.responses import success_response
 
@@ -206,6 +208,42 @@ def cancel_vehicle_movement_route(movement_id: str):
     return success_response(
         data={"movement": movement},
         message="Vehicle movement cancelled successfully.",
+    )
+
+
+@vehicle_movements_bp.patch("/<movement_id>/force-close")
+@role_required("owner", "admin")
+def force_close_vehicle_movement_route(movement_id: str):
+    movement = force_close_vehicle_movement(
+        movement_id,
+        request.get_json(silent=True) or {},
+        current_user_id=get_jwt_identity(),
+        current_role=get_jwt().get("role"),
+    )
+    return success_response(
+        data={"movement": movement},
+        message="Vehicle movement force closed and resources released.",
+    )
+
+
+@vehicle_movements_bp.patch("/<movement_id>/fuel-advance/return")
+@role_required("owner", "admin")
+def return_fuel_advance_route(movement_id: str):
+    return_fuel_advance_balance(
+        movement_id,
+        request.get_json(silent=True) or {},
+        actor_id=get_jwt_identity(),
+        actor_role=get_jwt().get("role"),
+        idempotency_key=request.headers.get("Idempotency-Key"),
+    )
+    movement = get_vehicle_movement_by_id(
+        movement_id,
+        current_user_id=get_jwt_identity(),
+        current_role=get_jwt().get("role"),
+    )
+    return success_response(
+        data={"movement": movement},
+        message="Fuel advance return recorded successfully.",
     )
 
 

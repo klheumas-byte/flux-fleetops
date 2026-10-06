@@ -16,6 +16,7 @@ import {
   X,
 } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
+import { getActiveSessionRole, getStoredSessionUser } from '../../lib/auth-session';
 import { fetchSystemSettings, type SystemSettingsRecord } from '../../lib/system-settings-api';
 import { useDebouncedValue } from '../../lib/use-debounced-value';
 import { useDataSync } from '../../lib/data-sync';
@@ -536,8 +537,7 @@ export default function Vehicles({ onOpenVehicleDetails }: VehiclesProps) {
     notes: '',
   });
 
-  const storedUser = localStorage.getItem('flux_user');
-  const currentRole = storedUser ? JSON.parse(storedUser).role : null;
+  const currentRole = getActiveSessionRole(getStoredSessionUser());
   const debouncedSearchQuery = useDebouncedValue(searchQuery, 250);
 
   const loadVehicleSupplementalData = async () => {

@@ -12,7 +12,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
-import { getStoredSessionUser } from '../../lib/auth-session';
+import { getActiveSessionRole, getStoredSessionUser } from '../../lib/auth-session';
 import KpiGrid from '../shared/KpiGrid';
 
 type FaultStatus =
@@ -157,7 +157,7 @@ function severityClassName(severity: FaultSeverity) {
 }
 
 export default function FaultApprovals() {
-  const currentRole = getStoredSessionUser()?.role || null;
+  const currentRole = getActiveSessionRole(getStoredSessionUser());
   const isOwner = currentRole === 'owner';
   const [faults, setFaults] = useState<FaultRecord[]>([]);
   const [activeFilter, setActiveFilter] = useState<FilterKey>('reported');

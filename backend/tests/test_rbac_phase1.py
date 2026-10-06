@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import mongomock
+from bson import ObjectId
 from flask import Flask
 from flask_jwt_extended import JWTManager, decode_token
 
@@ -12,6 +13,8 @@ if str(BACKEND_DIR) not in sys.path:
 
 import services.rbac_service as rbac_service
 import routes.rbac as rbac_routes
+import routes.admins as admin_routes
+import routes.auth as auth_routes
 import utils.decorators as decorators
 from services.rbac_service import ROLE_DEFINITIONS, dashboard_for_role, effective_data_scope, permissions_for_user, user_has_permission, user_role_codes
 import services.auth_service as auth_service
@@ -54,12 +57,14 @@ def test_user_permission_grants_and_denials_override_role_defaults():
     assert not user_has_permission(user, "driver.assign")
 
 
-def test_multi_role_permissions_are_a_union_and_legacy_role_is_retained():
-    user = {"role": "driver", "role_ids": ["driver", "operations_manager"]}
+def test_multi_role_permissions_follow_active_workspace_and_legacy_role_is_retained():
+    user = {"role": "driver", "role_ids": ["driver", "operations_manager"], "selected_workspace": "driver"}
     assert user_role_codes(user) == ["driver", "operations_manager"]
     assert user_has_permission(user, "delivery.execute")
-    assert user_has_permission(user, "maintenance.manage")
+    assert not user_has_permission(user, "maintenance.manage")
     assert not user_has_permission(user, "profitability.view")
+    user["selected_workspace"] = "operations_manager"
+    assert user_has_permission(user, "maintenance.manage")
 
 
 def test_driver_profile_survives_assignment_of_management_role():
@@ -70,9 +75,12 @@ def test_driver_profile_survives_assignment_of_management_role():
     assert serialized["approval_status"] == "approved"
 
 
-def test_effective_scope_uses_broadest_active_role_scope():
+def test_effective_scope_uses_active_workspace_scope():
     assert effective_data_scope({"role": "driver"}) == "ASSIGNED_RECORDS"
-    assert effective_data_scope({"role": "driver", "role_ids": ["driver", "operations_manager"]}) == "ALLOWED_BRANCHES"
+    user = {"role": "driver", "role_ids": ["driver", "operations_manager"], "selected_workspace": "driver"}
+    assert effective_data_scope(user) == "ASSIGNED_RECORDS"
+    user["selected_workspace"] = "operations_manager"
+    assert effective_data_scope(user) == "ALLOWED_BRANCHES"
 
 
 def test_legacy_single_role_read_is_backward_compatible():
@@ -112,7 +120,7 @@ def test_delivery_accountability_permissions_separate_receiving_management_and_r
 def test_access_control_user_list_uses_live_multi_role_authority():
     db = mongomock.MongoClient().rbac_users
     db.users.insert_many([
-        {"full_name": "System", "role": "driver", "role_ids": ["driver", "system_administrator"], "status": "active"},
+        {"full_name": "System", "role": "driver", "role_ids": ["driver", "system_administrator"], "selected_workspace": "system_administrator", "status": "active"},
         {"full_name": "Finance", "role": "finance_officer", "status": "active"},
         {"full_name": "Driver", "role": "Driver", "status": "active"},
         {"full_name": "Archived Duplicate", "role": "branch_manager", "status": "inactive", "archived": True},
@@ -155,7 +163,7 @@ def test_role_normalization_accepts_legacy_fields_objects_and_codes():
     assert user_role_codes(user) == ["operations_manager", "finance_officer", "field_agent", "driver"]
 
 
-def test_user_response_has_canonical_active_role_objects_and_combined_permissions():
+def test_user_response_has_canonical_active_role_objects_and_active_permissions():
     user = serialize_user({
         "_id": "user-1",
         "full_name": "Multi Role User",
@@ -168,7 +176,6 @@ def test_user_response_has_canonical_active_role_objects_and_combined_permission
     assert user["selected_workspace"] == "operations_manager"
     assert {role["code"] for role in user["roles"]} == {"driver", "operations_manager"}
     assert all({"id", "code", "name", "active"}.issubset(role) for role in user["roles"])
-    assert "delivery.execute" in user["permissions"]
     assert "maintenance.manage" in user["permissions"]
 
 
@@ -189,6 +196,16 @@ def test_session_token_carries_active_workspace_and_all_role_codes():
     assert claims["role"] == "operations_manager"
     assert claims["selected_workspace"] == "operations_manager"
     assert claims["roles"] == ["driver", "operations_manager", "finance_officer"]
+
+
+def test_frontend_role_guards_use_shared_active_workspace_source():
+    source_root = BACKEND_DIR.parent / "src" / "app"
+    session_source = (source_root / "lib" / "auth-session.ts").read_text(encoding="utf-8")
+    accountability_source = (source_root / "components" / "admin" / "AdminAccountability.tsx").read_text(encoding="utf-8")
+    api_source = (source_root / "lib" / "api.ts").read_text(encoding="utf-8")
+    assert "export function getActiveSessionRole" in session_source
+    assert "getActiveSessionRole(getStoredSessionUser())" in accountability_source
+    assert "const requestKey = `${sessionKey}:" in api_source
 
 
 def test_workspace_switch_persists_selection_returns_canonical_user_and_rotates_token():
@@ -224,3 +241,72 @@ def test_workspace_switch_persists_selection_returns_canonical_user_and_rotates_
     with app.app_context():
         claims = decode_token(data["access_token"])
     assert claims["role"] == "operations_manager"
+
+
+def test_active_workspace_enforces_driver_admin_switches_and_rejects_stale_or_unassigned_tokens():
+    app = Flask(__name__)
+    app.config.update(JWT_SECRET_KEY="test-secret-long-enough-for-active-workspace", MONGO_URI="mongodb://test")
+    JWTManager(app)
+    app.register_blueprint(rbac_routes.rbac_bp, url_prefix="/api/rbac")
+    app.register_blueprint(admin_routes.admins_bp, url_prefix="/api/admins")
+    app.register_blueprint(auth_routes.auth_bp, url_prefix="/api/auth")
+
+    @app.get("/api/test/driver-only")
+    @decorators.role_required("driver")
+    def driver_only():
+        return {"ok": True}
+
+    db = mongomock.MongoClient().active_workspace
+    multi_role_id = db.users.insert_one({
+        "full_name": "Driver Admin", "role": "driver", "role_ids": ["driver", "admin"],
+        "selected_workspace": "driver", "status": "active", "must_change_password": False,
+    }).inserted_id
+    driver_only_id = db.users.insert_one({
+        "full_name": "Driver Only", "role": "driver", "role_ids": ["driver"],
+        "selected_workspace": "driver", "status": "active", "must_change_password": False,
+    }).inserted_id
+    with app.app_context():
+        from flask_jwt_extended import create_access_token
+        driver_token = create_access_token(identity=str(multi_role_id), additional_claims={"role": "driver"})
+        driver_only_token = create_access_token(identity=str(driver_only_id), additional_claims={"role": "driver"})
+        unassigned_admin_token = create_access_token(identity=str(driver_only_id), additional_claims={"role": "admin"})
+
+    collection = lambda name: db[name]
+    patches = (
+        patch.object(rbac_routes, "get_collection", side_effect=collection),
+        patch.object(decorators, "get_collection", side_effect=collection),
+        patch.object(rbac_service, "get_collection", side_effect=collection),
+        patch.object(rbac_routes, "write_audit"),
+        patch.object(admin_routes, "list_admin_accountability", return_value=[]),
+        patch.object(auth_routes, "get_user_by_id", side_effect=lambda user_id: serialize_user(db.users.find_one({"_id": ObjectId(user_id)}))),
+    )
+    for item in patches:
+        item.start()
+    try:
+        client = app.test_client()
+        auth = lambda token: {"Authorization": f"Bearer {token}"}
+
+        assert client.get("/api/test/driver-only", headers=auth(driver_token)).status_code == 200
+        assert client.get("/api/admins/accountability", headers=auth(driver_token)).status_code == 403
+        assert client.post("/api/rbac/workspace", json={"role": "admin"}, headers=auth(driver_only_token)).status_code == 403
+        assert client.get("/api/admins/accountability", headers=auth(unassigned_admin_token)).status_code == 401
+
+        switched = client.post("/api/rbac/workspace", json={"role": "admin"}, headers=auth(driver_token))
+        assert switched.status_code == 200
+        admin_token = switched.get_json()["data"]["access_token"]
+        assert client.get("/api/admins/accountability", headers=auth(admin_token)).status_code == 200
+        assert client.get("/api/test/driver-only", headers=auth(admin_token)).status_code == 403
+        assert client.get("/api/test/driver-only", headers=auth(driver_token)).status_code == 401
+        refreshed = client.get("/api/auth/me", headers=auth(driver_token))
+        assert refreshed.status_code == 200
+        with app.app_context():
+            assert decode_token(refreshed.get_json()["data"]["access_token"])["role"] == "admin"
+
+        switched_back = client.post("/api/rbac/workspace", json={"role": "driver"}, headers=auth(admin_token))
+        assert switched_back.status_code == 200
+        restored_driver_token = switched_back.get_json()["data"]["access_token"]
+        assert client.get("/api/test/driver-only", headers=auth(restored_driver_token)).status_code == 200
+        assert client.get("/api/admins/accountability", headers=auth(restored_driver_token)).status_code == 403
+    finally:
+        for item in reversed(patches):
+            item.stop()

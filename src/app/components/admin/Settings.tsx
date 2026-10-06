@@ -19,7 +19,7 @@ import {
 } from 'lucide-react';
 
 import { ApiRequestError } from '../../lib/api';
-import { getStoredSessionUser } from '../../lib/auth-session';
+import { getActiveSessionRole, getStoredSessionUser } from '../../lib/auth-session';
 import {
   createMasterDataItem,
   fetchMasterData,
@@ -152,7 +152,7 @@ function formatTypeLabel(value: string) {
 
 export default function Settings() {
   const sessionUser = getStoredSessionUser();
-  const currentRole = sessionUser?.role || 'admin';
+  const currentRole = getActiveSessionRole(sessionUser);
   const canEditMasterData = currentRole === 'owner' || currentRole === 'admin';
   const isOwner = currentRole === 'owner';
 

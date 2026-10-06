@@ -118,6 +118,8 @@ def _serialize(document):
         "is_overdue": bool(document.get("is_overdue")),
         "requires_operational_review": bool(document.get("requires_operational_review")),
         "active_operation_id": str(document.get("active_operation_id")) if document.get("active_operation_id") else None,
+        "approved_movement_id": str(document.get("approved_movement_id")) if document.get("approved_movement_id") else None,
+        "expected_return_at": iso(document.get("expected_return_at")),
         "acknowledgements": [
             {"driver_id": str(item["driver_id"]), "acknowledged_at": iso(item["acknowledged_at"])}
             for item in document.get("acknowledgements", [])
@@ -159,6 +161,18 @@ def create_override(payload, current_user_id, current_role):
     expires_at = _datetime(payload.get("expires_at"), "expires_at", required=False) or deadline
     if deadline <= start_at or expires_at <= start_at:
         raise ApiError("Repair deadline and expiry must be after the override start.", status_code=400)
+    approved_movement_id = _oid(payload.get("approved_movement_id"), "approved_movement_id") if payload.get("approved_movement_id") else None
+    expected_return_at = _datetime(payload.get("expected_return_at"), "expected_return_at", required=False)
+    if approved_movement_id:
+        movement = get_collection("vehicle_movements").find_one({"_id": approved_movement_id}, {"vehicle_id": 1, "status": 1})
+        if not movement or movement.get("vehicle_id") != vehicle_id:
+            raise ApiError("The approved movement must belong to this vehicle.", status_code=409)
+        if movement.get("status") not in {"draft", "pending_approval", "approved", "checked_out"}:
+            raise ApiError("Temporary release can only be approved for a movement that has not finished.", status_code=409)
+        if not expected_return_at:
+            raise ApiError("expected_return_at is required for a temporary maintenance release.", status_code=400)
+        if expected_return_at <= start_at or expected_return_at > expires_at:
+            raise ApiError("expected_return_at must be after release start and on or before expiry.", status_code=400)
     reminder_hours = payload.get("reminder_hours_before", 24)
     if isinstance(reminder_hours, bool) or not isinstance(reminder_hours, (int, float)) or reminder_hours < 0:
         raise ApiError("reminder_hours_before must be a non-negative number.", status_code=400)
@@ -171,6 +185,7 @@ def create_override(payload, current_user_id, current_role):
         "reminder_hours_before": float(reminder_hours), "maximum_mileage": _number(payload.get("maximum_mileage"), "maximum_mileage"),
         "maximum_hours": _number(payload.get("maximum_hours"), "maximum_hours"), "notes": _text(payload, "notes", 1000, required=False),
         "status": "active", "is_overdue": False, "acknowledgements": [], "version": 1,
+        "approved_movement_id": approved_movement_id, "expected_return_at": expected_return_at,
         "created_at": timestamp, "updated_at": timestamp,
     }
     try:
@@ -186,6 +201,22 @@ def create_override(payload, current_user_id, current_role):
                             reference_type="maintenance_override", reference_id=document["_id"], scheduled_for=reminder_at,
                             due_at=deadline, dedupe_key=f"maintenance-override:{document['_id']}:deadline-reminder:{recipient['_id']}")
     return _serialize(document)
+
+
+def close_overrides_for_movement(movement_id, actor_id=None, *, collection=None):
+    """Return a temporarily released vehicle to its still-open maintenance state."""
+    movement_id = _oid(movement_id, "movement_id")
+    timestamp = now_utc()
+    collection = overrides_collection() if collection is None else collection
+    for document in collection.find({"approved_movement_id": movement_id, "status": "active"}):
+        result = collection.update_one({"_id": document["_id"], "status": "active"}, {"$set": {
+            "status": "resolved", "resolved_at": timestamp,
+            "resolved_by": _oid(actor_id, "actor_id") if actor_id else None,
+            "resolution_source": "approved_movement_finished", "updated_at": timestamp,
+        }})
+        if result.modified_count:
+            document["status"] = "resolved"
+            _audit(document, "resolved", actor_id, {"source": "approved_movement_finished", "movement_id": str(movement_id)})
 
 
 def reconcile_expired_overrides(vehicle_id=None, *, collection=None):

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { AlertCircle, CheckCircle2, Circle, Loader2, PackageCheck, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import { ApiRequestError } from '../../lib/api';
-import { getStoredSessionUser } from '../../lib/auth-session';
+import { getActiveSessionRole, getStoredSessionUser } from '../../lib/auth-session';
 import { fetchOperationOptions, type OperationOptions } from '../../lib/operational-request-api';
 import {
   createStockTransfer,
@@ -29,6 +29,13 @@ const emptyForm = () => ({ sending_location: '', receiving_location: '', receivi
 const message = (error: unknown) => error instanceof ApiRequestError || error instanceof Error
   ? error.message
   : 'Unable to update stock transfer.';
+const actionMessage = (error: unknown, action: string) => {
+  const detail = message(error);
+  if (action === 'start' && /vehicle movement cannot transition from .* to in_progress/i.test(detail)) {
+    return 'This journey could not be started because its previous movement is closed. Refresh the task and try again; Operations can resolve any vehicle or driver conflict.';
+  }
+  return detail;
+};
 const RECIPIENT_LOCKED_STATUSES = new Set(['released', 'in_transit', 'awaiting_receipt', 'completed', 'cancelled']);
 const canEditRecipient = (record: StockTransfer) => !record.acknowledged_at && !RECIPIENT_LOCKED_STATUSES.has(record.status);
 type ReceiptDraft = Record<string, { received: string; good: string; damaged: string; wrong: string; notes: string }>;
@@ -53,7 +60,7 @@ function displayStage(record: StockTransfer) {
 
 export default function StockTransfers({ driverMode = false, onNavigate, taskId }: { driverMode?: boolean; onNavigate?: (page: string) => void; taskId?: string }) {
   const sessionUser = getStoredSessionUser();
-  const activeWorkspace = String(sessionUser?.selected_workspace || sessionUser?.role || '').toLowerCase();
+  const activeWorkspace = getActiveSessionRole(sessionUser) || '';
   const branchReceiverMode = ['branch_manager', 'branch_warehouse_coordinator'].includes(activeWorkspace);
   const [records, setRecords] = useState<StockTransfer[]>([]);
   const [options, setOptions] = useState<OperationOptions | null>(null);
@@ -109,7 +116,7 @@ export default function StockTransfers({ driverMode = false, onNavigate, taskId 
       window.dispatchEvent(new CustomEvent('flux-notifications-changed', { detail: { operationType: updated.operation_type, taskId: record.id } }));
       return updated;
     } catch (value) {
-      setError(message(value));
+      setError(actionMessage(value, action));
       return undefined;
     } finally {
       setBusy('');
@@ -420,7 +427,7 @@ function InvestigationPanel({ transfer, busy, onAction }: { transfer: StockTrans
       <CostImpactSummary cost={investigation.cost_impact} />
       <section className="rounded-lg border bg-white p-3"><h4 className="font-medium">Evidence</h4>{investigation.evidence.length ? <ul className="mt-2 space-y-1 text-sm">{investigation.evidence.map((item, index) => <li key={item.evidence_id || index}><a className="text-blue-700 underline" href={item.data_url} target="_blank" rel="noreferrer">{item.name || item.file_name || `Evidence ${index + 1}`}</a> · {titleCase(item.file_kind || 'document')}</li>)}</ul> : <p className="mt-1 text-sm text-slate-500">No evidence attached.</p>}<h4 className="mt-3 font-medium">Notes</h4>{investigation.notes.length ? <ul className="mt-2 space-y-2 text-sm">{investigation.notes.map((item) => <li key={item.note_id} className="rounded bg-slate-50 p-2">{item.text}<span className="ml-2 text-xs text-slate-400">{new Date(item.created_at).toLocaleString()}</span></li>)}</ul> : <p className="mt-1 text-sm text-slate-500">No notes recorded.</p>}</section>
       <section className="rounded-lg border bg-white p-3"><h4 className="font-medium">Linked Actions</h4>{investigation.linked_actions.length ? <div className="mt-2 space-y-2">{investigation.linked_actions.map((action) => <div key={action.id} className="flex flex-wrap items-center justify-between gap-2 rounded border p-2 text-sm"><span>{titleCase(action.action_type)} · {titleCase(action.status)}</span>{investigation.status === 'actions_in_progress' && action.status === 'pending' && <Button busy={busy} onClick={() => onAction(`investigation-action/${action.id}/complete`)}>Complete Action</Button>}</div>)}</div> : <p className="mt-1 text-sm text-slate-500">{investigation.decision === 'no_action' ? 'No linked action is required.' : 'Linked actions are generated after approval.'}</p>}</section>
-      <section className="rounded-lg border bg-white p-3"><h4 className="font-medium">Approvals</h4>{investigation.approval ? <div className="mt-1 text-sm"><p>Approved by {investigation.approval.approved_by} on {new Date(investigation.approval.approved_on || investigation.approval.approved_at).toLocaleString()}{investigation.suspected_theft_confirmed ? ' · Suspected Theft explicitly confirmed' : ''}</p>{investigation.approval.approval_comments && <p className="mt-1 text-slate-600">{investigation.approval.approval_comments}</p>}</div> : <p className="mt-1 text-sm text-slate-500">Awaiting management approval.</p>}{investigation.status === 'awaiting_approval' && sessionUser?.role === 'owner' && <div className="mt-3 space-y-3">{investigation.root_cause === 'suspected_theft' && <label className="flex gap-2 text-sm"><input type="checkbox" checked={confirmTheft} onChange={(event) => setConfirmTheft(event.target.checked)} />Explicitly confirm Suspected Theft</label>}<Textarea label="Approval comments" value={approvalComments} onChange={setApprovalComments} /><Button busy={busy} onClick={() => onAction('investigation/approved', { confirm_suspected_theft: confirmTheft, approval_comments: approvalComments || undefined })}>Approve Decision</Button></div>}</section>
+      <section className="rounded-lg border bg-white p-3"><h4 className="font-medium">Approvals</h4>{investigation.approval ? <div className="mt-1 text-sm"><p>Approved by {investigation.approval.approved_by} on {new Date(investigation.approval.approved_on || investigation.approval.approved_at).toLocaleString()}{investigation.suspected_theft_confirmed ? ' · Suspected Theft explicitly confirmed' : ''}</p>{investigation.approval.approval_comments && <p className="mt-1 text-slate-600">{investigation.approval.approval_comments}</p>}</div> : <p className="mt-1 text-sm text-slate-500">Awaiting management approval.</p>}{investigation.status === 'awaiting_approval' && getActiveSessionRole(sessionUser) === 'owner' && <div className="mt-3 space-y-3">{investigation.root_cause === 'suspected_theft' && <label className="flex gap-2 text-sm"><input type="checkbox" checked={confirmTheft} onChange={(event) => setConfirmTheft(event.target.checked)} />Explicitly confirm Suspected Theft</label>}<Textarea label="Approval comments" value={approvalComments} onChange={setApprovalComments} /><Button busy={busy} onClick={() => onAction('investigation/approved', { confirm_suspected_theft: confirmTheft, approval_comments: approvalComments || undefined })}>Approve Decision</Button></div>}</section>
       <section className="rounded-lg border bg-white p-3"><h4 className="font-medium">Close Case</h4><div className="mt-3 flex flex-wrap gap-2">{investigation.status === 'open' && <Button busy={busy} onClick={() => onAction('investigation/under_investigation')}>Begin Investigation</Button>}{investigation.status === 'under_investigation' && <Button busy={busy} onClick={() => onAction('investigation/awaiting_approval')}>Submit for Approval</Button>}{investigation.status === 'approved' && <Button busy={busy} onClick={() => onAction('investigation/actions_in_progress')}>Start Approved Actions</Button>}{investigation.status === 'actions_in_progress' && <button type="button" disabled={busy || !allActionsComplete} onClick={() => void onAction('investigation/closed')} className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-50">Close Case</button>}{investigation.status === 'closed' && <span className="rounded-full bg-emerald-100 px-3 py-1 text-sm font-medium text-emerald-800">Case Closed</span>}</div>{investigation.status === 'actions_in_progress' && !allActionsComplete && <p className="mt-2 text-sm text-amber-700">Complete all linked actions before closing the case.</p>}</section>
       {investigation.closure_summary && <ClosureSummary summary={investigation.closure_summary} />}
     </div>}

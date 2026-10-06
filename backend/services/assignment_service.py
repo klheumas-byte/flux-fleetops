@@ -944,6 +944,94 @@ def end_assignment(
     return enrich_assignment(assignment)
 
 
+def force_release_assignment(
+    assignment_id: str,
+    *,
+    current_user_id: str,
+    current_role: str,
+    reason: str,
+    physical_state_confirmed: bool,
+) -> dict:
+    """End a genuinely stale allocation after an Owner/Admin verifies custody."""
+    if current_role not in {"owner", "admin"}:
+        raise ApiError("Only an Owner or Admin can force release an assignment.", status_code=403)
+    if not physical_state_confirmed:
+        raise ApiError("Confirm the physical vehicle and driver state before release.", status_code=400)
+    normalized_reason = str(reason or "").strip()
+    if not normalized_reason:
+        raise ApiError("A force-release reason is required.", status_code=400)
+    if not ObjectId.is_valid(str(current_user_id)):
+        raise ApiError("Invalid recovery actor.", status_code=400)
+    actor_id = ObjectId(str(current_user_id))
+    assignment = get_assignment_document_by_id(assignment_id)
+    if assignment.get("status") == "ended" or assignment.get("allocation_active") is False:
+        return enrich_assignment(assignment)
+
+    expected_end_at = assignment.get("expected_end_at")
+    if isinstance(expected_end_at, datetime) and expected_end_at.tzinfo is None:
+        expected_end_at = expected_end_at.replace(tzinfo=timezone.utc)
+    linked_movement_id = assignment.get("linked_handover_movement_id")
+    linked = get_collection("vehicle_movements").find_one({"_id": linked_movement_id}, {"status": 1}) if isinstance(linked_movement_id, ObjectId) else None
+    overdue = isinstance(expected_end_at, datetime) and expected_end_at < now_utc()
+    broken_handover = assignment.get("status") in {"pending_handover", "pending_return"} and (
+        linked is None or linked.get("status") in {"closed", "cancelled", "force_closed", "superseded", "voided"}
+    )
+    if not overdue and not broken_handover:
+        raise ApiError("This assignment is not stale. Use the normal return or transfer workflow.", status_code=409)
+
+    vehicle_id = assignment.get("vehicle_id")
+    driver_id = assignment.get("driver_id")
+    active_dispatch = get_collection("dispatch_jobs").find_one(
+        {"$or": [{"vehicle_id": vehicle_id}, {"driver_id": driver_id}], "status": {"$in": ["reserved", "assigned", "accepted", "clarification_requested", "in_progress"]}},
+        {"_id": 1},
+    )
+    active_movement = get_collection("vehicle_movements").find_one(
+        {"$or": [{"vehicle_id": vehicle_id}, {"driver_id": driver_id}], "status": {"$in": ["draft", "pending_approval", "approved", "checked_out", "in_progress"]}, "movement_type": {"$ne": "assignment_handover"}},
+        {"_id": 1},
+    )
+    if active_dispatch or active_movement:
+        raise ApiError("Resolve or reassign the active dispatch/movement before releasing this assignment.", status_code=409)
+
+    if isinstance(linked_movement_id, ObjectId):
+        if linked and linked.get("status") in {"draft", "pending_approval", "approved", "checked_out", "in_progress"}:
+            from services.vehicle_movement_service import force_close_vehicle_movement
+            force_close_vehicle_movement(
+                str(linked_movement_id),
+                {"reason": normalized_reason, "physical_vehicle_confirmed": True},
+                current_user_id=current_user_id,
+                current_role=current_role,
+            )
+
+    released = _finalize_assignment_end(
+        assignment,
+        ended_by=actor_id,
+        end_reason=normalized_reason,
+    )
+    timestamp = now_utc()
+    event = {
+        "event": "force_released",
+        "actor_id": actor_id,
+        "timestamp": timestamp,
+        "reason": normalized_reason,
+        "physical_state_confirmed": True,
+        "affected_records": [str(item) for item in (assignment.get("_id"), vehicle_id, driver_id, linked_movement_id) if item],
+    }
+    assignments_collection().update_one(
+        {"_id": assignment["_id"]},
+        {"$set": {"force_released_at": timestamp, "force_released_by": actor_id, "force_release_reason": normalized_reason}, "$push": {"audit_log": event}},
+    )
+    released.update({"force_released_at": timestamp, "force_released_by": actor_id, "force_release_reason": normalized_reason})
+
+    # Releasing an allocation must never erase an independent maintenance block.
+    active_maintenance = get_collection("maintenance_jobs").find_one(
+        {"vehicle_id": vehicle_id, "status": {"$in": ["pending", "approved", "in_progress", "waiting_parts"]}},
+        {"_id": 1},
+    )
+    if active_maintenance:
+        vehicles_collection().update_one({"_id": vehicle_id}, {"$set": {"status": "maintenance", "updated_at": timestamp}})
+    return enrich_assignment(released)
+
+
 def transfer_assignment(
     assignment_id: str,
     payload: dict,

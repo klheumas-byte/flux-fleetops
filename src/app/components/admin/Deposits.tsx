@@ -13,7 +13,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { apiRequest, ApiRequestError } from '../../lib/api';
-import { getStoredSessionUser } from '../../lib/auth-session';
+import { getActiveSessionRole, getStoredSessionUser } from '../../lib/auth-session';
 
 type DepositMethod = 'cash_deposit' | 'momo_transfer' | 'bank_transfer';
 type DepositStatus = 'submitted' | 'verified' | 'rejected';
@@ -200,7 +200,7 @@ function getSettledData<T>(result: PromiseSettledResult<T>) {
 
 export default function Deposits() {
   const sessionUser = getStoredSessionUser();
-  const currentRole = sessionUser?.role || null;
+  const currentRole = getActiveSessionRole(sessionUser);
   const currentUserId = sessionUser?.id || '';
   const isOwner = currentRole === 'owner';
   const isAdmin = currentRole === 'admin';

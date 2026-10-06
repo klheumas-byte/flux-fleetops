@@ -165,7 +165,6 @@ export default function DriverSidebar({
         ...section,
         items: filterAccessibleModules('driver', section.items)
           .filter((item) => canDriverAccessModule(currentUser?.driver_profile?.operating_mode, item.id))
-          .filter((item) => item.id !== 'my-earnings' || currentUser?.driver_profile?.private_finance_enabled === true)
           .map((item) => {
           const countKey = SIDEBAR_COUNT_KEY_BY_MODULE[item.id];
           const result = countKey ? moduleCounts[countKey] : undefined;
@@ -178,7 +177,7 @@ export default function DriverSidebar({
             : item;
         }),
       })).filter((section) => section.items.length > 0),
-    [actionableCount, actionableBadgeTone, currentUser?.driver_profile?.operating_mode, currentUser?.driver_profile?.private_finance_enabled, moduleCounts],
+    [actionableCount, actionableBadgeTone, currentUser?.driver_profile?.operating_mode, moduleCounts],
   );
 
   const handleNavigate = (section: string) => {

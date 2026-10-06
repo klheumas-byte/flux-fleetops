@@ -542,9 +542,22 @@ def retry_exception(exception_id: str, actor_id: str) -> dict:
     return result
 
 
+def _connection_configuration() -> tuple[str, str, list[str]]:
+    base_url = str(current_app.config.get("SMARTLIVING_API_BASE_URL") or "").strip().rstrip("/")
+    api_key = str(current_app.config.get("SMARTLIVING_API_KEY") or "").strip()
+    parsed = urlparse(base_url)
+    missing = []
+    if not base_url or parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        missing.append("SMARTLIVING_API_BASE_URL")
+    if not api_key:
+        missing.append("SMARTLIVING_API_KEY")
+    return base_url, api_key, missing
+
+
 def integration_status(actor_id: str) -> dict:
     _actor(actor_id)
-    configured = bool(current_app.config.get("SMARTLIVING_API_BASE_URL") and current_app.config.get("SMARTLIVING_API_KEY"))
+    _base_url, _api_key, configuration_missing = _connection_configuration()
+    configured = not configuration_missing
     connection_collection = connections(); mapping_collection = mappings(); exception_collection = exceptions()
     with ThreadPoolExecutor(max_workers=5) as pool:
         latest_future = pool.submit(connection_collection.find_one, {"source_system": SOURCE_SYSTEM})
@@ -560,6 +573,7 @@ def integration_status(actor_id: str) -> dict:
     return {
         "source_system": SOURCE_SYSTEM,
         "configured": configured,
+        "configuration_missing": configuration_missing,
         "connection_status": latest.get("connection_status") if configured else "not_configured",
         "endpoints": latest.get("endpoints") or [],
         "last_checked": latest.get("last_checked"),
@@ -1706,11 +1720,10 @@ def latest_dry_run(actor_id: str) -> dict | None:
 
 def test_connection(actor_id: str) -> dict:
     _actor(actor_id)
-    base_url = str(current_app.config.get("SMARTLIVING_API_BASE_URL") or "").strip().rstrip("/")
-    api_key = str(current_app.config.get("SMARTLIVING_API_KEY") or "").strip()
+    base_url, api_key, configuration_missing = _connection_configuration()
     timestamp = now_utc()
     parsed = urlparse(base_url)
-    if not base_url or not api_key or parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    if configuration_missing or parsed.scheme not in {"http", "https"} or not parsed.netloc:
         endpoint_results = []
         connection_status = "failed"
     else:
@@ -1723,7 +1736,8 @@ def test_connection(actor_id: str) -> dict:
             for item in endpoint_results
         ) else "failed"
     document = {
-        "source_system": SOURCE_SYSTEM, "configured": bool(base_url and api_key),
+        "source_system": SOURCE_SYSTEM, "configured": not configuration_missing,
+        "configuration_missing": configuration_missing,
         "connection_status": connection_status, "endpoints": endpoint_results,
         "last_checked": timestamp, "last_checked_by": object_id(actor_id), "updated_at": timestamp,
     }

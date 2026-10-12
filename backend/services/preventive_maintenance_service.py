@@ -1919,6 +1919,44 @@ def _validate_compliance_record_payload(payload: dict, partial: bool = False, ex
     return vehicle_document, update_fields
 
 
+def _sync_vehicle_insurance_profile(document: dict) -> None:
+    """Keep the vehicle summary aligned with its canonical insurance record."""
+    if str(document.get("compliance_item_name") or "").strip().lower() != "insurance":
+        return
+
+    vehicle_id = document.get("vehicle_id")
+    vehicle_document = vehicles_collection().find_one(
+        {"_id": vehicle_id},
+        {"insurance_profile": 1},
+    )
+    if not vehicle_document:
+        return
+
+    insurance_profile = dict(vehicle_document.get("insurance_profile") or {})
+    field_mapping = {
+        "provider_or_authority_name": "insurance_company",
+        "policy_or_reference_number": "policy_number",
+        "issue_date": "start_date",
+        "expiry_date": "expiry_date",
+    }
+    for record_field, profile_field in field_mapping.items():
+        value = document.get(record_field)
+        if value not in (None, ""):
+            insurance_profile[profile_field] = value
+
+    timestamp = now_utc()
+    vehicles_collection().update_one(
+        {"_id": vehicle_id},
+        {
+            "$set": {
+                "insurance_profile": insurance_profile,
+                "insurance_expiry": document.get("expiry_date"),
+                "updated_at": timestamp,
+            }
+        },
+    )
+
+
 def create_compliance_record(payload: dict, current_user_id: str, current_role: str):
     if current_role not in {"owner", "admin", "fleet_owner"}:
         raise ApiError("You do not have permission to create compliance records.", status_code=403)
@@ -1940,6 +1978,7 @@ def create_compliance_record(payload: dict, current_user_id: str, current_role: 
     result = compliance_records_collection().insert_one(document)
     document["_id"] = result.inserted_id
     document = _sync_compliance_status(document)
+    _sync_vehicle_insurance_profile(document)
     _notify_compliance_status(document)
     return _serialize_compliance_record_with_relations(document)
 
@@ -2077,6 +2116,7 @@ def update_compliance_record(record_id: str, payload: dict, current_user_id: str
     compliance_records_collection().update_one({"_id": record_object_id}, {"$set": update_fields})
     document.update(update_fields)
     document = _sync_compliance_status(document)
+    _sync_vehicle_insurance_profile(document)
     _notify_compliance_status(document)
     return _serialize_compliance_record_with_relations(document)
 
@@ -2136,6 +2176,7 @@ def renew_compliance_record(record_id: str, payload: dict, current_user_id: str,
     history.append(history_entry)
     document["history"] = history
     document = _sync_compliance_status(document)
+    _sync_vehicle_insurance_profile(document)
     _notify_compliance_status(document)
     return _serialize_compliance_record_with_relations(document)
 

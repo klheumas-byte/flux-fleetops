@@ -82,10 +82,14 @@ def _validate_positive_amount(value, field_name: str):
 
 
 def _get_admin_document(admin_id: str | ObjectId):
+    from services.rbac_service import primary_workspace
+
     admin_object_id = _to_object_id(admin_id, "admin_id")
-    admin = users_collection().find_one({"_id": admin_object_id, "role": {"$in": ["owner", "admin"]}})
+    admin = users_collection().find_one({"_id": admin_object_id})
     if not admin:
         raise ApiError("Admin user not found.", status_code=404)
+    if primary_workspace(admin) not in {"owner", "admin"} or admin.get("status", "active") != "active":
+        raise ApiError("An active owner or admin workspace is required to handle deposits.", status_code=403)
     return admin
 
 

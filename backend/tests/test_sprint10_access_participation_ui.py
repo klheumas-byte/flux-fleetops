@@ -121,8 +121,52 @@ class Sprint10Tests(unittest.TestCase):
         with self._patch(preventive_maintenance_service), self._patch(fleet_owner_service), patch.object(preventive_maintenance_service, "_notify_compliance_status"):
             record = preventive_maintenance_service.create_compliance_record(payload, str(self.account_id), "fleet_owner")
             self.assertEqual(record["vehicle_id"], str(self.vehicle_id))
+            vehicle = self.db.vehicles.find_one({"_id": self.vehicle_id})
+            self.assertEqual(vehicle["insurance_expiry"], "2027-01-01")
+            self.assertEqual(vehicle["insurance_profile"]["start_date"], "2026-01-01")
+            self.assertEqual(vehicle["insurance_profile"]["expiry_date"], "2027-01-01")
             with self.assertRaises(ApiError):
                 preventive_maintenance_service.create_compliance_record({**payload, "vehicle_id": str(self.other_vehicle_id)}, str(self.account_id), "fleet_owner")
+
+    def test_insurance_renewal_updates_vehicle_insurance_summary(self):
+        record_id = self.db.vehicle_compliance_records.insert_one({
+            "vehicle_id": self.vehicle_id,
+            "compliance_item_name": "Insurance",
+            "provider_or_authority_name": "Old Insurer",
+            "policy_or_reference_number": "OLD-1",
+            "issue_date": "2025-01-01",
+            "expiry_date": "2026-01-01",
+            "renewal_frequency": "yearly",
+            "warning_days_before": 30,
+            "status": "expired",
+            "history": [],
+        }).inserted_id
+        self.db.vehicles.update_one(
+            {"_id": self.vehicle_id},
+            {"$set": {"insurance_expiry": "2026-01-01", "insurance_profile": {"insurance_type": "Third Party", "expiry_date": "2026-01-01"}}},
+        )
+
+        with self._patch(preventive_maintenance_service), patch.object(preventive_maintenance_service, "_notify_compliance_status"):
+            preventive_maintenance_service.renew_compliance_record(
+                str(record_id),
+                {
+                    "issue_date": "2026-09-08",
+                    "expiry_date": "2027-10-08",
+                    "renewal_frequency": "yearly",
+                    "provider_or_authority_name": "Absa",
+                    "policy_or_reference_number": "NEW-2",
+                },
+                str(self.admin_id),
+                "admin",
+            )
+
+        vehicle = self.db.vehicles.find_one({"_id": self.vehicle_id})
+        self.assertEqual(vehicle["insurance_expiry"], "2027-10-08")
+        self.assertEqual(vehicle["insurance_profile"]["insurance_company"], "Absa")
+        self.assertEqual(vehicle["insurance_profile"]["policy_number"], "NEW-2")
+        self.assertEqual(vehicle["insurance_profile"]["start_date"], "2026-09-08")
+        self.assertEqual(vehicle["insurance_profile"]["expiry_date"], "2027-10-08")
+        self.assertEqual(vehicle["insurance_profile"]["insurance_type"], "Third Party")
 
     def test_conversion_route_exists_with_correct_method(self):
         app = Flask(__name__)

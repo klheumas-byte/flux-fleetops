@@ -206,6 +206,48 @@ class WeeklyRemittanceTests(unittest.TestCase):
         ])
         self.assertEqual(self.db.wallet_entries.count_documents({"reference_id": pending["_id"]}), 1)
 
+    def test_multi_role_admin_can_confirm_driver_cash(self):
+        self.db.users.update_one({"_id": self.admin_id}, {"$set": {
+            "role": "driver", "role_ids": ["driver", "admin"], "selected_workspace": "admin",
+        }})
+        pending = self.payment(800, "2026-07-25", status="pending")
+        collection_service.update_collection_status(
+            str(pending["_id"]), "approved", str(self.admin_id), admin_received_amount=800,
+        )
+        stored = self.db.collections.find_one({"_id": pending["_id"]})
+        self.assertEqual(stored["status"], "approved")
+        self.assertEqual(stored["approved_by_admin_id"], self.admin_id)
+        self.assertEqual(stored["confirmation_actor"]["role"], "admin")
+        self.assertEqual(self.db.wallet_entries.count_documents({"reference_id": pending["_id"]}), 1)
+
+    def test_driver_workspace_cannot_confirm_cash(self):
+        from utils.api_error import ApiError
+        self.db.users.update_one({"_id": self.admin_id}, {"$set": {
+            "role": "admin", "role_ids": ["admin", "driver"], "selected_workspace": "driver",
+        }})
+        pending = self.payment(800, "2026-07-25", status="pending")
+        with self.assertRaises(ApiError) as error:
+            collection_service.update_collection_status(
+                str(pending["_id"]), "approved", str(self.admin_id), admin_received_amount=800,
+            )
+        self.assertEqual(error.exception.status_code, 403)
+        self.assertEqual(self.db.collections.find_one({"_id": pending["_id"]})["status"], "pending")
+        self.assertEqual(self.db.wallet_entries.count_documents({"reference_id": pending["_id"]}), 0)
+
+    def test_multi_role_admin_holding_balance_includes_received_cash(self):
+        from services import deposit_service
+        self.db.users.update_one({"_id": self.admin_id}, {"$set": {
+            "role": "driver", "role_ids": ["driver", "admin"], "selected_workspace": "admin",
+        }})
+        pending = self.payment(800, "2026-07-25", status="pending")
+        collection_service.update_collection_status(
+            str(pending["_id"]), "approved", str(self.admin_id), admin_received_amount=800,
+        )
+        with patch.object(deposit_service, "get_collection", side_effect=lambda name: self.db[name]):
+            holding = deposit_service.calculate_admin_holding_balance(self.admin_id)
+        self.assertEqual(holding["total_collected"], 800)
+        self.assertEqual(holding["holding_balance"], 800)
+
     def test_confirmation_uses_authenticated_actor_and_is_not_counted_twice(self):
         pending = self.payment(800, "2026-07-25", status="pending")
         self.db.collections.update_one({"_id": pending["_id"]}, {"$set": {

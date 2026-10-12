@@ -191,18 +191,24 @@ def _round_currency_amount(value: float) -> float:
 
 
 def _get_admin_document(admin_id):
+    from services.rbac_service import primary_workspace
+
     admin_object_id = _to_object_id(admin_id, "admin_id")
-    admin = users_collection().find_one({"_id": admin_object_id, "role": {"$in": ["owner", "admin"]}})
+    admin = users_collection().find_one({"_id": admin_object_id})
     if not admin:
         raise ApiError("Admin user not found.", status_code=404)
+    if primary_workspace(admin) not in {"owner", "admin"} or admin.get("status", "active") != "active":
+        raise ApiError("An active owner or admin workspace is required to handle collections.", status_code=403)
     return admin
 
 
 def _actor_snapshot(user: dict) -> dict:
+    from services.rbac_service import primary_workspace
+
     return {
         "id": str(user.get("_id")),
         "full_name": user.get("full_name"),
-        "role": user.get("role"),
+        "role": primary_workspace(user),
         "email": user.get("email"),
     }
 

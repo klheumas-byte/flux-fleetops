@@ -190,13 +190,17 @@ def _round_currency_amount(value: float) -> float:
     return round(float(value), 2)
 
 
-def _get_admin_document(admin_id):
+def _get_admin_document(admin_id, current_user_document: dict | None = None):
     from services.rbac_service import primary_workspace
 
     admin_object_id = _to_object_id(admin_id, "admin_id")
-    admin = users_collection().find_one({"_id": admin_object_id})
+    admin = current_user_document
+    if admin is not None and admin.get("_id") != admin_object_id:
+        raise ApiError("Authenticated user does not match the collection actor.", status_code=403)
+    if admin is None:
+        admin = users_collection().find_one({"_id": admin_object_id})
     if not admin:
-        raise ApiError("Admin user not found.", status_code=404)
+        raise ApiError("Authenticated user account no longer exists.", status_code=401)
     if primary_workspace(admin) not in {"owner", "admin"} or admin.get("status", "active") != "active":
         raise ApiError("An active owner or admin workspace is required to handle collections.", status_code=403)
     return admin
@@ -323,41 +327,37 @@ def _enrich_collection(
     vehicle_lookup: dict[ObjectId, dict] | None = None,
     assignment_lookup: dict[ObjectId, dict] | None = None,
 ) -> dict:
+    def related_document(collection, document_id, projection, lookup):
+        if not isinstance(document_id, ObjectId):
+            return None
+        if lookup is not None:
+            return lookup.get(document_id)
+        return collection.find_one({"_id": document_id}, projection)
+
     collection = serialize_collection(collection_document)
-    driver = (user_lookup or {}).get(collection_document.get("driver_id")) or users_collection().find_one(
-        {"_id": collection_document.get("driver_id")},
-        USER_SUMMARY_PROJECTION,
+    driver = related_document(
+        users_collection(), collection_document.get("driver_id"), USER_SUMMARY_PROJECTION, user_lookup,
     )
-    vehicle = (vehicle_lookup or {}).get(collection_document.get("vehicle_id")) or vehicles_collection().find_one(
-        {"_id": collection_document.get("vehicle_id")},
-        VEHICLE_SUMMARY_PROJECTION,
+    vehicle = related_document(
+        vehicles_collection(), collection_document.get("vehicle_id"), VEHICLE_SUMMARY_PROJECTION, vehicle_lookup,
     )
-    assignment = (assignment_lookup or {}).get(
-        collection_document.get("assignment_id")
-    ) or assignments_collection().find_one(
-        {"_id": collection_document.get("assignment_id")},
-        ASSIGNMENT_SUMMARY_PROJECTION,
+    assignment = related_document(
+        assignments_collection(), collection_document.get("assignment_id"), ASSIGNMENT_SUMMARY_PROJECTION, assignment_lookup,
     )
-    received_by = (user_lookup or {}).get(
-        collection_document.get("received_by_admin_id")
-    ) or users_collection().find_one(
-        {"_id": collection_document.get("received_by_admin_id")},
-        USER_SUMMARY_PROJECTION,
+    received_by = related_document(
+        users_collection(), collection_document.get("received_by_admin_id"), USER_SUMMARY_PROJECTION, user_lookup,
     )
-    approved_by = (user_lookup or {}).get(
-        collection_document.get("approved_by_admin_id")
-    ) or users_collection().find_one(
-        {"_id": collection_document.get("approved_by_admin_id")},
-        USER_SUMMARY_PROJECTION,
+    approved_by = related_document(
+        users_collection(), collection_document.get("approved_by_admin_id"), USER_SUMMARY_PROJECTION, user_lookup,
     )
-    submitted_by = (user_lookup or {}).get(collection_document.get("submitted_by_driver_id")) or users_collection().find_one(
-        {"_id": collection_document.get("submitted_by_driver_id")}, USER_SUMMARY_PROJECTION,
+    submitted_by = related_document(
+        users_collection(), collection_document.get("submitted_by_driver_id"), USER_SUMMARY_PROJECTION, user_lookup,
     )
-    rejected_by = (user_lookup or {}).get(collection_document.get("rejected_by_admin_id")) or users_collection().find_one(
-        {"_id": collection_document.get("rejected_by_admin_id")}, USER_SUMMARY_PROJECTION,
+    rejected_by = related_document(
+        users_collection(), collection_document.get("rejected_by_admin_id"), USER_SUMMARY_PROJECTION, user_lookup,
     )
-    reversed_by = (user_lookup or {}).get(collection_document.get("reversed_by_admin_id")) or users_collection().find_one(
-        {"_id": collection_document.get("reversed_by_admin_id")}, USER_SUMMARY_PROJECTION,
+    reversed_by = related_document(
+        users_collection(), collection_document.get("reversed_by_admin_id"), USER_SUMMARY_PROJECTION, user_lookup,
     )
 
     collection["driver"] = serialize_user(driver) if driver else None
@@ -717,7 +717,7 @@ def get_collection_by_id(collection_id: str) -> dict:
     collection_document = collections_collection().find_one({"_id": collection_object_id}, COLLECTION_LIST_PROJECTION)
     if not collection_document:
         raise ApiError("Collection not found.", status_code=404)
-    return _enrich_collection(collection_document)
+    return _batch_enrich_collections([collection_document])[0]
 
 
 def create_collection(payload: dict, current_user_id: str) -> dict:
@@ -902,6 +902,7 @@ def update_collection_status(
     rejection_reason: str | None = None,
     admin_received_amount: float | None = None,
     admin_approval_note: str | None = None,
+    current_user_document: dict | None = None,
 ) -> dict:
     if not ObjectId.is_valid(current_user_id):
         raise ApiError("Invalid user identity.", status_code=400)
@@ -933,7 +934,7 @@ def update_collection_status(
     update_fields = {"status": next_status, "updated_at": timestamp}
 
     if next_status == "approved":
-        approved_by_admin = _get_admin_document(current_user_id)
+        approved_by_admin = _get_admin_document(current_user_id, current_user_document)
         submitted_amount = _round_currency_amount(
             collection_document.get("submitted_amount")
             if collection_document.get("submitted_amount") is not None
@@ -961,7 +962,7 @@ def update_collection_status(
         reason = (rejection_reason or "").strip()
         if not reason:
             raise ApiError("rejection_reason is required when rejecting a payment.", status_code=400)
-        rejected_by_admin = _get_admin_document(current_user_id)
+        rejected_by_admin = _get_admin_document(current_user_id, current_user_document)
         update_fields["rejected_by_admin_id"] = rejected_by_admin["_id"]
         update_fields["rejection_reason"] = reason
         update_fields["rejected_at"] = timestamp
@@ -972,7 +973,7 @@ def update_collection_status(
         reason = (rejection_reason or "").strip()
         if not reason:
             raise ApiError("reversal_reason is required when reversing a confirmed payment.", status_code=400)
-        reversed_by_admin = _get_admin_document(current_user_id)
+        reversed_by_admin = _get_admin_document(current_user_id, current_user_document)
         update_fields["reversal_reason"] = reason
         update_fields["correction_reason"] = reason
         update_fields["reversed_by_admin_id"] = reversed_by_admin["_id"]
@@ -1021,7 +1022,7 @@ def update_collection_status(
     if next_status == "reversed":
         _ensure_reversal_wallet_entry(collection_document, current_user_id)
     _invalidate_payment_caches(collection_document.get("driver_id"))
-    return _enrich_collection(collection_document)
+    return _batch_enrich_collections([collection_document])[0]
 
 
 def list_pending_payment_submissions() -> list[dict]:

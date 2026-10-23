@@ -230,7 +230,7 @@ function getStatusLabel(status: CollectionStatus) {
   if (status === 'pending' || status === 'submitted' || status === 'received') {
     return 'Pending Confirmation';
   }
-  if (status === 'approved') return 'Confirmed';
+  if (status === 'approved') return 'Completed';
   return status.charAt(0).toUpperCase() + status.slice(1);
 }
 
@@ -265,8 +265,10 @@ export default function Collections() {
   const [rejectionReason, setRejectionReason] = useState('');
   const [actionError, setActionError] = useState('');
   const [isActionSubmitting, setIsActionSubmitting] = useState(false);
+  const [isApprovalCompleted, setIsApprovalCompleted] = useState(false);
   const [pageError, setPageError] = useState('');
   const [pageNotice, setPageNotice] = useState('');
+  const [pageSuccess, setPageSuccess] = useState('');
   const [formError, setFormError] = useState('');
   const [formState, setFormState] = useState<CollectionFormState>(initialFormState);
   const [manualPaymentKey, setManualPaymentKey] = useState(() => crypto.randomUUID());
@@ -289,10 +291,13 @@ export default function Collections() {
   const getSettledData = <T,>(result: PromiseSettledResult<T>, fallback: T): T =>
     result.status === 'fulfilled' ? result.value : fallback;
 
-  const loadCollections = async () => {
-    setIsLoading(true);
+  const loadCollections = async ({ background = false, preserveNotice = false } = {}) => {
+    if (!background) setIsLoading(true);
     setPageError('');
-    setPageNotice('');
+    if (!preserveNotice) {
+      setPageNotice('');
+      setPageSuccess('');
+    }
 
     try {
       const collectionsResponse = await apiRequest<CollectionsResponse>(
@@ -316,7 +321,7 @@ export default function Collections() {
         ...current,
         received_by_admin_id: current.received_by_admin_id || currentUserId,
       }));
-      setIsLoading(false);
+      if (!background) setIsLoading(false);
 
       const [optionsResult, pendingResult, weeklyStatusResult] = await Promise.allSettled([
         apiRequest<CollectionOptionsResponse>('/collections/options', { cacheTtlMs: 10000, timeoutMs: 15000 }),
@@ -346,7 +351,7 @@ export default function Collections() {
         setPageError('Unable to load collections right now.');
       }
     } finally {
-      setIsLoading(false);
+      if (!background) setIsLoading(false);
     }
   };
 
@@ -418,6 +423,7 @@ export default function Collections() {
     });
     setActionError('');
     setIsActionSubmitting(false);
+    setIsApprovalCompleted(false);
   };
 
   const closeRejectionModal = () => {
@@ -485,11 +491,12 @@ export default function Collections() {
     collectionId: string,
     status: CollectionStatus,
     options?: { admin_received_amount?: number; admin_approval_note?: string; rejection_reason?: string; reversal_reason?: string },
-  ) => {
+  ): Promise<CollectionRecord> => {
     setPageError('');
     try {
+      let response: CollectionMutationResponse;
       if (status === 'approved') {
-        await apiRequest<CollectionMutationResponse>(`/collections/pending-submissions/${collectionId}/confirm`, {
+        response = await apiRequest<CollectionMutationResponse>(`/collections/pending-submissions/${collectionId}/confirm`, {
           method: 'PATCH',
           body: JSON.stringify({
             admin_received_amount: options?.admin_received_amount,
@@ -497,12 +504,12 @@ export default function Collections() {
           }),
         });
       } else if (status === 'rejected') {
-        await apiRequest<CollectionMutationResponse>(`/collections/pending-submissions/${collectionId}/reject`, {
+        response = await apiRequest<CollectionMutationResponse>(`/collections/pending-submissions/${collectionId}/reject`, {
           method: 'PATCH',
           body: JSON.stringify({ rejection_reason: options?.rejection_reason }),
         });
       } else {
-        await apiRequest<CollectionMutationResponse>(`/collections/${collectionId}/status`, {
+        response = await apiRequest<CollectionMutationResponse>(`/collections/${collectionId}/status`, {
           method: 'PATCH',
           body: JSON.stringify({
             status,
@@ -513,7 +520,14 @@ export default function Collections() {
           }),
         });
       }
-      await loadCollections();
+      const updatedCollection = response.data.collection;
+      setPendingCollections((current) => current.filter((item) => item.id !== collectionId));
+      setCollections((current) => {
+        const next = current.map((item) => item.id === collectionId ? updatedCollection : item);
+        const belongsInFilter = statusFilter === 'all' || statusFilter === updatedCollection.status;
+        return belongsInFilter ? next : next.filter((item) => item.id !== collectionId);
+      });
+      return updatedCollection;
     } catch (error) {
       if (error instanceof ApiRequestError) {
         setPageError(error.message);
@@ -588,13 +602,20 @@ export default function Collections() {
 
     setActionError('');
     setIsActionSubmitting(true);
+    setIsApprovalCompleted(false);
 
     try {
-      await handleStatusUpdate(approvalTarget.id, 'approved', {
+      const completedPayment = await handleStatusUpdate(approvalTarget.id, 'approved', {
         admin_received_amount: enteredAmount,
         admin_approval_note: approvalForm.admin_approval_note,
       });
+      setIsApprovalCompleted(true);
+      setPageSuccess(
+        `Payment completed: ${formatCurrency(completedPayment.admin_received_amount ?? completedPayment.amount)} received from ${completedPayment.driver?.full_name || 'driver'}.`,
+      );
+      await new Promise((resolve) => window.setTimeout(resolve, 650));
       closeApprovalModal();
+      void loadCollections({ background: true, preserveNotice: true });
     } catch {
       // Errors are surfaced through actionError/pageError in handleStatusUpdate.
     } finally {
@@ -760,6 +781,15 @@ export default function Collections() {
             >
               Retry
             </button>
+          </div>
+        </div>
+      )}
+
+      {pageSuccess && (
+        <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm font-medium text-green-800" role="status">
+          <div className="flex items-center gap-2">
+            <CheckCircle className="h-5 w-5" />
+            <span>{pageSuccess}</span>
           </div>
         </div>
       )}
@@ -1060,7 +1090,11 @@ export default function Collections() {
             <div className="shrink-0 border-b border-gray-200 px-6 py-4">
               <div className="flex items-start justify-between gap-4">
               <h2 className="text-xl font-semibold text-[#0F172A]">Confirm Driver Payment</h2>
-              <button onClick={closeApprovalModal} className="rounded-lg p-2 transition-all hover:bg-gray-100">
+              <button
+                onClick={closeApprovalModal}
+                disabled={isActionSubmitting}
+                className="rounded-lg p-2 transition-all hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50"
+              >
                 <XCircle className="h-5 w-5 text-gray-500" />
               </button>
               </div>
@@ -1158,17 +1192,24 @@ export default function Collections() {
                 <button
                   type="button"
                   onClick={closeApprovalModal}
-                  className="w-full rounded-lg border border-gray-300 px-4 py-2.5 font-medium text-gray-700 transition-all hover:bg-gray-50 sm:w-auto"
+                  disabled={isActionSubmitting}
+                  className="w-full rounded-lg border border-gray-300 px-4 py-2.5 font-medium text-gray-700 transition-all hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={isActionSubmitting}
-                  className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#2563EB] px-4 py-2.5 font-medium text-white transition-all hover:bg-[#1d4ed8] disabled:cursor-not-allowed disabled:opacity-70 sm:w-auto"
+                  className={`flex w-full items-center justify-center gap-2 rounded-lg px-4 py-2.5 font-medium text-white transition-all disabled:cursor-not-allowed sm:w-auto ${
+                    isApprovalCompleted ? 'bg-green-600' : 'bg-[#2563EB] hover:bg-[#1d4ed8] disabled:opacity-70'
+                  }`}
                 >
-                  {isActionSubmitting && <Loader2 className="h-4 w-4 animate-spin" />}
-                  {isActionSubmitting ? 'Confirming...' : 'Confirm Approval'}
+                  {isApprovalCompleted ? (
+                    <CheckCircle className="h-4 w-4" />
+                  ) : isActionSubmitting ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : null}
+                  {isApprovalCompleted ? 'Completed' : isActionSubmitting ? 'Confirming...' : 'Confirm Approval'}
                 </button>
                 </div>
               </div>

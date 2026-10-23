@@ -220,6 +220,42 @@ class WeeklyRemittanceTests(unittest.TestCase):
         self.assertEqual(stored["confirmation_actor"]["role"], "admin")
         self.assertEqual(self.db.wallet_entries.count_documents({"reference_id": pending["_id"]}), 1)
 
+    def test_confirmation_uses_the_actor_document_already_verified_by_auth(self):
+        actor = self.db.users.find_one({"_id": self.admin_id})
+        self.db.users.delete_one({"_id": self.admin_id})
+        pending = self.payment(800, "2026-07-25", status="pending")
+
+        collection_service.update_collection_status(
+            str(pending["_id"]),
+            "approved",
+            str(self.admin_id),
+            admin_received_amount=800,
+            current_user_document=actor,
+        )
+
+        stored = self.db.collections.find_one({"_id": pending["_id"]})
+        self.assertEqual(stored["status"], "approved")
+        self.assertEqual(stored["approved_by_admin_id"], self.admin_id)
+        self.assertEqual(stored["confirmation_actor"]["full_name"], "Admin")
+
+    def test_confirmation_rejects_an_actor_document_for_another_user(self):
+        from utils.api_error import ApiError
+
+        another_admin = {"_id": ObjectId(), "role": "admin", "status": "active"}
+        pending = self.payment(800, "2026-07-25", status="pending")
+
+        with self.assertRaises(ApiError) as error:
+            collection_service.update_collection_status(
+                str(pending["_id"]),
+                "approved",
+                str(self.admin_id),
+                admin_received_amount=800,
+                current_user_document=another_admin,
+            )
+
+        self.assertEqual(error.exception.status_code, 403)
+        self.assertEqual(self.db.collections.find_one({"_id": pending["_id"]})["status"], "pending")
+
     def test_driver_workspace_cannot_confirm_cash(self):
         from utils.api_error import ApiError
         self.db.users.update_one({"_id": self.admin_id}, {"$set": {

@@ -1,4 +1,4 @@
-from flask import Blueprint, request
+from flask import Blueprint, g, request
 from flask_jwt_extended import get_jwt, get_jwt_identity
 
 from services.collection_service import (
@@ -190,6 +190,7 @@ def update_collection_status_route(collection_id: str):
         rejection_reason=payload.get("reversal_reason") if str(payload.get("status") or "").strip().lower() == "reversed" else payload.get("rejection_reason"),
         admin_received_amount=payload.get("admin_received_amount"),
         admin_approval_note=payload.get("admin_approval_note"),
+        current_user_document=getattr(g, "current_user_document", None),
     )
     return success_response(
         data={"collection": collection},
@@ -207,6 +208,7 @@ def confirm_pending_submission_route(collection_id: str):
         current_user_id=get_jwt_identity(),
         admin_received_amount=payload.get("admin_received_amount"),
         admin_approval_note=payload.get("admin_approval_note"),
+        current_user_document=getattr(g, "current_user_document", None),
     )
     return success_response(
         data={"collection": collection},
@@ -223,6 +225,7 @@ def reject_pending_submission_route(collection_id: str):
         status="rejected",
         current_user_id=get_jwt_identity(),
         rejection_reason=payload.get("rejection_reason"),
+        current_user_document=getattr(g, "current_user_document", None),
     )
     return success_response(
         data={"collection": collection},

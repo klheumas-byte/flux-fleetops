@@ -1,6 +1,6 @@
 from functools import wraps
 
-from flask import current_app, request
+from flask import current_app, g, request
 from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
 
 from utils.responses import error_response
@@ -46,6 +46,10 @@ def _current_account_denial():
             "Your active role has changed or is no longer authorized. Refresh your session.",
             status_code=401,
         )
+    # Keep the exact, live account document that passed authorization available
+    # to the route. Mutations can then bind their audit actor to this document
+    # instead of performing a second lookup that may disagree with auth.
+    g.current_user_document = user
     return None
 
 
